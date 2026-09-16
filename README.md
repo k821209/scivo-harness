@@ -220,3 +220,16 @@ pip's own output is not evidence that anything moved.
 - Guardrail coverage is four rules. The guide documents more that could be hooks.
 - The shim is HTTP/1.1 chunked passthrough on the stdlib server — fine for one
   local session, not a load-bearing proxy.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+The Claude Agent SDK it builds on, and the Claude Code binary that SDK bundles,
+are Anthropic's and carry their own terms: use is governed by Anthropic's
+[Commercial Terms of Service](https://www.anthropic.com/legal/commercial-terms),
+including when it powers something you make available to others. Two conditions
+this harness is built to respect — it does not use the Claude Code name or
+imitate its interface, and it neither supplies, stores nor intermediates
+anyone's credentials: sign-in happens in Claude Code itself, which is where
+Anthropic requires it to happen.
