@@ -18,3 +18,8 @@ __pycache__/
 # on every MCP startup. Committing them would store this machine's paths.
 .claude/skills/
 .claude/agents/
+.claude/settings.local.json
+
+# Written by `scivo setup` and specific to one project — it names a project id.
+# This repo is the harness, not a configured project directory.
+CLAUDE.md
