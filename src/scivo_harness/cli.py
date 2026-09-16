@@ -7,6 +7,7 @@ import asyncio
 import sys
 
 from . import ui
+from .compat import check as check_compat
 from .config import ConfigError, load
 from .failures import explain
 from .preflight import ProjectMismatch, to_markdown
@@ -129,7 +130,13 @@ async def _doctor(args) -> int:
         if identity.get("update_available"):
             print(ui.yellow(f"update      {identity.get('latest_version')} available"))
         tools = await client._session.list_tools()  # noqa: SLF001
-        print(f"tools       {len(tools.tools)} exposed")
+        names = [tool.name for tool in tools.tools]
+        print(f"tools       {len(names)} exposed")
+        compatibility = check_compat(names)
+        line = compatibility.report()
+        print(f"compat      {ui.green(line) if compatibility.ok else ui.red(line)}")
+        if not compatibility.ok:
+            return 1
     return 0 if match is not False else 1
 
 

@@ -47,6 +47,14 @@ def banner(name: str, project_id: str, plan_summary: str, model: str) -> str:
 def attention(briefing) -> list[str]:
     """The lines a researcher needs before typing anything."""
     lines = []
+    # The MCP moves almost daily, so this fires often — which is the point. The
+    # briefing already tells the model; the person running the session is the
+    # one who can do something about it.
+    identity = briefing.identity
+    if identity.get("update_available"):
+        lines.append(yellow(
+            f"  ! MCP {identity.get('latest_version')} available "
+            f"(running {identity.get('installed_version')}) — `scivo update`"))
     for paper in briefing.attention:
         bits = []
         if paper.open_comments:
