@@ -69,6 +69,50 @@ def mcp_config(key: str, interpreter: str | None = None) -> dict:
     }
 
 
+def environment_note() -> str | None:
+    """Warn when scivo landed in a shared environment rather than its own.
+
+    Hit by the first person to install this: `pip` resolved to a conda env that
+    was not the active one — `CONDA_DEFAULT_ENV` said base while PATH put an
+    env's bin first — so the install went somewhere they had not chosen. Two
+    things followed. A second `scivo` appeared ahead of theirs on PATH, and
+    `co-scientist-local`, pulled in as a dependency from git, replaced the
+    EDITABLE install that every project on the machine was running. Both were
+    silent; pip reported success.
+
+    The install command cannot be made safe by wording, so say it here, where
+    we know which interpreter actually ran.
+    """
+    import importlib.metadata as md
+    import json
+
+    prefix = Path(sys.prefix)
+    dedicated = sys.prefix != sys.base_prefix and not (prefix / "conda-meta").is_dir()
+    if dedicated:
+        return None
+
+    lines = [
+        f"scivo is installed in a shared environment: {sys.prefix}",
+        "  A dedicated virtualenv avoids two problems this one has:",
+        "    · its `scivo` can sit ahead of another on PATH (see `scivo doctor`)",
+        "    · installing here can replace an editable co-scientist-local that",
+        "      other projects on this machine are running",
+    ]
+    try:
+        raw = md.distribution("co-scientist-local").read_text("direct_url.json") or "{}"
+        url = json.loads(raw)
+        if not url.get("dir_info", {}).get("editable") and str(url.get("url", "")).startswith("http"):
+            lines.append("  This environment's co-scientist-local is a snapshot from git, not an")
+            lines.append("  editable checkout. If it used to be editable, restore it with:")
+            lines.append("    pip install -e <your co-scientist-mcp-public>/apps/local-mcp --no-deps")
+    except Exception:  # noqa: BLE001 - absent or unreadable metadata is not our problem here
+        pass
+    lines.append("  To move scivo out: python3 -m venv ~/.scivo && "
+                 '~/.scivo/bin/pip install "scivo-harness @ '
+                 'git+https://github.com/k821209/scivo-harness.git"')
+    return "\n".join(lines)
+
+
 def check_mcp_importable(interpreter: str | None = None) -> None:
     interpreter = interpreter or sys.executable
     probe = subprocess.run(
@@ -78,7 +122,8 @@ def check_mcp_importable(interpreter: str | None = None) -> None:
         raise SetupError(
             f"{interpreter} cannot import co_scientist_local.\n"
             "It normally installs as a dependency of this harness. Reinstall with:\n"
-            '  pip install --upgrade "scivo-harness @ git+https://github.com/k821209/scivo-harness.git"'
+            "  python3 -m venv ~/.scivo && ~/.scivo/bin/pip install \\\n"
+            '    "scivo-harness @ git+https://github.com/k821209/scivo-harness.git"'
         )
 
 

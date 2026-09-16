@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import warnings
+
 from claude_agent_sdk import ClaudeAgentOptions
+from claude_agent_sdk.types import CanUseToolShadowedWarning
 
 from . import guardrails, prompt, toolsets
 from .config import ScivoConfig
@@ -31,6 +34,7 @@ class Session:
     config: ScivoConfig
     provider: Provider
     model: str
+    approver: Any = None
 
 
 async def survey(config: ScivoConfig, *, with_guide: bool) -> tuple[Briefing, list[str], str | None]:
@@ -62,8 +66,11 @@ async def build(
     model: str | None = None,
     effort: str = DEFAULT_EFFORT,
     with_guide: bool = True,
+    interactive: bool = True,
+    permission_mode: str = "default",
     resume: str | None = None,
     max_budget_usd: float | None = None,
+    add_dirs: list[str] | None = None,
 ) -> Session:
     chosen = provider if isinstance(provider, Provider) else get_provider(provider)
     model = model or chosen.model or DEFAULT_MODEL
@@ -72,12 +79,26 @@ async def build(
     plan = toolsets.plan(tool_names, profile=profile, read_only=read_only)
     rails = guardrails.Guardrails()
 
+    # Without a callback there is no channel to ask on, so anything outside
+    # `allowed_tools` is denied with a message nobody can act on. An explicit
+    # mode means the user has already decided, so we stay out of the way.
+    from .permissions import Approvals, Explain
+
+    approver = None
+    if permission_mode == "default":
+        approver = Approvals() if interactive else Explain(permission_mode, str(config.root))
+
     mcp_server: dict[str, Any] = {
         "type": "stdio",
         "command": config.command,
         "args": config.args,
         "env": config.env,
     }
+
+    # The SDK warns that `allowed_tools` auto-approves before the callback runs.
+    # That is the design: the read-only surface needs no approval, and asking
+    # about `list_papers` would train people to answer yes without reading.
+    warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
 
     options = ClaudeAgentOptions(
         system_prompt={
@@ -91,19 +112,21 @@ async def build(
         hooks=guardrails.build(rails),
         setting_sources=["user", "project", "local"],
         skills="all",
-        permission_mode="default",
+        permission_mode=permission_mode,
+        can_use_tool=approver,
         model=model,
         # A local model behind a shim has no effort parameter; sending one is
         # a 400 from some proxies and silently ignored by others.
         effort=effort if chosen.supports_effort else None,
         env=chosen.resolve_env(),
         cwd=str(config.root),
+        add_dirs=list(add_dirs or []),
         resume=resume,
         max_budget_usd=max_budget_usd,
         include_partial_messages=True,
     )
     return Session(options=options, briefing=briefing, plan=plan, rails=rails,
-                   config=config, provider=chosen, model=model)
+                   config=config, provider=chosen, model=model, approver=approver)
 
 
 def scivo_tool_label(name: str) -> str:

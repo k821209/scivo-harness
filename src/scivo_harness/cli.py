@@ -7,7 +7,7 @@ import asyncio
 import sys
 
 from . import ui
-from .compat import check as check_compat
+from .compat import check as check_compat, shadowing_binaries
 from .config import ConfigError, load
 from .failures import explain
 from .preflight import ProjectMismatch, to_markdown
@@ -27,6 +27,7 @@ from .setup import (
     SetupError,
     check_mcp_importable,
     ensure_claude_md,
+    environment_note,
     ensure_gitignore,
     link_skills as link_setup_skills,
     roll_back,
@@ -57,6 +58,12 @@ def _parser() -> argparse.ArgumentParser:
                         help="override the provider's model")
     parser.add_argument("--effort", default=DEFAULT_EFFORT,
                         choices=["low", "medium", "high", "xhigh", "max"])
+    parser.add_argument("--add-dir", action="append", default=[], metavar="PATH",
+                        help="let the session reach this directory too; repeatable")
+    parser.add_argument("--permission-mode", default="default",
+                        choices=["default", "acceptEdits", "plan", "dontAsk",
+                                 "bypassPermissions", "auto"],
+                        help="default asks you (interactive) or explains why it cannot (run)")
     parser.add_argument("--no-guide", action="store_true",
                         help="skip the project guide in the system prompt")
     parser.add_argument("--budget", type=float, default=None, metavar="USD",
@@ -103,6 +110,12 @@ async def _status(args) -> int:
 
 async def _doctor(args) -> int:
     config = load()
+    shadows = shadowing_binaries()
+    if shadows:
+        print(ui.red(f"scivo        {len(shadows)} copies on PATH — the first one runs:"))
+        for index, path in enumerate(shadows):
+            print(f"             {'→' if index == 0 else ' '} {path}")
+        print(ui.dim("             Uninstall the ones you do not want, or call one by full path."))
     provider = get_provider(args.provider)
     print(f"config      {config.source}")
     print(f"provider    {provider.name} → {provider.base_url or 'api.anthropic.com'}"
@@ -162,6 +175,7 @@ async def _setup(args) -> int:
 
     result = Result()
     check_mcp_importable()
+    shared = environment_note()
     mcp_path, backup = write_mcp_json(root, key, args.force, result)
     ensure_gitignore(root, result)
     link_setup_skills(root, result)
@@ -190,6 +204,10 @@ async def _setup(args) -> int:
         print(f"  {ui.green('✓')} {step}")
     for warning in result.warnings:
         print(f"  {ui.yellow('!')} {warning}")
+    if shared:
+        print()
+        for index, line in enumerate(shared.splitlines()):
+            print(ui.yellow(f"  ! {line}") if index == 0 else ui.dim(f"  {line}"))
     print()
     print(f"project     {identity.get('project_name')} ({bound})")
     print(f"mcp         {identity.get('installed_version')} @ {identity.get('git_sha')}")
@@ -341,8 +359,11 @@ async def _chat(args, prompt_text: str | None = None) -> int:
         model=args.model,
         effort=args.effort,
         with_guide=not args.no_guide,
+        interactive=prompt_text is None,
+        permission_mode=args.permission_mode,
         resume=args.resume,
         max_budget_usd=args.budget,
+        add_dirs=args.add_dir,
     )
     if prompt_text is not None:
         from claude_agent_sdk import AssistantMessage, TextBlock, query

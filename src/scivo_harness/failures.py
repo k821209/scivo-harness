@@ -13,6 +13,7 @@ from pathlib import Path
 AUTH_MARKERS = ("authenticate", "401", "api key is invalid", "not logged in",
                 "invalid api key", "oauth", "unauthorized")
 OVERLOAD_MARKERS = ("429", "rate limit", "overloaded", "529")
+REFUSAL_MARKERS = ("refusal", "declined to", "stop_details")
 
 
 def claude_binary() -> str:
@@ -40,6 +41,20 @@ def explain(error: Exception) -> str | None:
             "Already signed in? An ANTHROPIC_API_KEY in your environment takes "
             "precedence over that login — check with `scivo doctor`.\n"
             "Using a local model instead? `scivo --provider <name>`."
+        )
+
+    if any(marker in text for marker in REFUSAL_MARKERS):
+        return (
+            "The model declined this request.\n\n"
+            "Nothing in this harness filters content — the refusal came from the "
+            "model, and it is reported rather than hidden.\n"
+            "If the work is legitimate and the phrasing tripped it, the usual fix "
+            "is to say what the result is for: the paper, the method, the reader. "
+            "Scientific subjects that sound sensitive are ordinary work, and the "
+            "context is what makes that visible.\n"
+            "If it keeps declining something you believe it should do, that is "
+            "worth reporting — `report_feedback` for the harness, and Anthropic "
+            "for the model."
         )
 
     if any(marker in text for marker in OVERLOAD_MARKERS):

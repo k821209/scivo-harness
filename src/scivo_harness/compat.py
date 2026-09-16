@@ -105,3 +105,24 @@ def check(tools: list) -> Compatibility:
 
     return Compatibility(present=sorted(present), missing=missing, drifted=drifted,
                          total_tools=len(by_name))
+
+
+def shadowing_binaries() -> list[str]:
+    """Every `scivo` on PATH, when there is more than one.
+
+    Found the hard way: a second copy installed into another environment took
+    precedence and ran stale code for an hour, with every symptom pointing at
+    the code that was being edited. The environments were both this package —
+    which is exactly why nothing looked wrong.
+    """
+    import shutil
+    import os
+
+    seen: list[str] = []
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = os.path.join(directory, "scivo")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            resolved = os.path.realpath(candidate)
+            if resolved not in seen:
+                seen.append(resolved)
+    return seen if len(seen) > 1 else []

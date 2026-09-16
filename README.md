@@ -169,16 +169,34 @@ system messages anywhere is cleaner when restarting that server is free.
 
 ## Install
 
-One command. The Scivo MCP is a dependency, and the Agent SDK bundles the Claude
-Code binary, so nothing else is fetched by hand:
+**Install it into its own virtualenv.** The Scivo MCP comes with it as a
+dependency, and the Agent SDK bundles the Claude Code binary, so this is
+everything:
 
 ```bash
-pip install "scivo-harness @ git+https://github.com/k821209/scivo-harness.git"
+python3 -m venv ~/.scivo
+~/.scivo/bin/pip install "scivo-harness @ git+https://github.com/k821209/scivo-harness.git"
+ln -sf ~/.scivo/bin/scivo ~/.local/bin/scivo      # or put ~/.scivo/bin on PATH
+```
+
+Then, in each project:
+
+```bash
 cd /path/to/your/project
 scivo setup --key csk_… --project <project id>
 ```
 
-`setup` writes `.mcp.json` (mode 600), adds it to `.gitignore`, links the 28
+**Why its own virtualenv, and not just `pip install`.** The first person to
+install this ran a bare `pip`, which resolved to a conda environment that was
+not the active one — `CONDA_DEFAULT_ENV` said `base` while PATH put an env's
+`bin` first. Two things followed, both silent, both reported by pip as success:
+a second `scivo` appeared ahead of theirs on PATH, and `co-scientist-local`,
+pulled in from git as a dependency, replaced the **editable** install that every
+project on that machine was running. A dedicated virtualenv has neither failure
+available to it. `scivo setup` says so when it finds itself somewhere shared,
+and `scivo doctor` reports a second `scivo` on PATH.
+
+`setup` writes `.mcp.json` (mode 600), adds it to `.gitignore`, links the
 skills, and then **connects and checks** that the key binds to the project you
 named — a mismatch fails here rather than surfacing as a confusing warning in
 some later session. It refuses to overwrite an existing `.mcp.json` without
