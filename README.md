@@ -4,12 +4,14 @@ A command-line harness for the Scivo research co-scientist, built on the
 [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview).
 
 ```bash
+scivo setup --key csk_…    # wire this directory to a Scivo project
 scivo                      # interactive session
 scivo status               # the session-start protocol, printed. No model call, no cost
 scivo doctor               # check the wiring
 scivo tools                # what each tool profile loads
 scivo run "..."            # one prompt, non-interactive
 scivo providers            # configured model endpoints
+scivo update               # update scivo + the MCP, re-link skills
 ```
 
 ## Why this exists
@@ -167,21 +169,47 @@ system messages anywhere is cleaner when restarting that server is free.
 
 ## Install
 
+One command. The Scivo MCP is a dependency, and the Agent SDK bundles the Claude
+Code binary, so nothing else is fetched by hand:
+
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e .
-.venv/bin/scivo doctor
+pip install "scivo-harness @ git+<repo url>"
+cd /path/to/your/project
+scivo setup --key csk_… --project <project id>
 ```
 
-Needs three things:
+`setup` writes `.mcp.json` (mode 600), adds it to `.gitignore`, links the 28
+skills, and then **connects and checks** that the key binds to the project you
+named — a mismatch fails here rather than surfacing as a confusing warning in
+some later session. It refuses to overwrite an existing `.mcp.json` without
+`--force`, and if verification fails after `--force` it puts the old one back
+rather than leaving you with a `.bak`.
 
-- the `claude` CLI on PATH — the Agent SDK drives it
-- a `.mcp.json` bound to a Scivo project, or `CO_SCIENTIST_API_KEY` in the
-  environment
-- **`ANTHROPIC_API_KEY`**, or a configured endpoint passed with `--provider`
+It does not search for a Python that can import the MCP. The dashboard's shell
+script spends twenty lines on that, because it writes `python3` into
+`.mcp.json` and PATH resolves differently under another shell or conda
+environment — "it worked yesterday", with nothing to read. Here the MCP is a
+dependency of the harness, so the interpreter is the one running `setup`.
 
-The last one is checked before the session starts. Without it the run is refused
-rather than falling through to whatever login happens to sit on the machine —
-which would bill an account nobody chose, and does so silently.
+**Authentication is not ours.** The harness sets no credentials and stores none;
+the bundled Claude Code binary resolves its own, exactly as it does when run by
+hand. Sign in with `claude auth login` — Anthropic requires it to happen there —
+or export `ANTHROPIC_API_KEY`, or point `--provider` at a local endpoint.
+
+## Updating
+
+```bash
+scivo update            # scivo, the MCP, and the skills
+scivo update --check    # say what would happen; change nothing
+```
+
+It asks each interpreter how its distribution was installed, because the two
+kinds fail differently and both are documented as having bitten someone: `pip
+install --upgrade` on an editable install is a no-op that prints success, and a
+git URL whose version did not change reads as "already satisfied". So it runs
+`git pull` for one and `--force-reinstall` for the other, then re-reads the
+version, the `git_sha` from a fresh server process, and the commit pip recorded.
+pip's own output is not evidence that anything moved.
 
 ## Not done yet
 

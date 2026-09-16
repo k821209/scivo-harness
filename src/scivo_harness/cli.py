@@ -21,6 +21,16 @@ from .providers import (
     write_example,
 )
 from .scivo_mcp import connect
+from .setup import (
+    Result,
+    SetupError,
+    check_mcp_importable,
+    ensure_claude_md,
+    ensure_gitignore,
+    link_skills as link_setup_skills,
+    roll_back,
+    write_mcp_json,
+)
 from .update import (
     apply as apply_update,
     inspect as inspect_install,
@@ -62,6 +72,11 @@ def _parser() -> argparse.ArgumentParser:
                            help="write the tokenless skeleton to .scivo/providers.toml")
     providers.add_argument("--show-example", action="store_true",
                            help="print the skeleton")
+    setup = sub.add_parser("setup", help="wire this directory to a Scivo project")
+    setup.add_argument("--key", help="the project API key (else $CO_SCIENTIST_API_KEY, else prompt)")
+    setup.add_argument("--project", help="expected project id; setup fails if the key binds elsewhere")
+    setup.add_argument("--force", action="store_true", help="replace an existing .mcp.json")
+
     update = sub.add_parser("update", help="update scivo and the Scivo MCP, and re-link skills")
     update.add_argument("--check", action="store_true",
                         help="report what would happen; change nothing")
@@ -124,6 +139,57 @@ async def _sha(config) -> tuple[str, str]:
         who = await client.call("whoami")
         identity = who.first if who and isinstance(who.first, dict) else {}
         return str(identity.get("git_sha", "?")), str(identity.get("installed_version", "?"))
+
+
+async def _setup(args) -> int:
+    import getpass
+    import os
+    from pathlib import Path
+
+    root = Path.cwd()
+    key = args.key or os.environ.get("CO_SCIENTIST_API_KEY")
+    if not key and sys.stdin.isatty():
+        key = getpass.getpass("Project API key (from the dashboard Setup tab): ").strip()
+    if not key:
+        print(ui.red("No key. Pass --key, or set CO_SCIENTIST_API_KEY."), file=sys.stderr)
+        return 2
+
+    result = Result()
+    check_mcp_importable()
+    mcp_path, backup = write_mcp_json(root, key, args.force, result)
+    ensure_gitignore(root, result)
+    link_setup_skills(root, result)
+
+    # Verify against a real server before claiming the directory is set up.
+    config = load(root)
+    async with connect(config) as client:
+        who = await client.call("whoami")
+        if not who:
+            undone = roll_back(mcp_path, backup)
+            print(ui.red(f"the MCP did not start: {who.error}\n{undone}"), file=sys.stderr)
+            return 1
+        identity = who.first or {}
+
+    bound = str(identity.get("project_id", "?"))
+    if args.project and args.project != bound:
+        undone = roll_back(mcp_path, backup)
+        print(ui.red(
+            f"That key binds to project {bound}, not {args.project}.\n{undone}\n"
+            "Take the key and the id from the SAME project's Setup tab."), file=sys.stderr)
+        return 1
+
+    ensure_claude_md(root, bound, str(identity.get("project_name") or bound), result)
+
+    for step in result.steps:
+        print(f"  {ui.green('✓')} {step}")
+    for warning in result.warnings:
+        print(f"  {ui.yellow('!')} {warning}")
+    print()
+    print(f"project     {identity.get('project_name')} ({bound})")
+    print(f"mcp         {identity.get('installed_version')} @ {identity.get('git_sha')}")
+    print()
+    print("Next: " + ui.bold("scivo") + ui.dim("   (or `scivo status` to see the briefing first)"))
+    return 0
 
 
 async def _update_one(install, check: bool) -> tuple[bool, bool]:
@@ -298,13 +364,14 @@ def main(argv: list[str] | None = None) -> int:
         "providers": _providers,
         "shim": _shim,
         "update": _update,
+        "setup": _setup,
         "run": lambda a: _chat(a, " ".join(a.prompt)),
         "chat": _chat,
         None: _chat,
     }
     try:
         return asyncio.run(handlers[args.command](args))
-    except (ConfigError, ProjectMismatch, ProviderError) as exc:
+    except (ConfigError, ProjectMismatch, ProviderError, SetupError) as exc:
         print(ui.red(str(exc)), file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - the CLI's failures arrive as these
