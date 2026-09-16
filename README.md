@@ -172,8 +172,16 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/scivo doctor
 ```
 
-Needs the `claude` CLI on PATH (the SDK drives it) and a `.mcp.json` bound to a
-Scivo project, or `CO_SCIENTIST_API_KEY` in the environment.
+Needs three things:
+
+- the `claude` CLI on PATH — the Agent SDK drives it
+- a `.mcp.json` bound to a Scivo project, or `CO_SCIENTIST_API_KEY` in the
+  environment
+- **`ANTHROPIC_API_KEY`**, or a configured endpoint passed with `--provider`
+
+The last one is checked before the session starts. Without it the run is refused
+rather than falling through to whatever login happens to sit on the machine —
+which would bill an account nobody chose, and does so silently.
 
 ## Not done yet
 

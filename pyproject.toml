@@ -9,11 +9,22 @@ description = "A command-line harness for the Scivo research co-scientist"
 requires-python = ">=3.11"
 dependencies = [
     "claude-agent-sdk>=0.2.153",
-    "mcp>=2.0",
+    # Match co-scientist-local, which pins mcp<2. Our use is ClientSession /
+    # stdio_client / call_tool / list_tools, unchanged across both.
+    "mcp>=1.2",
+    "prompt_toolkit>=3.0",
+    # The Scivo MCP itself, so one install gets the whole harness. It is not on
+    # PyPI, so this is a direct URL; that rules out publishing THIS package to
+    # PyPI too, which is fine — it installs from git or a private index.
+    "co-scientist-local @ git+https://github.com/k821209/co-scientist-mcp-public.git#subdirectory=apps/local-mcp",
 ]
 
 [project.scripts]
 scivo = "scivo_harness.cli:main"
+
+# Required for the git dependency above.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scivo_harness"]

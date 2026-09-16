@@ -8,10 +8,12 @@ import sys
 
 from . import ui
 from .config import ConfigError, load
+from .failures import explain
 from .preflight import ProjectMismatch, to_markdown
 from .providers import (
     EXAMPLE_FILE,
     ProviderError,
+    auth_source,
     example_text,
     get as get_provider,
     load_all,
@@ -19,6 +21,13 @@ from .providers import (
     write_example,
 )
 from .scivo_mcp import connect
+from .update import (
+    apply as apply_update,
+    inspect as inspect_install,
+    has_remote,
+    link_skills,
+    repo_root,
+)
 from .session import DEFAULT_EFFORT, build, survey
 from .toolsets import PROFILES, plan as make_plan
 
@@ -53,6 +62,11 @@ def _parser() -> argparse.ArgumentParser:
                            help="write the tokenless skeleton to .scivo/providers.toml")
     providers.add_argument("--show-example", action="store_true",
                            help="print the skeleton")
+    update = sub.add_parser("update", help="update scivo and the Scivo MCP, and re-link skills")
+    update.add_argument("--check", action="store_true",
+                        help="report what would happen; change nothing")
+    update.add_argument("--no-self", action="store_true",
+                        help="update only the MCP, leaving scivo itself alone")
     shim = sub.add_parser(
         "shim", help="proxy a local server whose chat template rejects mid-conversation system messages")
     shim.add_argument("--upstream", default="http://localhost:8190")
@@ -77,6 +91,7 @@ async def _doctor(args) -> int:
     print(f"config      {config.source}")
     print(f"provider    {provider.name} → {provider.base_url or 'api.anthropic.com'}"
           f" ({provider.source})")
+    print(f"auth        {auth_source(provider)}")
     if provider.is_local:
         ok, detail = probe(provider)
         print(f"endpoint    {ui.green(detail) if ok else ui.red(detail)}")
@@ -101,6 +116,97 @@ async def _doctor(args) -> int:
         tools = await client._session.list_tools()  # noqa: SLF001
         print(f"tools       {len(tools.tools)} exposed")
     return 0 if match is not False else 1
+
+
+async def _sha(config) -> tuple[str, str]:
+    """git_sha + version, read from a FRESH server process."""
+    async with connect(config) as client:
+        who = await client.call("whoami")
+        identity = who.first if who and isinstance(who.first, dict) else {}
+        return str(identity.get("git_sha", "?")), str(identity.get("installed_version", "?"))
+
+
+async def _update_one(install, check: bool) -> tuple[bool, bool]:
+    """Returns (ok, moved). Prints its own progress."""
+    label = install.dist
+    if install.error:
+        print(f"  {label:20} {ui.red(install.error.splitlines()[-1][:90])}")
+        return False, False
+    if not install.found:
+        print(f"  {label:20} {ui.dim('not installed here')}")
+        return True, False
+
+    kind = "editable" if install.editable else (install.url or "unrecorded source")
+    # An editable install reports the version frozen when it was installed —
+    # 0.0.1 here while the server actually runs 0.1.20260911. Printing it as if
+    # it were current is how that trap gets believed.
+    version = f"{install.version} (frozen at install)" if install.editable else install.version
+    stamp = f" @ {install.commit_id[:8]}" if install.commit_id else ""
+    print(f"  {label:20} {version}{stamp}  {ui.dim(kind)}")
+
+    if check:
+        if install.editable:
+            root = repo_root(str(install.source_path))
+            if root is None:
+                how = "no git checkout above it — skip"
+            elif not has_remote(root):
+                how = f"{root} has no remote — skip"
+            else:
+                how = f"git pull --ff-only in {root}"
+        else:
+            how = f"pip install --upgrade --force-reinstall --no-deps {install.requirement}"
+        print(ui.dim(f"  {'':20} would run: {how}"))
+        return True, False
+
+    ok, output = apply_update(install)
+    for line in output.splitlines()[-4:]:
+        print(ui.dim(f"  {'':20} {line[:100]}"))
+    if not ok:
+        print(f"  {'':20} {ui.red('failed')}")
+        return False, False
+
+    after = inspect_install(install.interpreter, install.dist)
+    moved = after.fingerprint != install.fingerprint
+    return True, moved
+
+
+async def _update(args) -> int:
+    config = load()
+    targets = [("co-scientist-local", config.command)]
+    if not args.no_self:
+        targets.append(("scivo-harness", sys.executable))
+
+    print(f"project     {config.root}")
+    before_sha, before_version = await _sha(config)
+    print(f"mcp session {before_version} @ {before_sha}")
+    print()
+
+    failed = False
+    moved_any = False
+    for dist, interpreter in targets:
+        ok, moved = await _update_one(inspect_install(interpreter, dist), args.check)
+        failed = failed or not ok
+        moved_any = moved_any or moved
+
+    if args.check:
+        return 0
+
+    linked, link_output = link_skills(config)
+    print(ui.dim(f"  {'skills':20} {'re-linked' if linked else link_output[:90]}"))
+
+    after_sha, after_version = await _sha(config)
+    print()
+    print(f"mcp session {after_version} @ {after_sha}")
+    if failed:
+        print(ui.red("one or more components failed to update."))
+        return 1
+    # pip prints success whether or not anything moved, so the verdict comes
+    # from re-reading the installs and a fresh server process, not from pip.
+    if moved_any or (after_sha, after_version) != (before_sha, before_version):
+        print(ui.green("updated. Restart any running scivo session to pick it up."))
+    else:
+        print(ui.yellow("unchanged — everything was already current."))
+    return 0
 
 
 async def _shim(args) -> int:
@@ -191,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         "tools": _tools,
         "providers": _providers,
         "shim": _shim,
+        "update": _update,
         "run": lambda a: _chat(a, " ".join(a.prompt)),
         "chat": _chat,
         None: _chat,
@@ -200,6 +307,12 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, ProjectMismatch, ProviderError) as exc:
         print(ui.red(str(exc)), file=sys.stderr)
         return 2
+    except Exception as exc:  # noqa: BLE001 - the CLI's failures arrive as these
+        message = explain(exc)
+        if message is None:
+            raise
+        print(ui.red(message), file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         return 130
 

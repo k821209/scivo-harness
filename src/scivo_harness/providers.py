@@ -22,6 +22,15 @@ from pathlib import Path
 
 BUILTIN_NAME = "anthropic"
 
+# Credentials the harness never supplies, stores or intermediates. We set none
+# of these; the bundled Claude Code binary resolves its own, exactly as it does
+# when run by hand. Anthropic's terms require sign-in to complete through their
+# own flow, and restricting an authentication method built into the binary is
+# not permitted either — so the harness stays out of the way entirely.
+API_KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+
 SEARCH_PATHS = (
     lambda: Path.cwd() / ".scivo" / "providers.toml",
     lambda: Path.home() / ".config" / "scivo" / "providers.toml",
@@ -115,6 +124,22 @@ def load_all() -> dict[str, Provider]:
     return providers
 
 
+def auth_source(provider: Provider) -> str:
+    """What will authenticate this session, as far as we can tell from here.
+
+    Deliberately does not try to detect a stored login: Claude Code keeps it in
+    a file on Linux and in the Keychain on macOS, so a file check reports "none"
+    on a machine that is perfectly logged in. We report what we set, and leave
+    the rest to the CLI.
+    """
+    if provider.base_url:
+        return f"provider token ({provider.name})"
+    for var in API_KEY_VARS:
+        if os.environ.get(var):
+            return f"${var}"
+    return "whatever `claude` already uses on this machine"
+
+
 def get(name: str) -> Provider:
     providers = load_all()
     if name not in providers:
@@ -143,7 +168,7 @@ def write_example(destination: Path) -> Path:
     return destination
 
 
-def probe(provider: Provider, timeout: float = 90.0) -> tuple[bool, str]:
+def probe(provider: Provider, timeout: float = 180.0) -> tuple[bool, str]:
     """Ask the endpoint for one tool call and report what came back.
 
     A local server that only serves OpenAI chat-completions answers /v1/messages
@@ -185,7 +210,13 @@ def probe(provider: Provider, timeout: float = 90.0) -> tuple[bool, str]:
         hint = " — serves OpenAI chat-completions only? put a LiteLLM proxy in front" \
             if exc.code == 404 else ""
         return False, f"HTTP {exc.code} on /v1/messages{hint}"
-    except Exception as exc:  # noqa: BLE001 - connection refused, timeout, bad JSON
+    except TimeoutError:
+        # A local server shared with something else, or one reloading the model,
+        # looks identical to a dead endpoint here. Say which we cannot tell.
+        return False, (f"no response in {timeout:.0f}s — the route answered earlier, so the "
+                       "server is likely busy or reloading the model rather than wrong. "
+                       "Check it directly: curl " + provider.base_url.rstrip("/") + "/v1/models")
+    except Exception as exc:  # noqa: BLE001 - connection refused, bad JSON
         return False, f"{type(exc).__name__}: {exc}"
 
     if payload.get("type") != "message":

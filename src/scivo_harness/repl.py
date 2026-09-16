@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
@@ -18,7 +17,10 @@ from claude_agent_sdk import (
 
 from . import ui
 from .preflight import to_markdown
+from .failures import explain
+from .prompt_line import Line
 from .session import Session, scivo_tool_label
+from .skills import discover
 
 LOCAL_COMMANDS = {
     "/exit": "leave",
@@ -51,6 +53,8 @@ class Repl:
         self.cost = 0.0
         self.turns = 0
         self._streamed = ""
+        self.skills = discover(session.config.root)
+        self.line = Line(session.config.root, LOCAL_COMMANDS, self.skills)
 
     # ------------------------------------------------------------ rendering
 
@@ -103,7 +107,8 @@ class Repl:
             print()
             for name, description in LOCAL_COMMANDS.items():
                 print(f"  {ui.cyan(name):<22} {description}")
-            print(ui.dim("\n  any other /name runs the skill of that name.\n"))
+            print(ui.dim(f"\n  and {len(self.skills)} skills — press / to list them"
+                         + ("" if self.line.rich else " (see `scivo status`)") + "\n"))
         elif command == "/status":
             print("\n" + to_markdown(self.session.briefing) + "\n")
         elif command == "/blocked":
@@ -142,7 +147,7 @@ class Repl:
         async with ClaudeSDKClient(options=self.session.options) as client:
             while True:
                 try:
-                    line = (await asyncio.to_thread(input, ui.cyan("scivo› "))).strip()
+                    line = (await self.line.ask(ui.cyan("scivo› "), "scivo> ")).strip()
                 except (EOFError, KeyboardInterrupt):
                     print()
                     break
@@ -166,4 +171,9 @@ class Repl:
                 except KeyboardInterrupt:
                     await client.interrupt()
                     print(ui.yellow("\n  interrupted\n"))
+                except Exception as exc:  # noqa: BLE001
+                    # One failed turn should not end the session: the briefing
+                    # and the conversation so far are worth more than the turn.
+                    message = explain(exc)
+                    print(ui.red(f"\n  {message or f'{type(exc).__name__}: {exc}'}\n"))
         print(ui.dim(f"session total ${self.cost:.4f}"))
