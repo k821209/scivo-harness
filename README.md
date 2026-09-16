@@ -173,7 +173,7 @@ One command. The Scivo MCP is a dependency, and the Agent SDK bundles the Claude
 Code binary, so nothing else is fetched by hand:
 
 ```bash
-pip install "scivo-harness @ git+<repo url>"
+pip install "scivo-harness @ git+https://github.com/k821209/scivo-harness.git"
 cd /path/to/your/project
 scivo setup --key csk_… --project <project id>
 ```

@@ -78,7 +78,7 @@ def check_mcp_importable(interpreter: str | None = None) -> None:
         raise SetupError(
             f"{interpreter} cannot import co_scientist_local.\n"
             "It normally installs as a dependency of this harness. Reinstall with:\n"
-            '  pip install --upgrade "scivo-harness @ git+<repo url>"'
+            '  pip install --upgrade "scivo-harness @ git+https://github.com/k821209/scivo-harness.git"'
         )
 
 
