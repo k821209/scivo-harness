@@ -1,0 +1,20 @@
+
+# co-scientist: both contain the project API key in clear text. The setup
+# script ignores .mcp.json but not itself, and it carries the same key.
+# Re-download it from the dashboard's Setup tab when needed.
+.mcp.json
+setup-scivo-harness.sh
+
+# harness
+.venv/
+__pycache__/
+*.egg-info/
+
+# local model endpoints may carry a token. The tokenless skeleton ships in the
+# package (scivo providers --init writes a copy here).
+.scivo/
+
+# MCP-managed: absolute symlinks into the co_scientist_local install, relinked
+# on every MCP startup. Committing them would store this machine's paths.
+.claude/skills/
+.claude/agents/

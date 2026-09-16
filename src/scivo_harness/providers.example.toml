@@ -1,0 +1,67 @@
+# scivo model endpoints. This is the skeleton; it ships with the package and is
+# the only copy, so it cannot drift from the documentation.
+#
+#   scivo providers --init             writes .scivo/providers.toml from this
+#   scivo --provider local doctor      probes the endpoint before you rely on it
+#   scivo --provider local
+#
+# .scivo/ is gitignored because providers.toml can carry a token. THIS file is
+# tracked and must never contain one — for a real secret use auth_token_env and
+# keep the value in the environment.
+#
+# Search order: $SCIVO_PROVIDERS, ./.scivo/providers.toml,
+# ~/.config/scivo/providers.toml. `anthropic` is built in and needs no entry.
+#
+# Every key is optional except base_url.
+#
+#   base_url           the endpoint. Must serve Anthropic /v1/messages INCLUDING
+#                      tool_use — an agent loop is tool calls. Omit for the
+#                      Anthropic API.
+#   model              what the server calls the model (see its /v1/models)
+#   small_model        used for the CLI's own small calls (titles, summaries).
+#                      Set it too, or those calls go to a model that isn't there.
+#   auth_token         literal token. Local servers ignore the value but the CLI
+#                      requires one. NEVER put a real secret here.
+#   auth_token_env     name of an environment variable to read the token from.
+#                      Use this for anything real.
+#   supports_effort    false for non-Anthropic models — effort/thinking are
+#                      Anthropic-model features and a proxy may 400 on them.
+#   max_output_tokens  caps the CLI's output request.
+#   note               shown by `scivo providers`.
+#   env                extra environment variables for the CLI subprocess.
+
+# ── a local llama.cpp server ────────────────────────────────────────────────
+# Recent llama-server serves /v1/messages with tool_use natively, so nothing
+# sits in front. Verified against Qwen3.8-27B on a GB10.
+[local]
+base_url = "http://localhost:8190"
+model = "REPLACE-ME"                  # e.g. the id from GET /v1/models
+small_model = "REPLACE-ME"
+auth_token = "unused"                 # not a secret; the CLI just requires a value
+supports_effort = false
+max_output_tokens = 8192
+note = "local llama-server"
+
+# ── the same server, behind `scivo shim` ────────────────────────────────────
+# Needed when the model's chat template rejects mid-conversation system
+# messages ("System message must be at the beginning"), which Qwen3's does and
+# Claude Code emits. Start it with:
+#     scivo shim --upstream http://localhost:8190 --port 8191
+[local-shim]
+base_url = "http://localhost:8191"
+model = "REPLACE-ME"
+small_model = "REPLACE-ME"
+auth_token = "unused"
+supports_effort = false
+max_output_tokens = 8192
+note = "local llama-server via scivo shim"
+
+# ── a remote gateway that needs a real token ────────────────────────────────
+# The token stays in the environment. Nothing secret is written to this file.
+# [gateway]
+# base_url = "https://REPLACE-ME.example.org"
+# model = "REPLACE-ME"
+# small_model = "REPLACE-ME"
+# auth_token_env = "SCIVO_GATEWAY_TOKEN"
+# supports_effort = false
+# note = "shared inference gateway"
