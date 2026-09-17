@@ -37,8 +37,10 @@ from .update import (
     apply as apply_update,
     inspect as inspect_install,
     has_remote,
+    checkout_for_mcp,
     link_skills,
     repo_root,
+    restore_editable,
 )
 from .session import DEFAULT_EFFORT, build, survey
 from .toolsets import PROFILES, plan as make_plan
@@ -90,6 +92,8 @@ def _parser() -> argparse.ArgumentParser:
                         help="report what would happen; change nothing")
     update.add_argument("--no-self", action="store_true",
                         help="update only the MCP, leaving scivo itself alone")
+    update.add_argument("--restore-editable", action="store_true",
+                        help="if the MCP is a snapshot over a source checkout, point it back at the checkout")
     shim = sub.add_parser(
         "shim", help="proxy a local server whose chat template rejects mid-conversation system messages")
     shim.add_argument("--upstream", default="http://localhost:8190")
@@ -154,12 +158,16 @@ async def _doctor(args) -> int:
     return 0 if match is not False else 1
 
 
-async def _sha(config) -> tuple[str, str]:
-    """git_sha + version, read from a FRESH server process."""
+async def _identity(config) -> dict:
+    """whoami, read from a FRESH server process."""
     async with connect(config) as client:
         who = await client.call("whoami")
-        identity = who.first if who and isinstance(who.first, dict) else {}
-        return str(identity.get("git_sha", "?")), str(identity.get("installed_version", "?"))
+        return who.first if who and isinstance(who.first, dict) else {}
+
+
+async def _sha(config) -> tuple[str, str]:
+    identity = await _identity(config)
+    return str(identity.get("git_sha", "?")), str(identity.get("installed_version", "?"))
 
 
 async def _setup(args) -> int:
@@ -262,6 +270,29 @@ async def _update_one(install, check: bool) -> tuple[bool, bool]:
     return True, moved
 
 
+async def _restore_mcp(install, args) -> tuple[bool, bool]:
+    checkout = checkout_for_mcp()
+    print(f"  {'co-scientist-local':20} {ui.red('snapshot over a source checkout — not reinstalling the snapshot')}")
+    if checkout is None:
+        print(ui.dim(f"  {'':20} no checkout found at $CO_SCIENTIST_CHECKOUT or ~/co-scientist-mcp-public"))
+        return False, False
+    command = f"{install.interpreter} -m pip install -e {checkout}/apps/local-mcp --no-deps"
+    if args.check or not args.restore_editable:
+        print(ui.dim(f"  {'':20} other projects using {install.interpreter} run this copy too."))
+        print(ui.dim(f"  {'':20} to point it back at the checkout:  scivo update --restore-editable"))
+        print(ui.dim(f"  {'':20} (runs: git pull in {checkout}, then {command})"))
+        return True, False
+    ok, output = restore_editable(install, checkout)
+    for line in output.strip().splitlines()[-4:]:
+        print(ui.dim(f"  {'':20} {line[:100]}"))
+    after = inspect_install(install.interpreter, install.dist)
+    if not ok or not after.editable:
+        print(f"  {'':20} {ui.red('restore failed')}")
+        return False, False
+    print(f"  {'':20} {ui.green('editable again → ' + str(checkout))}")
+    return True, True
+
+
 async def _update(args) -> int:
     config = load()
     targets = [("co-scientist-local", config.command)]
@@ -273,10 +304,20 @@ async def _update(args) -> int:
     print(f"mcp session {before_version} @ {before_sha}")
     print()
 
+    warning = (await _identity(config)).get("install_warning")
+
     failed = False
     moved_any = False
     for dist, interpreter in targets:
-        ok, moved = await _update_one(inspect_install(interpreter, dist), args.check)
+        install = inspect_install(interpreter, dist)
+        if dist == "co-scientist-local" and install.found and not install.editable and warning:
+            # The MCP says it is a snapshot sitting over a source checkout —
+            # the silent flip. Reinstalling the snapshot, which is what an
+            # "update" of a git install does, would entrench exactly the state
+            # the warning asks to undo. It did, once.
+            ok, moved = await _restore_mcp(install, args)
+        else:
+            ok, moved = await _update_one(install, args.check)
         failed = failed or not ok
         moved_any = moved_any or moved
 

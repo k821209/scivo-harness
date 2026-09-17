@@ -154,6 +154,37 @@ def apply(install: Install) -> tuple[bool, str]:
     return code == 0, output[-1200:]
 
 
+def checkout_for_mcp() -> Path | None:
+    """The source checkout an editable MCP install should point at.
+
+    Same rule the MCP applies when it raises `install_warning`:
+    `$CO_SCIENTIST_CHECKOUT`, else the documented clone path.
+    """
+    import os
+
+    candidates = [os.environ.get("CO_SCIENTIST_CHECKOUT"),
+                  str(Path.home() / "co-scientist-mcp-public")]
+    for candidate in candidates:
+        if candidate and (Path(candidate) / "apps" / "local-mcp").is_dir():
+            return Path(candidate)
+    return None
+
+
+def restore_editable(install: Install, checkout: Path) -> tuple[bool, str]:
+    """Pull the checkout, then point the interpreter back at it.
+
+    `--no-deps`, because this environment is shared and everything the MCP
+    needs is already in it; letting pip re-resolve would risk moving pins other
+    projects depend on.
+    """
+    code, pulled = _run(["git", "pull", "--ff-only"], cwd=str(checkout))
+    if code != 0:
+        return False, f"git pull in {checkout} failed:\n{pulled}"
+    code, output = _run([install.interpreter, "-m", "pip", "install", "-e",
+                         str(checkout / "apps" / "local-mcp"), "--no-deps"])
+    return code == 0, f"{pulled}\n{output[-600:]}"
+
+
 def link_skills(config: ScivoConfig) -> tuple[bool, str]:
     code, output = _run([config.command, "-m", "co_scientist_local",
                          "install-skills", "--dir", str(config.root)])
