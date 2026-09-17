@@ -243,10 +243,22 @@ system messages anywhere is cleaner when restarting that server is free.
 dependency, and the Agent SDK bundles the Claude Code binary, so this is
 everything:
 
+Needs **Python 3.11 or newer** (`python3 --version`). Ubuntu 22.04 ships 3.10,
+so install a newer Python there first.
+
 ```bash
 python3 -m venv ~/.scivo
 ~/.scivo/bin/pip install "scivo-harness @ git+https://github.com/k821209/scivo-harness.git"
-ln -sf ~/.scivo/bin/scivo ~/.local/bin/scivo      # or put ~/.scivo/bin on PATH
+mkdir -p ~/.local/bin && ln -sf ~/.scivo/bin/scivo ~/.local/bin/scivo
+```
+
+If `scivo` is then "command not found", `~/.local/bin` is not on your PATH yet.
+On Ubuntu, `~/.profile` adds it only when the directory already existed at
+login, so a new terminal fixes it. On macOS it is never added, so put this in
+`~/.zshrc`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Then, in each project:

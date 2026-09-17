@@ -93,8 +93,10 @@ def load(root: Path | None = None) -> ScivoConfig:
     key = os.environ.get("CO_SCIENTIST_API_KEY") or os.environ.get("SCIVO_API_KEY")
     if not key:
         raise ConfigError(
-            f"No {MCP_FILE} under {root} and no CO_SCIENTIST_API_KEY in the environment.\n"
-            "Run `scivo init` from the project directory, or download the Setup tab script."
+            f"This directory is not set up for a Scivo project (no {MCP_FILE} under {root}).\n"
+            "In your project's directory, run:\n"
+            "  scivo setup --key <project key> --project <project id>\n"
+            "Both are on the project's Setup tab in the Scivo dashboard."
         )
     return ScivoConfig(
         root=root,
