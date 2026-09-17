@@ -8,9 +8,11 @@ server, so the page can exist before the dashboard grows a panel for it.
 
 What the probes established, and how the layout follows from each:
 
-- There is no subscription on the page client, so both sides poll. The page
-  polls ONE doc, `content/head`, and fetches a log chunk only when the head's
-  revision moves. Idle costs one read per interval.
+- The page subscribes (`subscribeDoc`, measured at 54–94 ms from this side's
+  write to the page's callback) to `content/head` and to the transcript chunks
+  that can still change. This side cannot subscribe — it reaches Firestore only
+  through MCP calls, which the server answers one at a time in ~60 ms — so it
+  polls the response docs, fast while the session is busy and slower when idle.
 - `list` on the page cannot filter by field, and `list_responses` on this side
   returns every response ever written without document ids. So neither side
   lists anything that grows: the transcript lives in fixed-size chunk docs
@@ -43,8 +45,10 @@ from .scivo_mcp import ScivoClient, connect
 OWNER = "owner"
 CHUNK = 20                 # events per log doc; keeps a doc well under Firestore's 1 MB
 MAX_TEXT = 150_000         # one event's text, same reason
-FLUSH_EVERY = 0.4          # seconds; streaming deltas coalesce into one write
-POLL_EVERY = 1.0           # seconds; how often web input is read
+FLUSH_EVERY = 0.1          # seconds; streaming deltas coalesce into one write
+POLL_ACTIVE = 0.15         # seconds between reads of web input while the session is busy
+POLL_IDLE = 0.5            # … and once it has been quiet for ACTIVE_WINDOW
+ACTIVE_WINDOW = 60.0       # seconds of quiet before polling slows down
 BEAT_EVERY = 5.0           # seconds; the page shows "disconnected" past a few misses
 STATE_FILE = Path(".scivo") / "control.json"
 
@@ -102,6 +106,8 @@ class Control:
     _inbox_seen: int = 0
     _interrupt_seen: int = 0
     _started: int = 0
+    _head_chunks: int = -1
+    _last_activity: float = 0.0
 
     @property
     def active(self) -> bool:
@@ -221,6 +227,7 @@ class Control:
 
     def _touch(self, index: int) -> None:
         self._dirty.add(index // CHUNK)
+        self._last_activity = time.monotonic()
         self._wake.set()
 
     def user(self, text: str, via: str) -> None:
@@ -282,6 +289,7 @@ class Control:
 
     async def _write_head(self, state: str) -> None:
         self._rev += 1
+        self._head_chunks = (len(self.events) - 1) // CHUNK if self.events else -1
         await self._call("put_page_data", pub_id=self.link.pub_id, collection="content",
                          doc_id="head", data={
                              "sid": self.sid, "rev": self._rev, "state": state,
@@ -307,7 +315,7 @@ class Control:
         return True
 
     async def _writer(self) -> None:
-        last_beat = 0.0
+        last_beat = time.monotonic()
         while True:
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=BEAT_EVERY)
@@ -315,14 +323,21 @@ class Control:
                 pass
             self._wake.clear()
             await asyncio.sleep(FLUSH_EVERY)  # let a burst of deltas coalesce
-            wrote = await self._flush()
-            if wrote or time.monotonic() - last_beat >= BEAT_EVERY:
+            await self._flush()
+            # The page subscribes to the chunks themselves, so the head only has
+            # to move when a new chunk begins — that is how the page learns to
+            # listen to it — or when the heartbeat is due. Writing it on every
+            # flush doubled the calls on a server that answers one at a time.
+            chunks_now = (len(self.events) - 1) // CHUNK if self.events else -1
+            if chunks_now != self._head_chunks or time.monotonic() - last_beat >= BEAT_EVERY:
                 await self._write_head(state="live")
                 last_beat = time.monotonic()
 
     async def _poller(self) -> None:
         while True:
-            await asyncio.sleep(POLL_EVERY)
+            busy = (time.monotonic() - self._last_activity < ACTIVE_WINDOW
+                    or any(not a.future.done() for a in self._approvals.values()))
+            await asyncio.sleep(POLL_ACTIVE if busy else POLL_IDLE)
             outcome = await self._call("list_responses", pub_id=self.link.pub_id)
             if not outcome.ok:
                 self.errors.append(f"poll: {outcome.error}")
@@ -341,6 +356,7 @@ class Control:
                         seq = int(message.get("seq", 0))
                         if seq > self._inbox_seen and str(message.get("text", "")).strip():
                             self._inbox_seen = seq
+                            self._last_activity = time.monotonic()
                             await self.messages.put(str(message["text"]))
                 elif kind == "approvals":
                     for rid, decision in (doc.get("decisions") or {}).items():

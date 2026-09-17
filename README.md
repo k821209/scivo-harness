@@ -117,12 +117,28 @@ attribute. Without those two steps, a prompt injection that got script onto the
 page could write a message the agent would then carry out.
 
 **How it works.** No new server is involved. It uses `publish_page`: the page
-reads `content/head` and fixed-size transcript chunks, and writes to three fixed
+reads a head doc and fixed-size transcript chunks, and writes to three fixed
 response docs (inbox, approvals, control). The harness reads and writes those
-over MCP. The page client offers no realtime subscription, so both sides poll
-about once a second. Idle, the page does one read per interval. Expect a second
-or so of lag in each direction. Streaming output arrives in bursts of about
-half a second.
+over MCP.
+
+The page **subscribes** to the head and to every transcript chunk that can still
+change. It also subscribes one chunk ahead, before that chunk exists, so the
+first event of a new chunk arrives without waiting on the head. The harness
+cannot subscribe, because it reaches Firestore only through MCP calls, and the
+server answers those one at a time in about 60 ms. So it polls the response
+docs: every 0.15 s while the session is busy, every 0.5 s after a minute of
+quiet. Measured on the live dashboard, median of five runs each:
+
+| | before (polling both ways) | now |
+|---|---|---|
+| web send → terminal receives | 546 ms | 195 ms |
+| web send → confirmed on the page | 1806 ms | 424 ms |
+| typed in the terminal → on the page | 959 ms | 187 ms |
+
+A message sent from the page also shows immediately, dimmed, and is replaced
+once the session takes it. What remains on the web → terminal path is the
+poll interval plus one MCP call. Removing that would need a subscription on the
+harness side.
 
 ## Model endpoints
 

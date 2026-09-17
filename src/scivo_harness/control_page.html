@@ -46,6 +46,7 @@
   .sc-user { align-self: flex-end; max-width: 85%; background: var(--user); border: 1px solid var(--line);
     padding: 8px 12px; border-radius: 12px 12px 2px 12px; white-space: pre-wrap; word-break: break-word; }
   .sc-via { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .sc-pending { opacity: .6; }
   .sc-assistant { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
     padding: 4px 14px; box-shadow: var(--shadow); overflow-wrap: anywhere; }
   .sc-assistant.streaming::after { content: "▍"; color: var(--accent); animation: sc-blink 1s steps(2) infinite; }
@@ -230,6 +231,10 @@
     for (const ev of events) {
       const key = ev.i, json = JSON.stringify(ev);
       if (S.json.get(key) === json) continue;
+      if (ev.kind === "user" && ev.via === "web" && !S.nodes.has(key)) {
+        const echo = [...log.querySelectorAll(".sc-pending")].find((n) => n.dataset.text === ev.text);
+        if (echo) echo.remove();
+      }
       const fresh = nodeFor(ev), old = S.nodes.get(key);
       if (old) old.replaceWith(fresh); else log.append(fresh);
       S.nodes.set(key, fresh); S.json.set(key, json);
@@ -237,8 +242,17 @@
     if (stick) log.scrollTop = log.scrollHeight;
   }
 
-  // --------------------------------------------------------------- polling
+  // --------------------------------------------------------------- syncing
+  // Live when the client can subscribe: a write on the harness side reaches the
+  // callback here in 54–94 ms (measured). Older dashboards without subscribe
+  // fall back to polling the head.
+  const LIVE = typeof C.subscribeDoc === "function";
+  const chunkSubs = new Map();   // k -> unsubscribe
+  let queue = Promise.resolve();
+
   async function resetFor(head) {
+    for (const un of chunkSubs.values()) { try { un(); } catch (_) {} }
+    chunkSubs.clear();
     S.sid = head.sid; S.events = []; S.nodes.clear(); S.json.clear();
     log.innerHTML = "";
     S.seq = 0; S.msgs = []; S.interrupt = 0;
@@ -252,36 +266,69 @@
     try { const c = await C.get("content", "commands-" + head.sid); S.commands = (c && c.list) || []; } catch (_) { S.commands = []; }
   }
 
-  async function poll() {
-    let head;
-    try { head = await C.get("content", "head"); } catch (e) { setDot("stale", "cannot read the session: " + e.message); return; }
+  function chunkId(sid, k) { return `log-${sid}-${String(k).padStart(4, "0")}`; }
+
+  function mergeChunk(doc) {
+    for (const ev of (doc && doc.events) || []) S.events[ev.i] = ev;
+    render(S.events.filter(Boolean));
+  }
+
+  function listenChunk(sid, k) {
+    if (chunkSubs.has(k)) return;
+    const unsubscribe = C.subscribeDoc("content", chunkId(sid, k), (doc) => {
+      if (S.sid !== sid || !doc) return;
+      mergeChunk(doc);
+      // Listen one chunk ahead before it exists, so the first event of the
+      // next chunk arrives with no round trip through the head.
+      listenChunk(sid, k + 1);
+      const size = (S.head && S.head.chunk) || 20, events = doc.events || [];
+      const settled = events.length >= size && events.every((e) =>
+        !(e.kind === "assistant" && !e.done) && !(e.kind === "approval" && e.state === "pending"));
+      if (settled && chunkSubs.has(k + 2)) { unsubscribe(); chunkSubs.delete(k); }
+    });
+    chunkSubs.set(k, unsubscribe);
+  }
+
+  async function applyHead(head) {
+    S.lastHead = head;
     if (!head) { setDot("", "waiting for the local session…"); return; }
     if (head.sid !== S.sid) await resetFor(head);
-    const age = Date.now() - (head.beat || 0);
-    const state = head.state === "ended" ? "ended" : age > STALE_MS ? "stale" : "live";
     $("sc-title").textContent = head.project || "scivo-control";
-    setDot(state, { live: "connected", stale: "no heartbeat for " + Math.round(age / 1000) + "s", ended: "session ended — run /scivo-control again" }[state]
-      + " · " + (head.model || "") + " · " + head.sid);
+    refreshDot();
+    const chunk = head.chunk || 20, total = head.events || 0;
+    const to = Math.floor(Math.max(0, total - 1) / chunk);
+    if (LIVE) {
+      S.head = head;
+      for (let k = 0; k <= to + 1; k++) listenChunk(head.sid, k);
+      return;
+    }
     if (S.head && S.head.rev === head.rev && S.head.sid === head.sid) return;
     const prevCount = S.head && S.head.sid === head.sid ? S.head.events : 0;
     S.head = head;
-    const chunk = head.chunk || 20, total = head.events || 0;
-    // Re-read from the first chunk that can still be changing: an unfinished
-    // reply or a pending approval, else the last chunk we had.
     let from = Math.floor(Math.max(0, prevCount - 1) / chunk);
     S.events.forEach((ev) => { if ((ev.kind === "assistant" && !ev.done) || (ev.kind === "approval" && ev.state === "pending")) from = Math.min(from, Math.floor(ev.i / chunk)); });
-    const to = Math.floor(Math.max(0, total - 1) / chunk);
-    for (let k = from; k <= to && total > 0; k++) {
-      const doc = await C.get("content", `log-${head.sid}-${String(k).padStart(4, "0")}`);
-      if (!doc) continue;
-      for (const ev of doc.events || []) S.events[ev.i] = ev;
-    }
-    render(S.events.filter(Boolean));
+    for (let k = from; k <= to && total > 0; k++) mergeChunk(await C.get("content", chunkId(head.sid, k)));
+  }
+
+  function refreshDot() {
+    const head = S.lastHead;
+    if (!head) return;
+    const age = Date.now() - (head.beat || 0);
+    const state = head.state === "ended" ? "ended" : age > STALE_MS ? "stale" : "live";
+    setDot(state, { live: "connected", stale: "no heartbeat for " + Math.round(age / 1000) + "s", ended: "session ended — run /scivo-control again" }[state]
+      + " · " + (head.model || "") + " · " + head.sid + (LIVE ? "" : " · polling"));
   }
 
   function setDot(state, text) { $("sc-dot").className = "sc-dot " + state; $("sc-sub").textContent = text; }
 
-  async function loop() { try { await poll(); } catch (e) { setDot("stale", e.message); } setTimeout(loop, HEAD_EVERY); }
+  function onHead(head) { queue = queue.then(() => applyHead(head)).catch((e) => setDot("stale", e.message)); }
+
+  function start() {
+    setInterval(refreshDot, 2000);  // the heartbeat can go quiet without any write to notice
+    if (LIVE) { C.subscribeDoc("content", "head", onHead); return; }
+    const poll = async () => { try { onHead(await C.get("content", "head")); await queue; } catch (e) { setDot("stale", e.message); } setTimeout(poll, HEAD_EVERY); };
+    poll();
+  }
 
   // ----------------------------------------------------------------- input
   async function send() {
@@ -290,8 +337,14 @@
     input.value = ""; autosize(); hideMenu();
     S.seq += 1;
     S.msgs = [...S.msgs, { seq: S.seq, text, t: Date.now() }].slice(-30);
+    // Shown at once; replaced by the session's own echo when it takes the message.
+    const pending = document.createElement("div");
+    pending.className = "sc-user sc-pending"; pending.dataset.text = text;
+    const via = document.createElement("span"); via.className = "sc-via"; via.textContent = "you · web · sending…";
+    pending.append(via, document.createTextNode(text));
+    log.append(pending); log.scrollTop = log.scrollHeight;
     try { await C.put("responses", "inbox", { doc: "inbox", sid: S.sid, msgs: S.msgs }); }
-    catch (e) { input.value = text; alert("Not sent: " + e.message); }
+    catch (e) { pending.remove(); input.value = text; alert("Not sent: " + e.message); }
   }
   async function decide(rid, decision) {
     await C.put("responses", "approvals", { doc: "approvals", sid: S.sid, decisions: { [rid]: decision } });
@@ -344,6 +397,6 @@
   $("sc-stop").onclick = stop;
 
   window.__scivoControl = S;  // for inspection
-  loop();
+  start();
 })();
 </script>
