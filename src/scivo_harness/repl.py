@@ -15,6 +15,7 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ResultMessage,
     StreamEvent,
+    SystemMessage,
     TextBlock,
     ThinkingBlock,
     ToolUseBlock,
@@ -120,6 +121,32 @@ class Repl:
         self._streamed = ""
         if self.control:
             self.control.end_assistant()
+
+    def _on_retry(self, data: dict) -> None:
+        """Claude Code retries a failing API call quietly. Say so, or it looks hung."""
+        import json as _json
+
+        error = str(data.get("error") or "")
+        try:  # llama-server and the API both wrap the useful part in JSON
+            inner = _json.loads(error[error.index("{"):])
+            error = str((inner.get("error") or {}).get("message") or error)
+        except (ValueError, AttributeError):
+            pass
+        error = " ".join(error.split())
+        hint = ""
+        if "System message must be at the beginning" in error:
+            hint = "  — this server needs the shim; restart the session or /model to it again"
+        delay = (data.get("retry_delay_ms") or 0) / 1000
+        attempt = f"attempt {data.get('attempt')}/{data.get('max_retries')}, retrying in {delay:.0f}s"
+        if data.get("error_status") is None and error in {"", "unknown"}:
+            # No HTTP status and no body: the connection itself failed.
+            where = self.session.provider.base_url or "the Anthropic API"
+            line = f"\n  cannot reach {where} ({attempt}) — is the server running?"
+        else:
+            line = f"\n  api error {data.get('error_status')} ({attempt}): {error[-160:]}{hint}"
+        print(ui.yellow(line), flush=True)
+        if self.control and self.control.active:
+            self.control.status(line.strip(), level="warn")
 
     def _on_result(self, message: ResultMessage) -> None:
         self.session_id = message.session_id or self.session_id
@@ -306,20 +333,32 @@ class Repl:
         # changing it means a new process — and a new conversation. Carrying the
         # old one over is not attempted: its history holds Claude's thinking
         # blocks, which a local server is not known to accept.
+        from .providers import ProviderError, prepare
+
+        if target.is_local:
+            self._say(ui.dim(f"\n  checking {target_name}…"))
+        try:
+            endpoint = await asyncio.to_thread(prepare, target)
+        except ProviderError as exc:
+            self._say(ui.red(f"  {exc}") + ui.dim(f"\n  still on {provider.name} ({self.session.model})\n"))
+            return
         options = replace(
             self.session.options,
-            env=target.resolve_env(),
+            env=endpoint.env,
             model=model,
             effort=(self.session.options.effort or DEFAULT_EFFORT) if target.supports_effort else None,
             resume=None,
             continue_conversation=False,
         )
-        self._say(ui.dim(f"\n  switching to {target_name} ({model}) — this starts a new conversation…"))
+        if endpoint.note:
+            self._say(ui.dim(f"  · {endpoint.note}"))
+        self._say(ui.dim(f"  switching to {target_name} ({model}) — this starts a new conversation…"))
         await self.client.disconnect()
         self.client = ClaudeSDKClient(options=options)
         try:
             await self.client.connect()
         except Exception as exc:  # noqa: BLE001
+            endpoint.close()
             self._say(ui.red(f"  could not start on {target_name}: {exc}"))
             self.client = ClaudeSDKClient(options=self.session.options)
             await self.client.connect()
@@ -327,13 +366,16 @@ class Repl:
             return
         if self.mode != (options.permission_mode or "default"):
             await self.client.set_permission_mode(self.mode)
+        if self.session.endpoint is not None:
+            self.session.endpoint.close()
+        self.session.endpoint = endpoint
         self.session.options = options
         self.session.provider = target
         self.session.model = model
         self.session_id = None
         if self.control:
             self.control.model = model
-        hint = "  if the first reply fails: scivo --provider " + target_name + " doctor" if target.is_local else ""
+        hint = ""
         self._say(ui.green(f"  now on {target_name} · {model}") + ui.dim(f"\n{hint}\n" if hint else "\n"))
 
     # ---------------------------------------------------------- permissions
@@ -449,6 +491,8 @@ class Repl:
             async for message in client.receive_response():
                 if isinstance(message, StreamEvent):
                     self._on_stream(message)
+                elif isinstance(message, SystemMessage) and message.subtype == "api_retry":
+                    self._on_retry(message.data or {})
                 elif isinstance(message, AssistantMessage):
                     self._on_assistant(message)
                 elif isinstance(message, ResultMessage):
@@ -480,6 +524,8 @@ class Repl:
                         self.session.plan.summary(), label))
         for line in ui.attention(briefing):
             print(line)
+        if self.session.endpoint is not None and self.session.endpoint.note:
+            print(ui.dim(f"  · {self.session.endpoint.note}"))
         print()
 
         self.client = ClaudeSDKClient(options=self.session.options)
@@ -523,6 +569,8 @@ class Repl:
             if self.control and self.control.active:
                 await self.control.stop()
             await self.client.disconnect()
+            if self.session.endpoint is not None:
+                self.session.endpoint.close()
         print(ui.dim(f"session total ${self.cost:.4f}"))
         if self.session_id:
             print(ui.dim(f"resume: scivo resume {self.session_id[:8]}   (or scivo -c)"))

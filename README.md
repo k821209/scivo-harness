@@ -250,8 +250,11 @@ scivo --provider local doctor          # probes the endpoint the way a session w
 scivo --provider local                 # if doctor is happy
 ```
 
-If `doctor` reports a format problem with the server, `scivo shim --help` has the
-one-command fix.
+Some local chat templates (Qwen3's on llama-server) refuse a message format
+Claude Code sends. A session detects that when it connects and fixes it
+in-process, with one line saying so, so there is nothing to set up.
+`scivo shim --help` explains what it does. A server that is not running is
+refused before the session starts, instead of retrying for a minute.
 
 ## Design notes
 

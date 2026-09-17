@@ -25,7 +25,7 @@ import json
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable
 
 MARKER = "[operator note] "
 HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "upgrade", "content-length"}
@@ -146,6 +146,27 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")
+
+
+def start_background(upstream: str) -> tuple[str, "Callable[[], None]"]:
+    """Run the shim inside this process on a free port; return its URL and a stop.
+
+    Sessions start this themselves when the local server needs it, so nobody
+    has to know the shim exists. A per-call handler subclass keeps two shims in
+    one process from sharing an upstream.
+    """
+    import threading
+
+    handler = type("BoundShimHandler", (_Handler,), {"upstream": upstream, "verbose": False})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, name="scivo-shim", daemon=True)
+    thread.start()
+
+    def stop() -> None:
+        server.shutdown()
+        server.server_close()
+
+    return f"http://127.0.0.1:{server.server_address[1]}", stop
 
 
 def serve(upstream: str, port: int, verbose: bool = False) -> None:

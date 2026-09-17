@@ -271,22 +271,100 @@ def probe(provider: Provider, timeout: float = 180.0) -> tuple[bool, str]:
     # messages[] as role "system", and many GGUF chat templates (Qwen3's) raise
     # on that: the probe used to pass and the first real turn then died with
     # "System message must be at the beginning". Ask the same way it will.
+    accepted = system_messages_ok(provider.base_url, provider, timeout)
+    if accepted is False:
+        return False, ("tool_use works, but this server rejects a message format Claude Code "
+                       "sends. Sessions fix this themselves by starting the shim; "
+                       "`scivo shim --help` explains it.")
+    return True, f"/v1/messages + tool_use + system messages ok (model {payload.get('model', '?')})"
+
+
+def system_messages_ok(base_url: str, provider: Provider, timeout: float = 30.0) -> bool | None:
+    """True if the server accepts a mid-conversation system message, False if its
+    chat template refuses one, None if it could not be told (slow, unreachable)."""
+    import json
+    import urllib.error
+    import urllib.request
+
     shaped = json.dumps({
         "model": provider.model or "default", "max_tokens": 8,
         "messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"},
                      {"role": "system", "content": "Be brief."}, {"role": "user", "content": "say ok"}],
     }).encode()
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/v1/messages", data=shaped,
+        headers={"content-type": "application/json", "anthropic-version": "2023-06-01",
+                 "x-api-key": provider.auth_token or "unused"})
     try:
-        with urllib.request.urlopen(urllib.request.Request(
-                provider.base_url.rstrip("/") + "/v1/messages", data=shaped,
-                headers=request.headers), timeout=timeout):
-            pass
+        with urllib.request.urlopen(request, timeout=timeout):
+            return True
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")
-        if "system" in detail.lower():
-            return False, ("tool_use works, but this server rejects a message format scivo "
-                           "sends. Run `scivo shim --help` — it is a one-command fix.")
-        return False, f"HTTP {exc.code} on a mid-conversation system message: {detail[:160]}"
-    except Exception:  # noqa: BLE001 - slow or unreachable; the first check already passed
-        pass
-    return True, f"/v1/messages + tool_use + system messages ok (model {payload.get('model', '?')})"
+        detail = exc.read().decode(errors="replace").lower()
+        return False if "system" in detail else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def reachable(provider: Provider, timeout: float = 5.0) -> None:
+    """Refuse a server that is not there, before a session is built on it.
+
+    Otherwise Claude Code retries ten times with backoff — over a minute —
+    and the session looks hung. A refused connection is certain; a slow one
+    may be a busy server, so only the first stops anything.
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        urllib.request.urlopen(provider.base_url.rstrip("/") + "/v1/models", timeout=timeout).close()
+    except urllib.error.HTTPError:
+        return  # something is answering
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, (ConnectionRefusedError, OSError)) and not isinstance(exc.reason, TimeoutError):
+            raise ProviderError(f"cannot reach {provider.base_url} ({exc.reason}). "
+                                f"Is the '{provider.name}' server running?") from exc
+    except (TimeoutError, OSError):
+        return
+
+
+@dataclass
+class Endpoint:
+    """What a session actually connects to, and anything to tear down after."""
+
+    env: dict[str, str]
+    note: str | None = None
+    stop: "object | None" = None
+
+    def close(self) -> None:
+        if callable(self.stop):
+            self.stop()
+
+
+def prepare(provider: Provider, timeout: float = 30.0) -> Endpoint:
+    """Resolve a provider into environment for Claude Code, fixing what can be fixed.
+
+    A local server whose chat template rejects mid-conversation system messages
+    used to need `scivo shim` running in a second terminal and a separate
+    provider pointing at it. Choosing `local` without that failed as a string of
+    silent retries. Now the check runs here, and when the template refuses, the
+    shim starts inside this process and the session is pointed at it.
+    """
+    env = provider.resolve_env()
+    if not provider.base_url:
+        return Endpoint(env)
+    reachable(provider)
+    verdict = system_messages_ok(provider.base_url, provider, timeout)
+    if verdict is not False:
+        return Endpoint(env)
+
+    from .shim import start_background
+
+    url, stop = start_background(provider.base_url)
+    env = {**env, "ANTHROPIC_BASE_URL": url}
+    through = system_messages_ok(url, provider, timeout)
+    note = ("this server's chat template refuses a message format Claude Code sends; "
+            f"scivo is reordering it in-process ({url} → {provider.base_url}). "
+            "`scivo shim --help` explains.")
+    if through is False:
+        note += " It still refuses after reordering — check the server."
+    return Endpoint(env, note, stop)

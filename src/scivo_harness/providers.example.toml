@@ -42,16 +42,6 @@ supports_effort = false
 max_output_tokens = 8192
 note = "local llama-server"
 
-# ── the same server, for when `doctor` sends you to `scivo shim --help` ────
-[local-shim]
-base_url = "http://localhost:8191"
-model = "REPLACE-ME"
-small_model = "REPLACE-ME"
-auth_token = "unused"
-supports_effort = false
-max_output_tokens = 8192
-note = "local llama-server via scivo shim"
-
 # ── a remote gateway that needs a real token ────────────────────────────────
 # The token stays in the environment. Nothing secret is written to this file.
 # [gateway]

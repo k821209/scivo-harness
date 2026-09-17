@@ -112,29 +112,27 @@ def _parser() -> argparse.ArgumentParser:
     update.add_argument("--restore-editable", action="store_true",
                         help="if the MCP is a snapshot over a source checkout, point it back at the checkout")
     shim = sub.add_parser(
-        "shim", help="make a local model's server accept what scivo sends (only if doctor says so)",
+        "shim", help="standalone message-reordering proxy for a local model server (sessions start one themselves)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="""\
-Only needed for some local models. `scivo --provider local doctor` tells you when.
+You normally never run this: a session on a local provider checks the server
+and, when it needs one, starts this proxy inside scivo by itself.
 
-scivo runs on Claude Code, and Claude Code sends one thing some local model
-servers refuse: a "system" message in the middle of the conversation. Qwen3's
-chat template on llama-server, for one, accepts system messages only at the
-start and fails the whole request with:
+What it fixes. scivo runs on Claude Code, and Claude Code sends one thing some
+local model servers refuse: a "system" message in the middle of the
+conversation. Qwen3's chat template on llama-server, for one, accepts system
+messages only at the start and fails the whole request with
 
   System message must be at the beginning
 
-The shim sits between scivo and that server. It moves each mid-conversation
-system message into the next user message and passes everything else through
-unchanged, streaming included. The model is the same; only the order changes.
+The proxy moves each such message into the next user message and passes
+everything else through unchanged, streaming included. The model is the same;
+only the order changes.
 
-  1. keep this running in a second terminal:
-       scivo shim --upstream http://localhost:8190 --port 8191
-  2. use the provider that points at the shim:
-       scivo --provider local-shim
+Run it by hand only to put a fixed address in front of such a server for some
+other tool:
 
-`local-shim` is already in the file `scivo providers --init` writes; set its
-model to the name your server reports at /v1/models.""")
+  scivo shim --upstream http://localhost:8190 --port 8191""")
     shim.add_argument("--upstream", default="http://localhost:8190",
                       help="the local model server (default: %(default)s)")
     shim.add_argument("--port", type=int, default=8191,
@@ -549,6 +547,8 @@ async def _chat(args, prompt_text: str | None = None) -> int:
     if prompt_text is not None:
         from claude_agent_sdk import AssistantMessage, TextBlock, query
 
+        if session.endpoint is not None and session.endpoint.note:
+            print(ui.dim(f"· {session.endpoint.note}"), file=sys.stderr)
         async for message in query(prompt=prompt_text, options=session.options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:

@@ -12,7 +12,7 @@ from claude_agent_sdk.types import CanUseToolShadowedWarning
 
 from . import guardrails, prompt, toolsets
 from .config import ScivoConfig
-from .providers import Provider, get as get_provider
+from .providers import Endpoint, Provider, get as get_provider, prepare
 from .preflight import Briefing, gather
 from .scivo_mcp import connect
 from .toolsets import PREFIX, ToolPlan
@@ -35,6 +35,7 @@ class Session:
     provider: Provider
     model: str
     approver: Any = None
+    endpoint: Any = None
 
 
 async def survey(config: ScivoConfig, *, with_guide: bool) -> tuple[Briefing, list[str], str | None]:
@@ -77,6 +78,9 @@ async def build(
     model = model or chosen.model or DEFAULT_MODEL
 
     briefing, tool_names, guide = await survey(config, with_guide=with_guide)
+    import asyncio
+
+    endpoint: Endpoint = await asyncio.to_thread(prepare, chosen)
     plan = toolsets.plan(tool_names, profile=profile, read_only=read_only)
     rails = guardrails.Guardrails()
 
@@ -120,7 +124,7 @@ async def build(
         # A local model behind a shim has no effort parameter; sending one is
         # a 400 from some proxies and silently ignored by others.
         effort=effort if chosen.supports_effort else None,
-        env=chosen.resolve_env(),
+        env=endpoint.env,
         cwd=str(config.root),
         add_dirs=list(add_dirs or []),
         # Makes bypassPermissions *available* without turning it on, so
@@ -134,7 +138,8 @@ async def build(
         include_partial_messages=True,
     )
     return Session(options=options, briefing=briefing, plan=plan, rails=rails,
-                   config=config, provider=chosen, model=model, approver=approver)
+                   config=config, provider=chosen, model=model, approver=approver,
+                   endpoint=endpoint)
 
 
 def scivo_tool_label(name: str) -> str:
