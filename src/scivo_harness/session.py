@@ -37,7 +37,13 @@ LOCAL_SCIVO_TOOLS = (
     "search_references", "add_reference_by_doi", "list_figures", "get_figure",
     "list_tables", "get_table", "list_paper_comments", "count_open_user_comments",
     "list_analyses", "get_analysis", "list_todos", "add_todo", "update_todo",
-    "get_project_memory", "append_project_memory", "log_activity", "report_feedback",
+    "get_project_memory", "append_project_memory", "update_project_memory",
+    "log_activity", "report_feedback",
+    # Every tool a guardrail message sends the model to. A block that says "use
+    # submit_remote_job" in a session without it is a dead end.
+    "list_servers", "get_server", "add_server", "update_server", "add_server_env",
+    "submit_remote_job", "tail_remote_log", "poll_remote_pids",
+    "create_analysis", "record_analysis_run",
 )
 
 

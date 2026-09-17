@@ -66,14 +66,47 @@ class Approvals:
         self._one_at_a_time = asyncio.Lock()
 
     async def __call__(self, tool_name: str, payload: dict[str, Any], context: Any):
-        if tool_name in self.always:
+        # A guardrail hold arrives with the hook's reason. It is a question
+        # about THIS call's content, so an earlier "always" for the tool does
+        # not answer it.
+        hold = getattr(context, "decision_reason", None)
+        if tool_name in self.always and not hold:
             return PermissionResultAllow(updated_input=payload)
         async with self._one_at_a_time:
             # Checked again once it is this call's turn: "always" on the first
             # of a batch should settle the rest without asking.
-            if tool_name in self.always:
+            if tool_name in self.always and not hold:
                 return PermissionResultAllow(updated_input=payload)
+            if hold:
+                return await self._hold(tool_name, payload, hold)
             return await self._ask(tool_name, payload)
+
+    async def _hold(self, tool_name: str, payload: dict[str, Any], reason: str):
+        """A guardrail asked. The prompt used to read like every other one:
+        "permission append_project_memory", Enter to allow. So the hold on
+        hardware in project memory went through on a reflexive Enter, with no
+        sign of what was held or why. Show both, and make only "y" a yes."""
+        body = json.dumps(payload, ensure_ascii=False, indent=2)
+        print()
+        print(ui.red(f"  held  {scivo_tool_label(tool_name)}"))
+        for line in reason.splitlines():
+            print(ui.dim(f"        {line}"))
+        print(ui.dim("        ── the call ──"))
+        for line in body.splitlines()[:30]:
+            print(f"        {line}")
+        if self.remote is not None and self.remote.active:
+            print(ui.dim("        waiting for your answer on the scivo-control page…"))
+            answer = await self.remote.ask_approval(scivo_tool_label(tool_name),
+                                                    f"HELD: {reason}\n\n{body}", True)
+            print(ui.dim(f"        {answer} (from the page)"))
+        else:
+            answer = (await asyncio.to_thread(input, ui.cyan("  allow anyway? y / [N] "))).strip().lower()
+        if answer in {"y", "yes", "allow"}:
+            return PermissionResultAllow(updated_input=payload)
+        self.denied.append(tool_name)
+        return PermissionResultDeny(
+            message="The user did not approve this held call. " + reason
+        )
 
     async def _ask(self, tool_name: str, payload: dict[str, Any]):
 
@@ -142,6 +175,11 @@ class Explain:
     async def __call__(self, tool_name: str, payload: dict[str, Any], context: Any):
         self.denied.append(tool_name)
         label = scivo_tool_label(tool_name)
+        hold = getattr(context, "decision_reason", None)
+        if hold:
+            # A guardrail hold is about the content, not a missing mode; the
+            # generic advice below would point at bypassPermissions.
+            return PermissionResultDeny(message=f"Held and not approved (nobody to ask in `scivo run`). {hold}")
         elsewhere = outside_project(payload, self.root)
 
         if elsewhere:
