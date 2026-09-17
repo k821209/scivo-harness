@@ -140,6 +140,47 @@ def auth_source(provider: Provider) -> str:
     return "whatever `claude` already uses on this machine"
 
 
+SETTINGS_FILE = Path(".scivo") / "settings.json"
+
+
+def chosen_name(root: Path, flag: str | None) -> tuple[str, str]:
+    """The provider to use and why: the flag, then the project's choice, then Claude.
+
+    Picking a local model used to mean typing `--provider local` on every run;
+    `scivo providers use local` now records it once per project.
+    """
+    import json
+
+    if flag:
+        return flag, "--provider"
+    path = root / SETTINGS_FILE
+    try:
+        name = json.loads(path.read_text(encoding="utf-8")).get("provider")
+    except (OSError, ValueError):
+        name = None
+    if name:
+        return name, f"set with `scivo providers use` ({path})"
+    return BUILTIN_NAME, "default"
+
+
+def set_default(root: Path, name: str) -> Path:
+    import json
+
+    get(name)  # refuse a name that does not exist, with the usual message
+    path = root / SETTINGS_FILE
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        settings = {}
+    if name == BUILTIN_NAME:
+        settings.pop("provider", None)
+    else:
+        settings["provider"] = name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def get(name: str) -> Provider:
     providers = load_all()
     if name not in providers:

@@ -8,10 +8,12 @@ import sys
 
 from . import ui
 from .compat import check as check_compat, shadowing_binaries
-from .config import ConfigError, load
+from .config import ConfigError, find_root, load
 from .failures import explain
 from .preflight import ProjectMismatch, to_markdown
 from .providers import (
+    chosen_name,
+    set_default,
     EXAMPLE_FILE,
     ProviderError,
     auth_source,
@@ -55,8 +57,8 @@ def _parser() -> argparse.ArgumentParser:
                         help="which domains of the scivo tool surface to load (default: full)")
     parser.add_argument("--read-only", action="store_true",
                         help="load no writing tools at all")
-    parser.add_argument("--provider", default="anthropic",
-                        help="model endpoint from providers.toml (default: anthropic)")
+    parser.add_argument("--provider", default=None,
+                        help="model endpoint for this run (default: the project's choice, else anthropic)")
     parser.add_argument("--model", default=None,
                         help="override the provider's model")
     parser.add_argument("--effort", default=DEFAULT_EFFORT,
@@ -94,6 +96,9 @@ def _parser() -> argparse.ArgumentParser:
                            help="write the tokenless skeleton to .scivo/providers.toml")
     providers.add_argument("--show-example", action="store_true",
                            help="print the skeleton")
+    providers.add_argument("action", nargs="?", choices=["use"],
+                           help="`use <name>`: make that endpoint this project's default")
+    providers.add_argument("name", nargs="?")
     setup = sub.add_parser("setup", help="wire this directory to a Scivo project")
     setup.add_argument("--key", help="the project API key (else $CO_SCIENTIST_API_KEY, else prompt)")
     setup.add_argument("--project", help="expected project id; setup fails if the key binds elsewhere")
@@ -159,7 +164,7 @@ async def _doctor(args) -> int:
     provider = get_provider(args.provider)
     print(f"config      {config.source}")
     print(f"provider    {provider.name} → {provider.base_url or 'api.anthropic.com'}"
-          f" ({provider.source})")
+          f"   {ui.dim(args.provider_reason)}")
     print(f"auth        {auth_source(provider)}")
     if not provider.is_local:
         print(f"login       {_login_state()}")
@@ -396,7 +401,16 @@ async def _providers(args) -> int:
     if args.init:
         written = write_example(Path.cwd() / ".scivo" / "providers.toml")
         print(f"wrote {written}")
-        print(ui.dim("  edit the REPLACE-ME values, then: scivo --provider local doctor"))
+        print(ui.dim("  edit the REPLACE-ME values, then: scivo providers use local && scivo doctor"))
+        return 0
+    if args.action == "use":
+        if not args.name:
+            print(ui.red("which one? scivo providers use <name>"), file=sys.stderr)
+            return 2
+        written = set_default(find_root(), args.name)
+        print(ui.green(f"this project now uses {args.name}") + ui.dim(f"   ({written})"))
+        if args.name != "anthropic":
+            print(ui.dim(f"  check it: scivo doctor   ·   back to Claude: scivo providers use anthropic"))
         return 0
 
     providers = load_all()
@@ -413,6 +427,8 @@ async def _providers(args) -> int:
         if provider.note:
             print(ui.dim(f"     {provider.note}"))
         print(ui.dim(f"     from {provider.source}"))
+    if len(providers) > 1:
+        print(ui.dim("\n  * = what this project uses.  Change it: scivo providers use <name>"))
     if len(providers) == 1:
         print(ui.dim("\nNo providers.toml found. To add a local endpoint:"))
         print(ui.dim("  scivo providers --init          write .scivo/providers.toml"))
@@ -552,6 +568,10 @@ def main(argv: list[str] | None = None) -> int:
     if raw[:1] in (["login"], ["logout"]):
         return _auth(raw[0], raw[1:])
     args = _parser().parse_args(argv)
+    try:
+        args.provider, args.provider_reason = chosen_name(find_root(), args.provider)
+    except Exception:  # noqa: BLE001 - resolution problems surface where the provider is used
+        args.provider, args.provider_reason = args.provider or "anthropic", "default"
     handlers = {
         "status": _status,
         "doctor": _doctor,
