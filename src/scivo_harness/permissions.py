@@ -58,10 +58,24 @@ class Approvals:
         # cannot be withdrawn when the answer arrives from the page, and would
         # then swallow the next line typed.
         self.remote: Any = None
+        # One question at a time. A model that emits five update_section calls
+        # in one turn gets five permission requests at once; answered
+        # concurrently they were five prompts on screen and five threads
+        # reading stdin, so which call a typed "n" landed on was a race — a
+        # person reading the prompt for one section could deny another.
+        self._one_at_a_time = asyncio.Lock()
 
     async def __call__(self, tool_name: str, payload: dict[str, Any], context: Any):
         if tool_name in self.always:
             return PermissionResultAllow(updated_input=payload)
+        async with self._one_at_a_time:
+            # Checked again once it is this call's turn: "always" on the first
+            # of a batch should settle the rest without asking.
+            if tool_name in self.always:
+                return PermissionResultAllow(updated_input=payload)
+            return await self._ask(tool_name, payload)
+
+    async def _ask(self, tool_name: str, payload: dict[str, Any]):
 
         outward = is_outward(tool_name)
         print()
