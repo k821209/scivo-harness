@@ -28,6 +28,9 @@ from .prompt_line import Line
 from .permissions import is_outward
 from .session import Session, scivo_tool_label
 from .toolsets import PREFIX
+
+CLAUDE_MODELS = {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5",
+                 "haiku": "claude-haiku-4-5", "fable": "claude-fable-5-1"}
 from .skills import discover
 
 LOCAL_COMMANDS = {
@@ -37,6 +40,7 @@ LOCAL_COMMANDS = {
     "/blocked": "what the guardrails stopped this session",
     "/cost": "spend so far",
     "/session": "this session's id, to resume it later",
+    "/model": "switch model: opus · sonnet · haiku · fable, or a provider such as local",
     "/permissions": "show or change: default · acceptEdits · auto · plan · always <tool> · always -<tool>",
     "/dangerously-skip-permissions": "stop asking for anything (`off` to ask again); guardrails still apply",
     "/tools": "which scivo tools this profile loaded",
@@ -120,14 +124,18 @@ class Repl:
     def _on_result(self, message: ResultMessage) -> None:
         self.session_id = message.session_id or self.session_id
         self.turns += message.num_turns
-        if message.total_cost_usd:
-            self.cost += message.total_cost_usd
+        # Claude Code prices every turn from its own table, including models it
+        # does not know: a Qwen turn on a local server came back as $0.334.
+        # Nothing was billed, so it is neither shown nor added to the total.
+        local = self.session.provider.is_local
+        turn_cost = 0.0 if local else (message.total_cost_usd or 0.0)
+        self.cost += turn_cost
         if message.is_error:
             print(ui.red(f"\n  ! {message.stop_reason or 'error'}: {message.result or ''}"))
-        print(ui.dim(f"\n  ({message.num_turns} turns · ${message.total_cost_usd or 0:.3f} · "
-                     f"${self.cost:.3f} session)\n"))
+        price = "local model" if local else f"${turn_cost:.3f}"
+        print(ui.dim(f"\n  ({message.num_turns} turns · {price} · ${self.cost:.3f} session)\n"))
         if self.control:
-            self.control.result(message.num_turns, message.total_cost_usd or 0.0, self.cost,
+            self.control.result(message.num_turns, turn_cost, self.cost,
                                 error=(message.stop_reason or "error") if message.is_error else None)
 
     # -------------------------------------------------------- local commands
@@ -247,6 +255,86 @@ class Repl:
         text = web.result()
         print(f"{prompt}{text}  {ui.dim('[web]')}")
         return text, "web"
+
+    # ----------------------------------------------------------------- model
+
+    async def _model(self, argument: str) -> None:
+        from dataclasses import replace
+
+        from .providers import load_all
+        from .session import DEFAULT_EFFORT, DEFAULT_MODEL
+
+        provider = self.session.provider
+        providers = load_all()
+        if not argument:
+            self._say(f"\n  model     {self.session.model}"
+                      + f"\n  provider  {provider.name}" + (f" → {provider.base_url}" if provider.base_url else "")
+                      + ui.dim("\n\n  Claude, keeps the conversation:  /model " + " | ".join(CLAUDE_MODELS)
+                               + "\n  another endpoint, new conversation: /model "
+                               + " | ".join(n for n in providers if n != "anthropic")
+                               + ("" if len(providers) > 1 else "(none configured — scivo providers --init)")
+                               + "\n  to make it stick for this project: scivo providers use <name>\n"))
+            return
+
+        wanted = argument.split()[0]
+        claude_model = CLAUDE_MODELS.get(wanted.lower()) or (wanted if wanted.startswith("claude-") else None)
+
+        if claude_model and not provider.is_local:
+            try:
+                await self.client.set_model(claude_model)
+            except Exception as exc:  # noqa: BLE001
+                self._say(ui.red(f"\n  could not switch to {claude_model}: {exc}\n"))
+                return
+            self.session.model = claude_model
+            if self.control:
+                self.control.model = claude_model
+            self._say(ui.green(f"\n  model: {claude_model}") + ui.dim(" — same conversation continues\n"))
+            return
+
+        target_name = "anthropic" if claude_model else wanted
+        if target_name not in providers:
+            self._say(ui.red(f"\n  {wanted!r} is neither a Claude model nor a provider")
+                      + ui.dim(" — /model shows the choices\n"))
+            return
+        target = providers[target_name]
+        model = claude_model or target.model or DEFAULT_MODEL
+        if target_name == provider.name and model == self.session.model:
+            self._say(ui.dim(f"\n  already on {model}\n"))
+            return
+
+        # The endpoint lives in the Claude Code process's environment, so
+        # changing it means a new process — and a new conversation. Carrying the
+        # old one over is not attempted: its history holds Claude's thinking
+        # blocks, which a local server is not known to accept.
+        options = replace(
+            self.session.options,
+            env=target.resolve_env(),
+            model=model,
+            effort=(self.session.options.effort or DEFAULT_EFFORT) if target.supports_effort else None,
+            resume=None,
+            continue_conversation=False,
+        )
+        self._say(ui.dim(f"\n  switching to {target_name} ({model}) — this starts a new conversation…"))
+        await self.client.disconnect()
+        self.client = ClaudeSDKClient(options=options)
+        try:
+            await self.client.connect()
+        except Exception as exc:  # noqa: BLE001
+            self._say(ui.red(f"  could not start on {target_name}: {exc}"))
+            self.client = ClaudeSDKClient(options=self.session.options)
+            await self.client.connect()
+            self._say(ui.dim(f"  back on {provider.name} ({self.session.model}), in a new conversation\n"))
+            return
+        if self.mode != (options.permission_mode or "default"):
+            await self.client.set_permission_mode(self.mode)
+        self.session.options = options
+        self.session.provider = target
+        self.session.model = model
+        self.session_id = None
+        if self.control:
+            self.control.model = model
+        hint = "  if the first reply fails: scivo --provider " + target_name + " doctor" if target.is_local else ""
+        self._say(ui.green(f"  now on {target_name} · {model}") + ui.dim(f"\n{hint}\n" if hint else "\n"))
 
     # ---------------------------------------------------------- permissions
 
@@ -394,8 +482,10 @@ class Repl:
             print(line)
         print()
 
+        self.client = ClaudeSDKClient(options=self.session.options)
+        await self.client.connect()
         try:
-            async with ClaudeSDKClient(options=self.session.options) as client:
+            if True:
                 while True:
                     try:
                         line, via = await self._next_input()
@@ -413,7 +503,12 @@ class Repl:
                     if command in {"/permissions", "/dangerously-skip-permissions"}:
                         if self.control and self.control.active:
                             self.control.user(line, via)
-                        await self._permissions(client, command, argument.strip())
+                        await self._permissions(self.client, command, argument.strip())
+                        continue
+                    if command == "/model":
+                        if self.control and self.control.active:
+                            self.control.user(line, via)
+                        await self._model(argument.strip())
                         continue
                     if self.control and self.control.active:
                         self.control.user(line, via)
@@ -423,10 +518,11 @@ class Repl:
                     except EOFError:
                         break
 
-                    await self._turn(client, line)
+                    await self._turn(self.client, line)
         finally:
             if self.control and self.control.active:
                 await self.control.stop()
+            await self.client.disconnect()
         print(ui.dim(f"session total ${self.cost:.4f}"))
         if self.session_id:
             print(ui.dim(f"resume: scivo resume {self.session_id[:8]}   (or scivo -c)"))

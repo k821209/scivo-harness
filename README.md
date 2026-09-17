@@ -79,6 +79,23 @@ dropped silently.
 once went to Anthropic and the user found out only when it never appeared in the
 Feedback tab.
 
+## Switching models, inside a session
+
+```
+/model                 current model and the choices
+/model sonnet          opus · sonnet · haiku · fable — the conversation continues
+/model local           a provider from providers.toml — starts a new conversation
+/model opus            back to Claude (also a new conversation, if you were on local)
+```
+
+Claude models change in place. The same session, with its history, carries on
+under the new model. A different provider cannot: the endpoint belongs to the
+Claude Code process, so switching restarts it, and scivo says it is starting a
+new conversation rather than trying to carry Claude's history onto a local
+server. `scivo providers use <name>` makes a provider this project's default.
+Local turns show "local model" instead of a price. Claude Code prices even
+models it does not know, and nothing is billed for them.
+
 ## Permissions, inside a session
 
 By default each tool that changes something asks first: `[y]es / [a]lways /
