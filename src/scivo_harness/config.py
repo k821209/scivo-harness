@@ -74,7 +74,8 @@ def load(root: Path | None = None) -> ScivoConfig:
             legacy = next((k for k in servers if "scientist" in k or "scivo" in k), None)
             if legacy is None:
                 raise ConfigError(
-                    f"{mcp_path} has no '{SERVER_KEY}' server. Re-run the Setup tab script."
+                    f"{mcp_path} has no '{SERVER_KEY}' server. Rewrite it with "
+                    "`scivo setup --key <project key> --project <project id> --force`."
                 )
             raise ConfigError(
                 f"{mcp_path} names the server '{legacy}'. Rename it to '{SERVER_KEY}' — "
