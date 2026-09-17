@@ -39,6 +39,25 @@ def _as_text(content: Any) -> str:
     return ""
 
 
+def _with_notes(content: Any, notes: list[str], *, before: bool) -> Any:
+    """`content` with the notes added, every original block kept.
+
+    A user turn that answers tool calls is a list of `tool_result` blocks.
+    Flattening it to text to prepend a note deleted those results, so the model
+    never saw its tools' output and called them again, forever. The note goes
+    in as its own text block instead, after any tool results, because the
+    Anthropic format wants those first in the turn.
+    """
+    joined = "\n\n".join(notes)
+    if isinstance(content, str):
+        return "\n\n".join([joined, content] if before else [content, joined])
+    blocks = [b for b in content] if isinstance(content, list) else []
+    note = {"type": "text", "text": joined}
+    if before and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks):
+        return [note] + blocks
+    return blocks + [note]
+
+
 def fold_system_messages(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
     """Move every mid-conversation system message into a neighbouring user turn.
 
@@ -67,7 +86,7 @@ def fold_system_messages(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
             continue
         if pending and isinstance(message, dict) and message.get("role") == "user":
             message = dict(message)
-            message["content"] = "\n\n".join(pending + [_as_text(message.get("content"))])
+            message["content"] = _with_notes(message.get("content"), pending, before=True)
             pending = []
         kept.append(message)
 
@@ -76,8 +95,7 @@ def fold_system_messages(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         for index in range(len(kept) - 1, -1, -1):
             if isinstance(kept[index], dict) and kept[index].get("role") == "user":
                 kept[index] = dict(kept[index])
-                kept[index]["content"] = "\n\n".join(
-                    [_as_text(kept[index].get("content"))] + pending)
+                kept[index]["content"] = _with_notes(kept[index].get("content"), pending, before=False)
                 pending = []
                 break
     if pending:
