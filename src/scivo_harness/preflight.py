@@ -185,6 +185,9 @@ def to_markdown(brief: Briefing) -> str:
         f"**Project** `{brief.project_name}` · id `{brief.project_id}` · "
         f"guide {brief.identity.get('guide_version', '?')}",
     ]
+    if brief.identity.get("install_warning"):
+        out.append(f"**Install warning from the MCP — tell the user before anything else:** "
+                   f"{brief.identity['install_warning']}")
     if brief.identity.get("update_available"):
         out.append(
             f"**The MCP install is behind the latest build** "

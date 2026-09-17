@@ -51,6 +51,13 @@ def attention(briefing) -> list[str]:
     # briefing already tells the model; the person running the session is the
     # one who can do something about it.
     identity = briefing.identity
+    # The MCP detects its own editable install being replaced by a snapshot —
+    # the silent flip that hit this machine — and says so here. It is the
+    # server's verdict, taken from the interpreter that actually runs it.
+    warning = identity.get("install_warning")
+    if warning:
+        for index, line in enumerate(str(warning).splitlines()):
+            lines.append(red(f"  ! {line}") if index == 0 else dim(f"    {line}"))
     if identity.get("update_available"):
         lines.append(yellow(
             f"  ! MCP {identity.get('latest_version')} available "

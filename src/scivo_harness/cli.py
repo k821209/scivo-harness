@@ -142,6 +142,8 @@ async def _doctor(args) -> int:
               f"@ {identity.get('git_sha')}")
         if identity.get("update_available"):
             print(ui.yellow(f"update      {identity.get('latest_version')} available"))
+        if identity.get("install_warning"):
+            print(ui.red(f"install     {identity['install_warning']}"))
         tools = await client._session.list_tools()  # noqa: SLF001
         print(f"tools       {len(tools.tools)} exposed")
         compatibility = check_compat(tools.tools)
