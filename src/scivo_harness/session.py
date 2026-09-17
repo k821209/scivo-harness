@@ -69,6 +69,7 @@ async def build(
     interactive: bool = True,
     permission_mode: str = "default",
     resume: str | None = None,
+    continue_last: bool = False,
     max_budget_usd: float | None = None,
     add_dirs: list[str] | None = None,
 ) -> Session:
@@ -122,6 +123,7 @@ async def build(
         cwd=str(config.root),
         add_dirs=list(add_dirs or []),
         resume=resume,
+        continue_conversation=continue_last and not resume,
         max_budget_usd=max_budget_usd,
         include_partial_messages=True,
     )

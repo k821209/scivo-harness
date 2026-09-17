@@ -34,6 +34,7 @@ LOCAL_COMMANDS = {
     "/status": "reprint the session briefing",
     "/blocked": "what the guardrails stopped this session",
     "/cost": "spend so far",
+    "/session": "this session's id, to resume it later",
     "/tools": "which scivo tools this profile loaded",
     "/scivo-control": "drive this session from the scivo web page (`off` to stop)",
     "/help": "this list",
@@ -65,6 +66,7 @@ class Repl:
         self.skills = discover(session.config.root)
         self.line = Line(session.config.root, LOCAL_COMMANDS, self.skills)
         self.control: Control | None = None
+        self.session_id: str | None = session.options.resume
 
     # ------------------------------------------------------------ rendering
 
@@ -104,6 +106,7 @@ class Repl:
             self.control.end_assistant()
 
     def _on_result(self, message: ResultMessage) -> None:
+        self.session_id = message.session_id or self.session_id
         self.turns += message.num_turns
         if message.total_cost_usd:
             self.cost += message.total_cost_usd
@@ -141,6 +144,12 @@ class Repl:
             else:
                 print(ui.dim("  nothing blocked this session."))
             print(ui.dim(f"  analysis-shaped shell commands: {rails.adhoc_runs}\n"))
+        elif command == "/session":
+            if self.session_id:
+                print(f"\n  {self.session_id}")
+                print(ui.dim(f"  resume later: scivo resume {self.session_id[:8]}\n"))
+            else:
+                print(ui.dim("\n  no id yet — it is assigned with the first reply\n"))
         elif command == "/cost":
             print(ui.dim(f"\n  ${self.cost:.4f} over {self.turns} turns\n"))
         elif command == "/tools":
@@ -322,3 +331,5 @@ class Repl:
             if self.control and self.control.active:
                 await self.control.stop()
         print(ui.dim(f"session total ${self.cost:.4f}"))
+        if self.session_id:
+            print(ui.dim(f"resume: scivo resume {self.session_id[:8]}   (or scivo -c)"))

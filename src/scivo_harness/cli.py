@@ -22,6 +22,7 @@ from .providers import (
     write_example,
 )
 from .scivo_mcp import connect
+from .sessions import SessionLookupError, latest as latest_session, resolve as resolve_session, rows as session_rows
 from .setup import (
     Result,
     SetupError,
@@ -70,11 +71,17 @@ def _parser() -> argparse.ArgumentParser:
                         help="skip the project guide in the system prompt")
     parser.add_argument("--budget", type=float, default=None, metavar="USD",
                         help="stop the session when spend reaches this")
-    parser.add_argument("--resume", metavar="SESSION_ID")
+    parser.add_argument("--resume", metavar="SESSION",
+                        help="resume a session: its number in `scivo sessions`, or the start of its id")
+    parser.add_argument("-c", "--continue", dest="continue_last", action="store_true",
+                        help="resume the most recent session in this project")
 
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("chat", help="interactive session (default)")
     sub.add_parser("status", help="run the session-start protocol and print it; no model call")
+    sub.add_parser("sessions", help="list this project's sessions, most recent first")
+    resume = sub.add_parser("resume", help="pick a session from the list and continue it")
+    resume.add_argument("target", nargs="?", help="row number or id prefix; omit to choose from the list")
     sub.add_parser("doctor", help="check the wiring")
     sub.add_parser("tools", help="show what each profile loads")
     providers = sub.add_parser("providers", help="list configured model endpoints")
@@ -392,8 +399,49 @@ async def _tools(args) -> int:
     return 0
 
 
+def _print_sessions(root, limit: int = 20) -> list:
+    listed = session_rows(root, limit=limit)
+    if not listed:
+        print(ui.dim(f"No sessions recorded for {root} yet."))
+        return listed
+    for row in listed:
+        print(f"  {ui.bold(str(row.index)):>4}  {ui.dim(row.session_id[:8])}  {row.when}  {row.label}")
+    return listed
+
+
+async def _sessions(args) -> int:
+    config = load()
+    _print_sessions(config.root)
+    print(ui.dim("\n  scivo resume <number>   ·   scivo -c for the most recent"))
+    return 0
+
+
+async def _resume(args) -> int:
+    config = load()
+    target = args.target
+    if not target:
+        listed = _print_sessions(config.root)
+        if not listed:
+            return 1
+        if not sys.stdin.isatty():
+            print(ui.red("Name a session: scivo resume <number>"), file=sys.stderr)
+            return 2
+        target = input(ui.cyan("\n  resume which? ")).strip()
+        if not target:
+            return 0
+    args.resume = target
+    return await _chat(args)
+
+
 async def _chat(args, prompt_text: str | None = None) -> int:
     config = load()
+    resume_id = resolve_session(config.root, args.resume) if args.resume else None
+    continue_last = False
+    if args.continue_last and not resume_id:
+        if latest_session(config.root) is None:
+            print(ui.dim("No earlier session in this project — starting a new one."))
+        else:
+            continue_last = True
     session = await build(
         config,
         profile=args.profile,
@@ -404,7 +452,8 @@ async def _chat(args, prompt_text: str | None = None) -> int:
         with_guide=not args.no_guide,
         interactive=prompt_text is None,
         permission_mode=args.permission_mode,
-        resume=args.resume,
+        resume=resume_id,
+        continue_last=continue_last,
         max_budget_usd=args.budget,
         add_dirs=args.add_dir,
     )
@@ -435,13 +484,15 @@ def main(argv: list[str] | None = None) -> int:
         "shim": _shim,
         "update": _update,
         "setup": _setup,
+        "sessions": _sessions,
+        "resume": _resume,
         "run": lambda a: _chat(a, " ".join(a.prompt)),
         "chat": _chat,
         None: _chat,
     }
     try:
         return asyncio.run(handlers[args.command](args))
-    except (ConfigError, ProjectMismatch, ProviderError, SetupError) as exc:
+    except (ConfigError, ProjectMismatch, ProviderError, SetupError, SessionLookupError) as exc:
         print(ui.red(str(exc)), file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - the CLI's failures arrive as these

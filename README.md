@@ -12,7 +12,14 @@ scivo tools                # what each tool profile loads
 scivo run "..."            # one prompt, non-interactive
 scivo providers            # configured model endpoints
 scivo update               # update scivo + the MCP, re-link skills
+scivo sessions             # this project's sessions, newest first, with their titles
+scivo resume [N | id]      # continue one: its number above, or the start of its id
+scivo -c                   # continue the most recent session
 ```
+
+Sessions are named by the number `scivo sessions` shows or by the first few
+characters of the id. `/session` inside a session prints its id, and leaving
+prints the command that resumes it.
 
 Inside a session, `/scivo-control` drives it from a web page — see below.
 
