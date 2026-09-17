@@ -41,6 +41,7 @@ from .update import (
     inspect as inspect_install,
     has_remote,
     checkout_for_mcp,
+    drop_inapplicable_warning,
     link_skills,
     repo_root,
     restore_editable,
@@ -178,7 +179,7 @@ async def _doctor(args) -> int:
         if not who:
             print(ui.red(f"whoami      failed: {who.error}"))
             return 1
-        identity = who.first or {}
+        identity = drop_inapplicable_warning(config, who.first or {})
         bound = identity.get("project_id")
         match = bound == config.expected_project_id if config.expected_project_id else None
         mark = ui.green("match") if match else (ui.red("MISMATCH") if match is False else "unverified")
@@ -345,13 +346,18 @@ async def _update(args) -> int:
     print(f"mcp session {before_version} @ {before_sha}")
     print()
 
-    warning = (await _identity(config)).get("install_warning")
+    warning = drop_inapplicable_warning(config, await _identity(config)).get("install_warning")
 
     failed = False
     moved_any = False
     for dist, interpreter in targets:
         install = inspect_install(interpreter, dist)
-        if dist == "co-scientist-local" and install.found and not install.editable and warning:
+        # Only in a shared environment. A dedicated venv such as ~/.scivo is
+        # meant to hold a snapshot; guarding it — on the strength of a warning
+        # that fires whenever a clone sits on disk — froze its MCP at an old
+        # version and told the user to make it editable.
+        if (dist == "co-scientist-local" and install.found and not install.editable
+                and warning and not install.dedicated_venv):
             # The MCP says it is a snapshot sitting over a source checkout —
             # the silent flip. Reinstalling the snapshot, which is what an
             # "update" of a git install does, would entrench exactly the state

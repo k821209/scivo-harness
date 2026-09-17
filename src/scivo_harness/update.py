@@ -27,6 +27,7 @@ PROBE = r"""
 import json, sys, importlib.metadata as md
 from pathlib import Path
 out = {"found": False}
+out["dedicated_venv"] = sys.prefix != sys.base_prefix and not (Path(sys.prefix) / "conda-meta").is_dir()
 try:
     dist = md.distribution(sys.argv[1])
     out["found"] = True
@@ -55,6 +56,7 @@ class Install:
     url: str | None = None
     subdirectory: str | None = None
     editable: bool = False
+    dedicated_venv: bool = False
     vcs: str | None = None
     commit_id: str | None = None
     location: str = ""
@@ -189,3 +191,22 @@ def link_skills(config: ScivoConfig) -> tuple[bool, str]:
     code, output = _run([config.command, "-m", "co_scientist_local",
                          "install-skills", "--dir", str(config.root)])
     return code == 0, output[-400:]
+
+
+def drop_inapplicable_warning(config: ScivoConfig, identity: dict) -> dict:
+    """Remove `install_warning` when the MCP runs from a dedicated virtualenv.
+
+    The warning exists for one accident: an editable install in a SHARED
+    environment silently replaced by a snapshot, so every project on that
+    interpreter runs stale code. A dedicated venv such as ~/.scivo holds a
+    snapshot by design and cannot overwrite anyone else's install. The server
+    currently raises the warning whenever a clone sits at the default path, so
+    in that case it was on every session of every project set up with
+    `scivo setup`, telling people to run `pip install -e` for nothing.
+    """
+    if not identity.get("install_warning"):
+        return identity
+    install = inspect(config.command, "co-scientist-local")
+    if install.found and install.dedicated_venv:
+        return {k: v for k, v in identity.items() if k != "install_warning"}
+    return identity

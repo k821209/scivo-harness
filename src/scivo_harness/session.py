@@ -46,6 +46,9 @@ async def survey(config: ScivoConfig, *, with_guide: bool) -> tuple[Briefing, li
     """
     async with connect(config) as client:
         briefing = await gather(client, config)
+        from .update import drop_inapplicable_warning
+
+        briefing.identity = drop_inapplicable_warning(config, briefing.identity)
         tools = await client._session.list_tools()  # noqa: SLF001 - our own wrapper
         names = [tool.name for tool in tools.tools]
         guide = None
