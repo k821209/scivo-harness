@@ -79,6 +79,42 @@ dropped silently.
 once went to Anthropic and the user found out only when it never appeared in the
 Feedback tab.
 
+## Permissions, inside a session
+
+By default each tool that changes something asks first: `[y]es / [a]lways /
+[n]o` in the terminal, or buttons on the `/scivo-control` page. When a model
+fires several calls at once, the questions come one at a time, and answering `a`
+on the first settles the rest. You can change this without restarting:
+
+```
+/permissions                         show the mode and what is always allowed
+/permissions always update_section   stop asking for one tool, this session
+/permissions always -update_section  ask for it again
+/permissions auto                    a classifier approves or refuses each call
+/permissions acceptEdits             file edits run; everything else asks
+/permissions plan                    read and plan only
+/permissions default                 back to asking
+/dangerously-skip-permissions        ask for nothing        (… off to ask again)
+```
+
+While asking is off, the prompt reads `scivo[skip]›`, and it shows `[auto]`,
+`[edits]` or `[plan]` for the other modes, so you can always see that you are
+not in the default. `--permission-mode` sets the same thing at launch.
+
+Two things do not change with the mode:
+
+- **The guardrails still apply.** A raw `ssh … nohup` and a remote `pkill -f`
+  are blocked even under `/dangerously-skip-permissions`. They are hooks that
+  run before any permission decision.
+- **Tools that reach outside the machine are approved one call at a time.** This
+  covers YouTube uploads, `publish_page` and remote jobs. `always` refuses them.
+  The one way to stop asking about them is `/dangerously-skip-permissions`,
+  which says so when you turn it on.
+
+Every session is launched with bypass made *available*, via the CLI's
+`--allow-dangerously-skip-permissions`, but not turned on. Without that the CLI
+refuses to switch to it mid-session.
+
 ## Driving a session from the web — `/scivo-control`
 
 Inside a running `scivo`, type `/scivo-control`. It prints a link and a

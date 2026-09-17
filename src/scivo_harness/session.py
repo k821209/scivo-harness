@@ -85,9 +85,10 @@ async def build(
     # mode means the user has already decided, so we stay out of the way.
     from .permissions import Approvals, Explain
 
-    approver = None
-    if permission_mode == "default":
-        approver = Approvals() if interactive else Explain(permission_mode, str(config.root))
+    # Always installed, whatever mode the session starts in: the mode can now
+    # change mid-session, and a session switched back to "default" with no
+    # callback would deny everything with a message nobody can act on.
+    approver = Approvals() if interactive else Explain(permission_mode, str(config.root))
 
     mcp_server: dict[str, Any] = {
         "type": "stdio",
@@ -122,6 +123,11 @@ async def build(
         env=chosen.resolve_env(),
         cwd=str(config.root),
         add_dirs=list(add_dirs or []),
+        # Makes bypassPermissions *available* without turning it on, so
+        # `/dangerously-skip-permissions` can switch to it mid-session. Without
+        # it the CLI refuses: "the session was not launched with
+        # --dangerously-skip-permissions". Nothing is bypassed until chosen.
+        extra_args={"allow-dangerously-skip-permissions": None},
         resume=resume,
         continue_conversation=continue_last and not resume,
         max_budget_usd=max_budget_usd,
