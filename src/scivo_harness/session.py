@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import warnings
@@ -24,6 +24,22 @@ DEFAULT_EFFORT = "high"
 # stays available; these are the ones that never need a permission prompt.
 AUTO_APPROVED_HOST_TOOLS = ["Read", "Glob", "Grep", "TodoWrite", "WebSearch", "WebFetch"]
 
+# A local model gets the whole prompt on every request, uncached and with no
+# deferred tool loading: Claude Code only defers tool schemas for Anthropic's
+# own models. Measured on qwen-test, the full session was 377 KB (~100k tokens):
+# 285 KB of tool schemas (272 tools) and 89 KB of system prompt, 71 KB of it the
+# project guide. A 27B model spends minutes on that before its first token, so
+# a local session carries a working core instead.
+LOCAL_HOST_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite", "WebFetch", "Skill"]
+LOCAL_SCIVO_TOOLS = (
+    "whoami", "list_papers", "get_paper_state", "get_manuscript", "list_sections",
+    "get_section", "add_section", "update_section", "list_references",
+    "search_references", "add_reference_by_doi", "list_figures", "get_figure",
+    "list_tables", "get_table", "list_paper_comments", "count_open_user_comments",
+    "list_analyses", "get_analysis", "list_todos", "add_todo", "update_todo",
+    "get_project_memory", "append_project_memory", "log_activity", "report_feedback",
+)
+
 
 @dataclass
 class Session:
@@ -36,6 +52,29 @@ class Session:
     model: str
     approver: Any = None
     endpoint: Any = None
+    # The Claude-shaped options, kept so a switch back from a local model
+    # restores the guide and the full tool surface.
+    full_options: Any = None
+    lean_append: str = ""
+    scivo_tools: tuple[str, ...] = ()
+
+    def options_for(self, provider: Provider, **changes: Any) -> ClaudeAgentOptions:
+        """Options for `provider`: the full session, or the lean one for a local model."""
+        base = replace(self.full_options, **changes)
+        if not provider.is_local:
+            return base
+        return lean(base, self.lean_append, self.scivo_tools)
+
+
+def lean(options: ClaudeAgentOptions, append: str, scivo_tools: tuple[str, ...]) -> ClaudeAgentOptions:
+    keep = set(LOCAL_SCIVO_TOOLS)
+    dropped = [PREFIX + n for n in scivo_tools if n not in keep]
+    return replace(
+        options,
+        tools=list(LOCAL_HOST_TOOLS),
+        system_prompt={"type": "preset", "preset": "claude_code", "append": append},
+        disallowed_tools=sorted(set(options.disallowed_tools) | set(dropped)),
+    )
 
 
 async def survey(config: ScivoConfig, *, with_guide: bool) -> tuple[Briefing, list[str], str | None]:
@@ -140,9 +179,13 @@ async def build(
         max_budget_usd=max_budget_usd,
         include_partial_messages=True,
     )
-    return Session(options=options, briefing=briefing, plan=plan, rails=rails,
-                   config=config, provider=chosen, model=model, approver=approver,
-                   endpoint=endpoint)
+    session = Session(options=options, briefing=briefing, plan=plan, rails=rails,
+                      config=config, provider=chosen, model=model, approver=approver,
+                      endpoint=endpoint, full_options=options,
+                      lean_append=prompt.build(briefing, plan, guide=None),
+                      scivo_tools=tuple(tool_names))
+    session.options = session.options_for(chosen)
+    return session
 
 
 def scivo_tool_label(name: str) -> str:

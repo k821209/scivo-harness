@@ -256,6 +256,13 @@ in-process, with one line saying so, so there is nothing to set up.
 `scivo shim --help` explains what it does. A server that is not running is
 refused before the session starts, instead of retrying for a minute.
 
+A local session carries a smaller kit than a Claude one: no project guide in
+the prompt, the core file and shell tools, and the ~26 scivo tools for reading
+and editing a paper, its todos and memory. A local server re-reads the whole
+prompt on every request, with no caching and no deferred tool loading, and the
+full session is about 100k tokens (a 27B model sat for minutes before its first
+word). The lean one is about 14k. `/model opus` restores everything.
+
 ## Design notes
 
 - **Start from the host's prompt, not from scratch.** The system prompt is

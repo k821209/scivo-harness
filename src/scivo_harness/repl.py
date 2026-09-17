@@ -286,8 +286,6 @@ class Repl:
     # ----------------------------------------------------------------- model
 
     async def _model(self, argument: str) -> None:
-        from dataclasses import replace
-
         from .providers import load_all
         from .session import DEFAULT_EFFORT, DEFAULT_MODEL
 
@@ -342,8 +340,8 @@ class Repl:
         except ProviderError as exc:
             self._say(ui.red(f"  {exc}") + ui.dim(f"\n  still on {provider.name} ({self.session.model})\n"))
             return
-        options = replace(
-            self.session.options,
+        options = self.session.options_for(
+            target,
             env=endpoint.env,
             model=model,
             effort=(self.session.options.effort or DEFAULT_EFFORT) if target.supports_effort else None,
