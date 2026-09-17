@@ -14,6 +14,8 @@ scivo providers            # configured model endpoints
 scivo update               # update scivo + the MCP, re-link skills
 ```
 
+Inside a session, `/scivo-control` drives it from a web page — see below.
+
 ## Why this exists
 
 A Scivo project already works under a general coding agent: an MCP server, 28
@@ -69,6 +71,58 @@ dropped silently.
 `report_feedback`, because nothing else is wired in. A report meant for Scivo
 once went to Anthropic and the user found out only when it never appeared in the
 Feedback tab.
+
+## Driving a session from the web — `/scivo-control`
+
+Inside a running `scivo`, type `/scivo-control`. It prints a link and a
+passcode. Open the link on any device, and the same local session is driven
+from there: send messages, watch replies stream in, answer tool approvals with
+buttons, and press **Stop** to interrupt a turn. The terminal keeps working at
+the same time, and anything typed there shows up on the page too.
+`/scivo-control off` unpublishes the page, and so does leaving `scivo`.
+
+```
+scivo› /scivo-control
+
+  scivo-control on
+  open      https://co-scientist-5af1a.web.app/p/<project>/<pub>
+  passcode  XXXXXXXXXX   (yours only — it acts on this machine)
+```
+
+**Everything still runs on your machine.** The page is only a window onto it:
+the tools, the shell and the files are local, and so is the Claude login.
+
+**The page renders what the model writes.** Markdown comes out with tables,
+code highlighting and Korean text, and slash commands complete from a menu
+just as they do in the terminal. An `html` code block also gets a live preview.
+That preview sits in a `sandbox=""` iframe, so scripts are off and it has no
+origin. A lone `~` stays a tilde, because in research text it means
+"approximately"; strikethrough needs `~~`.
+
+**It is for one person driving their own session.** The page gets one
+passcode, labelled `owner`, and the local side acts only on input carrying that
+label. The server stamps the label from the passcode, so page code cannot
+forge it. Do not hand the passcode to a collaborator. Whoever holds it is
+typing into a shell on your machine, and would be doing so on your Claude
+account. The passcode is kept in `.scivo/control.json` (mode 600, gitignored)
+and stays the same across sessions, which is what makes it practical to use
+from a phone.
+
+**The page runs in the dashboard's origin, and it can send the agent
+instructions.** That combination is why model output is never trusted as
+markup. All markdown goes through DOMPurify with `style`, form and embedding
+elements removed. HTML is shown only inside the sandboxed preview, and this code
+creates that iframe after sanitizing, so model output cannot edit the sandbox
+attribute. Without those two steps, a prompt injection that got script onto the
+page could write a message the agent would then carry out.
+
+**How it works.** No new server is involved. It uses `publish_page`: the page
+reads `content/head` and fixed-size transcript chunks, and writes to three fixed
+response docs (inbox, approvals, control). The harness reads and writes those
+over MCP. The page client offers no realtime subscription, so both sides poll
+about once a second. Idle, the page does one read per interval. Expect a second
+or so of lag in each direction. Streaming output arrives in bursts of about
+half a second.
 
 ## Model endpoints
 

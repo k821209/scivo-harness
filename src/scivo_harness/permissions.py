@@ -53,6 +53,11 @@ class Approvals:
     def __init__(self) -> None:
         self.always: set[str] = set()
         self.denied: list[str] = []
+        # Set by `/scivo-control`. While the web page drives the session the
+        # question is asked there: a thread blocked on the terminal's stdin
+        # cannot be withdrawn when the answer arrives from the page, and would
+        # then swallow the next line typed.
+        self.remote: Any = None
 
     async def __call__(self, tool_name: str, payload: dict[str, Any], context: Any):
         if tool_name in self.always:
@@ -63,13 +68,26 @@ class Approvals:
         print(ui.yellow(f"  permission  {describe(tool_name, payload)}"))
         if outward:
             print(ui.dim("              this one reaches outside this machine"))
-        options = "[y]es / [n]o" if outward else "[y]es / [a]lways / [n]o"
-        answer = (await asyncio.to_thread(input, ui.cyan(f"  {options}? "))).strip().lower()
 
-        if answer in {"a", "always"} and not outward:
-            self.always.add(tool_name)
+        if self.remote is not None and self.remote.active:
+            print(ui.dim("              waiting for your answer on the scivo-control page…"))
+            answer = await self.remote.ask_approval(scivo_tool_label(tool_name),
+                                                    describe(tool_name, payload), outward)
+            print(ui.dim(f"              {answer} (from the page)"))
+        else:
+            options = "[y]es / [n]o" if outward else "[y]es / [a]lways / [n]o"
+            answer = (await asyncio.to_thread(input, ui.cyan(f"  {options}? "))).strip().lower()
+
+        if answer in {"a", "always"}:
+            # For a tool that reaches outside this machine "always" is not
+            # remembered, but it is still a yes to this call — never a no.
+            if not outward:
+                self.always.add(tool_name)
             return PermissionResultAllow(updated_input=payload)
-        if answer in {"y", "yes", ""}:
+        # "allow" is what the page sends; y/yes/empty is the terminal. Missing the
+        # first once made an approved call land in the deny branch below while
+        # the page showed "allowed".
+        if answer in {"y", "yes", "", "allow"}:
             return PermissionResultAllow(updated_input=payload)
 
         self.denied.append(tool_name)

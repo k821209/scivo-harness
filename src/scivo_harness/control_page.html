@@ -1,0 +1,349 @@
+<!--
+  scivo-control — the web half of `/scivo-control`.
+
+  Published with publish_page and handed a scoped `window.scivo` client. It
+  reads `content/head` and `content/log-<sid>-<k>`, and writes three fixed docs
+  under `responses`: inbox, approvals, control. See control.py for why the
+  layout is shaped like this.
+
+  Security, because this page runs in the dashboard's origin and anything it
+  writes to `responses` is acted on by an agent with a shell on the owner's
+  machine: model output is never trusted as markup. Markdown is rendered by
+  marked and sanitized by DOMPurify with style and form elements removed, and
+  HTML is shown only inside a sandbox="" iframe — no scripts, no same-origin.
+  The preview iframes are created by this code after sanitizing, never by the
+  markdown, so the sandbox attribute is ours and cannot be edited away.
+-->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css">
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
+
+<style>
+  #sc-root {
+    --bg: #fbfaf7; --panel: #ffffff; --ink: #1c1b19; --muted: #6b6860; --line: #e6e2d9;
+    --accent: #2f6f5e; --accent-ink: #ffffff; --user: #eef4f1; --warn: #9a6200; --err: #b3261e;
+    --code: #0f1419; --shadow: 0 1px 2px rgba(0,0,0,.06);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+    color: var(--ink); background: var(--bg);
+    display: flex; flex-direction: column; height: 100dvh; max-width: 980px; margin: 0 auto;
+  }
+  @media (prefers-color-scheme: dark) {
+    #sc-root { --bg: #141412; --panel: #1c1c1a; --ink: #ecebe6; --muted: #9c998f; --line: #2d2c28;
+      --accent: #5fb39a; --accent-ink: #0d1a16; --user: #1f2a26; --warn: #e0a84a; --err: #ff8a80; }
+  }
+  #sc-root * { box-sizing: border-box; }
+  .sc-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .sc-title { font-weight: 650; }
+  .sc-sub { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sc-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .sc-dot.live { background: #3fb67b; box-shadow: 0 0 0 3px rgba(63,182,123,.18); }
+  .sc-dot.stale { background: var(--warn); }
+  .sc-dot.ended { background: var(--err); }
+  .sc-spacer { flex: 1; }
+  .sc-log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .sc-empty { color: var(--muted); text-align: center; margin: auto; max-width: 420px; }
+  .sc-user { align-self: flex-end; max-width: 85%; background: var(--user); border: 1px solid var(--line);
+    padding: 8px 12px; border-radius: 12px 12px 2px 12px; white-space: pre-wrap; word-break: break-word; }
+  .sc-via { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .sc-assistant { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 4px 14px; box-shadow: var(--shadow); overflow-wrap: anywhere; }
+  .sc-assistant.streaming::after { content: "▍"; color: var(--accent); animation: sc-blink 1s steps(2) infinite; }
+  @keyframes sc-blink { 50% { opacity: 0; } }
+  .sc-md table { border-collapse: collapse; display: block; overflow-x: auto; margin: 10px 0; }
+  .sc-md th, .sc-md td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+  .sc-md pre { background: var(--code); color: #e6e1cf; padding: 10px 12px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+  .sc-md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+  .sc-md :not(pre) > code { background: rgba(127,127,127,.15); padding: 1px 5px; border-radius: 4px; }
+  .sc-md blockquote { border-left: 3px solid var(--line); margin: 8px 0; padding: 2px 12px; color: var(--muted); }
+  .sc-md img { max-width: 100%; }
+  .sc-md a { color: var(--accent); }
+  .sc-preview { width: 100%; min-height: 160px; height: 280px; border: 1px solid var(--line); border-radius: 8px; background: #fff; margin: 4px 0 10px; resize: vertical; }
+  .sc-preview-label { font-size: 12px; color: var(--muted); }
+  .sc-tool { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); padding: 0 4px; white-space: pre-wrap; word-break: break-all; }
+  .sc-tool b { color: var(--ink); font-weight: 600; }
+  .sc-status { font-size: 13px; color: var(--muted); text-align: center; }
+  .sc-status.warn { color: var(--warn); } .sc-status.error { color: var(--err); }
+  .sc-result { font-size: 12px; color: var(--muted); text-align: right; }
+  .sc-approval { border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; background: var(--panel); }
+  .sc-approval .sc-q { font-weight: 600; margin-bottom: 4px; }
+  .sc-approval .sc-detail { font: 12.5px ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; color: var(--muted); }
+  .sc-approval .sc-note { font-size: 12px; color: var(--warn); margin-top: 4px; }
+  .sc-btns { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .sc-btn { font: inherit; font-size: 14px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    padding: 6px 14px; border-radius: 8px; cursor: pointer; }
+  .sc-btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .sc-btn.danger { color: var(--err); }
+  .sc-btn:disabled { opacity: .5; cursor: default; }
+  .sc-decided { font-size: 13px; margin-top: 6px; font-weight: 600; }
+  .sc-foot { border-top: 1px solid var(--line); padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); position: relative; }
+  .sc-row { display: flex; gap: 8px; align-items: flex-end; }
+  .sc-input { flex: 1; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 9px 12px; resize: none; max-height: 40vh; min-height: 42px; }
+  .sc-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .sc-menu { position: absolute; left: 12px; right: 12px; bottom: 100%; max-height: 260px; overflow-y: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.15); }
+  .sc-menu div { padding: 6px 12px; cursor: pointer; display: flex; gap: 10px; }
+  .sc-menu div.on, .sc-menu div:hover { background: var(--user); }
+  .sc-menu b { font-family: ui-monospace, Menlo, monospace; font-weight: 600; white-space: nowrap; }
+  .sc-menu span { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sc-hint { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+</style>
+
+<div id="sc-root">
+  <div class="sc-head">
+    <span class="sc-dot" id="sc-dot"></span>
+    <div style="min-width:0">
+      <div class="sc-title" id="sc-title">scivo-control</div>
+      <div class="sc-sub" id="sc-sub">waiting for the local session…</div>
+    </div>
+    <span class="sc-spacer"></span>
+    <button class="sc-btn danger" id="sc-stop" title="Interrupt the running turn">Stop</button>
+  </div>
+  <div class="sc-log" id="sc-log"><div class="sc-empty" id="sc-empty">No session is connected. Run <code>/scivo-control</code> inside <code>scivo</code> on your machine; this page picks it up by itself.</div></div>
+  <div class="sc-foot">
+    <div class="sc-menu" id="sc-menu" hidden></div>
+    <div class="sc-row">
+      <textarea class="sc-input" id="sc-input" rows="1" placeholder="Message your session — / for commands"></textarea>
+      <button class="sc-btn primary" id="sc-send">Send</button>
+    </div>
+    <div class="sc-hint">Enter to send · Shift+Enter for a new line · runs on your machine, with its tools</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const C = window.scivo;
+  const $ = (id) => document.getElementById(id);
+  const log = $("sc-log"), input = $("sc-input"), menu = $("sc-menu");
+  const HEAD_EVERY = 800, STALE_MS = 20000;
+
+  const S = { sid: null, head: null, events: [], nodes: new Map(), json: new Map(),
+              seq: 0, msgs: [], interrupt: 0, commands: [], menuIndex: 0 };
+
+  // ------------------------------------------------------------ rendering
+  marked.setOptions({ gfm: true, breaks: true });
+  const renderer = new marked.Renderer();
+  renderer.code = function (code, lang) {
+    const language = (lang || "").trim().split(/\s+/)[0];
+    let body;
+    try {
+      body = language && window.hljs && hljs.getLanguage(language)
+        ? hljs.highlight(code, { language }).value
+        : (window.hljs ? hljs.highlightAuto(code).value : escapeHtml(code));
+    } catch (_) { body = escapeHtml(code); }
+    return `<pre><code class="hljs language-${escapeHtml(language)}" data-raw="${encodeURIComponent(code)}">${body}</code></pre>`;
+  };
+  marked.use({ renderer });
+  // Strikethrough only for ~~double~~ tildes. marked also strikes ~single~
+  // pairs, and in research text a lone ~ means "approximately": "~91 GB …
+  // ~1.3 TB" came out struck through in the first rendered briefing.
+  marked.use({ tokenizer: {
+    del(src) {
+      const double = /^~~(?=\S)([\s\S]*?\S)~~(?!~)/.exec(src);
+      if (double) return { type: "del", raw: double[0], text: double[1], tokens: this.lexer.inlineTokens(double[1]) };
+      if (src[0] === "~") return { type: "text", raw: "~", text: "~" };
+      return false;
+    },
+  } });
+
+  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+    if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
+  });
+  const PURIFY = { FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select", "iframe", "object", "embed"],
+                   FORBID_ATTR: ["style"], ADD_ATTR: ["target", "data-raw"] };
+
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+  function renderMarkdown(target, text) {
+    target.innerHTML = DOMPurify.sanitize(marked.parse(text || ""), PURIFY);
+    // HTML blocks get a live preview in a sandbox with no scripts and no origin.
+    target.querySelectorAll("code.language-html, code.language-svg").forEach((code) => {
+      const raw = decodeURIComponent(code.getAttribute("data-raw") || "");
+      if (!raw.trim()) return;
+      const label = document.createElement("div");
+      label.className = "sc-preview-label"; label.textContent = "rendered (sandboxed, scripts off)";
+      const frame = document.createElement("iframe");
+      frame.className = "sc-preview"; frame.setAttribute("sandbox", ""); frame.setAttribute("referrerpolicy", "no-referrer");
+      frame.srcdoc = raw;
+      const pre = code.closest("pre");
+      pre.after(label); label.after(frame);
+    });
+  }
+
+  function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 80; }
+
+  function nodeFor(ev) {
+    const el = document.createElement("div");
+    switch (ev.kind) {
+      case "user": {
+        el.className = "sc-user";
+        const via = document.createElement("span"); via.className = "sc-via"; via.textContent = ev.via === "web" ? "you · web" : "you · terminal";
+        el.append(via, document.createTextNode(ev.text || ""));
+        break;
+      }
+      case "assistant":
+        el.className = "sc-assistant sc-md" + (ev.done ? "" : " streaming");
+        renderMarkdown(el, ev.text);
+        break;
+      case "tool":
+        el.className = "sc-tool";
+        el.innerHTML = "· <b>" + escapeHtml(ev.name) + "</b>" + (ev.detail ? "  " + escapeHtml(ev.detail) : "");
+        break;
+      case "result": {
+        el.className = "sc-result";
+        el.textContent = (ev.error ? "⚠ " + ev.error + " · " : "") + `${ev.turns} turns · $${Number(ev.cost).toFixed(3)} · $${Number(ev.total).toFixed(3)} session`;
+        break;
+      }
+      case "approval": approvalNode(el, ev); break;
+      default:
+        el.className = "sc-status " + (ev.level || "");
+        el.textContent = ev.text || "";
+    }
+    return el;
+  }
+
+  function approvalNode(el, ev) {
+    el.className = "sc-approval";
+    const q = document.createElement("div"); q.className = "sc-q"; q.textContent = "Allow " + ev.tool + "?";
+    const d = document.createElement("div"); d.className = "sc-detail"; d.textContent = ev.detail || "";
+    el.append(q, d);
+    if (ev.outward) { const n = document.createElement("div"); n.className = "sc-note"; n.textContent = "Reaches outside your machine — approved one call at a time."; el.append(n); }
+    if (ev.state === "pending") {
+      const row = document.createElement("div"); row.className = "sc-btns";
+      const button = (label, decision, cls) => { const b = document.createElement("button"); b.className = "sc-btn " + (cls || ""); b.textContent = label;
+        b.onclick = () => { row.querySelectorAll("button").forEach((x) => (x.disabled = true)); decide(ev.rid, decision); }; return b; };
+      row.append(button("Allow", "allow", "primary"));
+      if (!ev.outward) row.append(button("Always for this tool", "always"));
+      row.append(button("Deny", "deny", "danger"));
+      el.append(row);
+    } else {
+      const s = document.createElement("div"); s.className = "sc-decided";
+      s.textContent = { allow: "✓ allowed", always: "✓ allowed for the rest of the session", deny: "✗ denied" }[ev.state] || ev.state;
+      el.append(s);
+    }
+  }
+
+  function render(events) {
+    const stick = atBottom();
+    if (events.length) $("sc-empty")?.remove();
+    for (const ev of events) {
+      const key = ev.i, json = JSON.stringify(ev);
+      if (S.json.get(key) === json) continue;
+      const fresh = nodeFor(ev), old = S.nodes.get(key);
+      if (old) old.replaceWith(fresh); else log.append(fresh);
+      S.nodes.set(key, fresh); S.json.set(key, json);
+    }
+    if (stick) log.scrollTop = log.scrollHeight;
+  }
+
+  // --------------------------------------------------------------- polling
+  async function resetFor(head) {
+    S.sid = head.sid; S.events = []; S.nodes.clear(); S.json.clear();
+    log.innerHTML = "";
+    S.seq = 0; S.msgs = []; S.interrupt = 0;
+    try {  // resume numbering if this tab reloads mid-session
+      for (const r of await C.list("responses")) {
+        if (r.sid !== head.sid) continue;
+        if (r.doc === "inbox") { S.msgs = r.msgs || []; S.seq = S.msgs.reduce((m, x) => Math.max(m, x.seq || 0), 0); }
+        if (r.doc === "control") S.interrupt = r.interrupt || 0;
+      }
+    } catch (_) {}
+    try { const c = await C.get("content", "commands-" + head.sid); S.commands = (c && c.list) || []; } catch (_) { S.commands = []; }
+  }
+
+  async function poll() {
+    let head;
+    try { head = await C.get("content", "head"); } catch (e) { setDot("stale", "cannot read the session: " + e.message); return; }
+    if (!head) { setDot("", "waiting for the local session…"); return; }
+    if (head.sid !== S.sid) await resetFor(head);
+    const age = Date.now() - (head.beat || 0);
+    const state = head.state === "ended" ? "ended" : age > STALE_MS ? "stale" : "live";
+    $("sc-title").textContent = head.project || "scivo-control";
+    setDot(state, { live: "connected", stale: "no heartbeat for " + Math.round(age / 1000) + "s", ended: "session ended — run /scivo-control again" }[state]
+      + " · " + (head.model || "") + " · " + head.sid);
+    if (S.head && S.head.rev === head.rev && S.head.sid === head.sid) return;
+    const prevCount = S.head && S.head.sid === head.sid ? S.head.events : 0;
+    S.head = head;
+    const chunk = head.chunk || 20, total = head.events || 0;
+    // Re-read from the first chunk that can still be changing: an unfinished
+    // reply or a pending approval, else the last chunk we had.
+    let from = Math.floor(Math.max(0, prevCount - 1) / chunk);
+    S.events.forEach((ev) => { if ((ev.kind === "assistant" && !ev.done) || (ev.kind === "approval" && ev.state === "pending")) from = Math.min(from, Math.floor(ev.i / chunk)); });
+    const to = Math.floor(Math.max(0, total - 1) / chunk);
+    for (let k = from; k <= to && total > 0; k++) {
+      const doc = await C.get("content", `log-${head.sid}-${String(k).padStart(4, "0")}`);
+      if (!doc) continue;
+      for (const ev of doc.events || []) S.events[ev.i] = ev;
+    }
+    render(S.events.filter(Boolean));
+  }
+
+  function setDot(state, text) { $("sc-dot").className = "sc-dot " + state; $("sc-sub").textContent = text; }
+
+  async function loop() { try { await poll(); } catch (e) { setDot("stale", e.message); } setTimeout(loop, HEAD_EVERY); }
+
+  // ----------------------------------------------------------------- input
+  async function send() {
+    const text = input.value.replace(/\s+$/, "");
+    if (!text.trim() || !S.sid) return;
+    input.value = ""; autosize(); hideMenu();
+    S.seq += 1;
+    S.msgs = [...S.msgs, { seq: S.seq, text, t: Date.now() }].slice(-30);
+    try { await C.put("responses", "inbox", { doc: "inbox", sid: S.sid, msgs: S.msgs }); }
+    catch (e) { input.value = text; alert("Not sent: " + e.message); }
+  }
+  async function decide(rid, decision) {
+    await C.put("responses", "approvals", { doc: "approvals", sid: S.sid, decisions: { [rid]: decision } });
+  }
+  async function stop() {
+    if (!S.sid) return;
+    S.interrupt += 1;
+    await C.put("responses", "control", { doc: "control", sid: S.sid, interrupt: S.interrupt });
+  }
+
+  function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px"; }
+
+  function matches() {
+    const v = input.value;
+    if (!v.startsWith("/") || /\s/.test(v)) return [];
+    const needle = v.slice(1).toLowerCase();
+    const starts = S.commands.filter((c) => c.name.slice(1).toLowerCase().startsWith(needle));
+    const contains = S.commands.filter((c) => needle && c.name.toLowerCase().includes(needle) && !starts.includes(c));
+    return [...starts, ...contains].slice(0, 40);
+  }
+  function showMenu() {
+    const list = matches();
+    if (!list.length) return hideMenu();
+    S.menuIndex = Math.min(S.menuIndex, list.length - 1);
+    menu.innerHTML = "";
+    list.forEach((c, i) => {
+      const row = document.createElement("div"); if (i === S.menuIndex) row.className = "on";
+      const b = document.createElement("b"); b.textContent = c.name;
+      const s = document.createElement("span"); s.textContent = c.help || "";
+      row.append(b, s); row.onmousedown = (e) => { e.preventDefault(); pick(c); };
+      menu.append(row);
+    });
+    menu.hidden = false;
+  }
+  function hideMenu() { menu.hidden = true; S.menuIndex = 0; }
+  function pick(c) { input.value = c.name + " "; hideMenu(); input.focus(); autosize(); }
+
+  input.addEventListener("input", () => { autosize(); S.menuIndex = 0; showMenu(); });
+  input.addEventListener("keydown", (e) => {
+    if (!menu.hidden) {
+      const list = matches();
+      if (e.key === "ArrowDown") { e.preventDefault(); S.menuIndex = (S.menuIndex + 1) % list.length; return showMenu(); }
+      if (e.key === "ArrowUp") { e.preventDefault(); S.menuIndex = (S.menuIndex - 1 + list.length) % list.length; return showMenu(); }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); return pick(list[S.menuIndex]); }
+      if (e.key === "Escape") return hideMenu();
+    }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  });
+  $("sc-send").onclick = send;
+  $("sc-stop").onclick = stop;
+
+  window.__scivoControl = S;  // for inspection
+  loop();
+})();
+</script>
