@@ -233,44 +233,8 @@ scivo --provider local doctor          # probes the endpoint the way a session w
 scivo --provider local                 # if doctor is happy
 ```
 
-If `doctor` says the model's chat template rejects mid-conversation system
-messages, run the shim in a second terminal and use the `local-shim` provider,
-which points at it:
-
-```bash
-scivo shim --upstream http://localhost:8190 --port 8191
-scivo --provider local-shim
-```
-
-### The chat-template trap
-
-A local server can pass that probe and still fail on turn one:
-
-```
-API Error: 500 — Jinja Exception: System message must be at the beginning.
-```
-
-Claude Code sends operator instructions as `{"role": "system"}` entries inside
-`messages[]` rather than editing the top-level `system` field, because that
-keeps the cached prefix intact. Qwen3's stock GGUF chat template raises on it.
-The error names a template line number and reads like a broken harness.
-
-```bash
-scivo shim --upstream http://localhost:8190 --port 8191   # then point base_url at :8191
-```
-
-Verified end to end: Qwen3.8-27B on a local `llama-server` completes a scivo
-session through it, answering from the preflight briefing. Two non-fatal
-warnings are expected — `unrecognized_model` on the CLI's own title call, and a
-notice that claude.ai connectors are off because the provider sets an auth
-token.
-
-The shim folds each such message into the adjacent user turn — the following
-one where there is one, so the instruction still precedes the turn it governs,
-and the preceding one otherwise, since two user messages in a row trades one
-template error for another. It is a workaround and it does blur a turn-scoped
-note into user text; starting `llama-server` with a template that tolerates
-system messages anywhere is cleaner when restarting that server is free.
+If `doctor` reports a format problem with the server, `scivo shim --help` has the
+one-command fix.
 
 ## Design notes
 
@@ -396,8 +360,6 @@ pip's own output is not evidence that anything moved.
 - No token/cost telemetry beyond the per-turn line.
 - `--profile` is static for the session; the tools cannot be reloaded mid-session.
 - Guardrail coverage is four rules. The guide documents more that could be hooks.
-- The shim is HTTP/1.1 chunked passthrough on the stdlib server — fine for one
-  local session, not a load-bearing proxy.
 
 ## License
 

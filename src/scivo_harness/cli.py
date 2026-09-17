@@ -107,10 +107,34 @@ def _parser() -> argparse.ArgumentParser:
     update.add_argument("--restore-editable", action="store_true",
                         help="if the MCP is a snapshot over a source checkout, point it back at the checkout")
     shim = sub.add_parser(
-        "shim", help="proxy a local server whose chat template rejects mid-conversation system messages")
-    shim.add_argument("--upstream", default="http://localhost:8190")
-    shim.add_argument("--port", type=int, default=8191)
-    shim.add_argument("--verbose", action="store_true")
+        "shim", help="make a local model's server accept what scivo sends (only if doctor says so)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="""\
+Only needed for some local models. `scivo --provider local doctor` tells you when.
+
+scivo runs on Claude Code, and Claude Code sends one thing some local model
+servers refuse: a "system" message in the middle of the conversation. Qwen3's
+chat template on llama-server, for one, accepts system messages only at the
+start and fails the whole request with:
+
+  System message must be at the beginning
+
+The shim sits between scivo and that server. It moves each mid-conversation
+system message into the next user message and passes everything else through
+unchanged, streaming included. The model is the same; only the order changes.
+
+  1. keep this running in a second terminal:
+       scivo shim --upstream http://localhost:8190 --port 8191
+  2. use the provider that points at the shim:
+       scivo --provider local-shim
+
+`local-shim` is already in the file `scivo providers --init` writes; set its
+model to the name your server reports at /v1/models.""")
+    shim.add_argument("--upstream", default="http://localhost:8190",
+                      help="the local model server (default: %(default)s)")
+    shim.add_argument("--port", type=int, default=8191,
+                      help="where the shim listens; point a provider's base_url here (default: %(default)s)")
+    shim.add_argument("--verbose", action="store_true", help="log each request it forwards")
     run = sub.add_parser("run", help="one prompt, non-interactive")
     run.add_argument("prompt", nargs="+")
     return parser

@@ -243,10 +243,8 @@ def probe(provider: Provider, timeout: float = 180.0) -> tuple[bool, str]:
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
         if "system" in detail.lower():
-            return False, ("tool_use works, but this model's chat template rejects the "
-                           "mid-conversation system messages Claude Code sends. Run "
-                           f"`scivo shim --upstream {provider.base_url} --port 8191` and "
-                           "point base_url at http://localhost:8191")
+            return False, ("tool_use works, but this server rejects a message format scivo "
+                           "sends. Run `scivo shim --help` — it is a one-command fix.")
         return False, f"HTTP {exc.code} on a mid-conversation system message: {detail[:160]}"
     except Exception:  # noqa: BLE001 - slow or unreachable; the first check already passed
         pass

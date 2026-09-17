@@ -42,11 +42,7 @@ supports_effort = false
 max_output_tokens = 8192
 note = "local llama-server"
 
-# ── the same server, behind `scivo shim` ────────────────────────────────────
-# Needed when the model's chat template rejects mid-conversation system
-# messages ("System message must be at the beginning"), which Qwen3's does and
-# Claude Code emits. Start it with:
-#     scivo shim --upstream http://localhost:8190 --port 8191
+# ── the same server, for when `doctor` sends you to `scivo shim --help` ────
 [local-shim]
 base_url = "http://localhost:8191"
 model = "REPLACE-ME"
