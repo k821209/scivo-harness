@@ -221,8 +221,26 @@ The endpoint must serve Anthropic `/v1/messages` **including `tool_use`** — an
 agent loop is tool calls. Recent llama.cpp `llama-server` does this natively
 (verified here against Qwen3.8-27B); a server offering only OpenAI
 chat-completions needs a translator such as the LiteLLM proxy in front.
-`doctor` sends one tool-call request and tells you which case you are in, rather
-than letting it surface mid-task as "the agent never calls any tool".
+`doctor` sends a tool-call request and then a request with a system message
+in the middle of the conversation, which is how Claude Code actually talks. It
+tells you which case you are in rather than letting it surface mid-task.
+
+### Local model, start to finish
+
+```bash
+scivo providers --init                 # writes .scivo/providers.toml; set model to what /v1/models reports
+scivo --provider local doctor          # probes the endpoint the way a session will use it
+scivo --provider local                 # if doctor is happy
+```
+
+If `doctor` says the model's chat template rejects mid-conversation system
+messages, run the shim in a second terminal and use the `local-shim` provider,
+which points at it:
+
+```bash
+scivo shim --upstream http://localhost:8190 --port 8191
+scivo --provider local-shim
+```
 
 ### The chat-template trap
 
@@ -334,10 +352,27 @@ script spends twenty lines on that, because it writes `python3` into
 environment — "it worked yesterday", with nothing to read. Here the MCP is a
 dependency of the harness, so the interpreter is the one running `setup`.
 
-**Authentication is not ours.** The harness sets no credentials and stores none;
-the bundled Claude Code binary resolves its own, exactly as it does when run by
-hand. Sign in with `claude auth login` — Anthropic requires it to happen there —
-or export `ANTHROPIC_API_KEY`, or point `--provider` at a local endpoint.
+## Signing in — three ways
+
+scivo never handles credentials. It stores none and sets none, and Claude Code
+resolves them the way it does when run by hand. Pick one:
+
+```bash
+scivo login               # a Claude subscription (Pro, Max, Team) — opens Claude's own sign-in
+scivo login --console     # an Anthropic Console account, billed by API usage
+export ANTHROPIC_API_KEY=sk-ant-…   # or an API key in the environment
+```
+
+`scivo login` runs Claude Code's own `auth login`, which is where Anthropic
+requires sign-in to happen. The command exists because an install of scivo
+alone has Claude Code bundled inside the Agent SDK and no `claude` on PATH, so
+"run `claude auth login`" was an instruction a new user could not follow.
+`scivo logout` signs out. `scivo doctor` shows whether you are signed in. An
+`ANTHROPIC_API_KEY` in the environment wins over a stored login, and
+`doctor` says so when both are present.
+
+The third way needs no Claude account at all: a local model. See
+[Model endpoints](#model-endpoints).
 
 ## Updating
 

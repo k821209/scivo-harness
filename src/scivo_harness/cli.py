@@ -80,6 +80,11 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("chat", help="interactive session (default)")
     sub.add_parser("status", help="run the session-start protocol and print it; no model call")
     sub.add_parser("sessions", help="list this project's sessions, most recent first")
+    login = sub.add_parser("login", help="sign in to Claude (runs Claude Code's own login)",
+                           add_help=False)
+    login.add_argument("rest", nargs=argparse.REMAINDER)
+    logout = sub.add_parser("logout", help="sign out of Claude", add_help=False)
+    logout.add_argument("rest", nargs=argparse.REMAINDER)
     resume = sub.add_parser("resume", help="pick a session from the list and continue it")
     resume.add_argument("target", nargs="?", help="row number or id prefix; omit to choose from the list")
     sub.add_parser("doctor", help="check the wiring")
@@ -132,6 +137,8 @@ async def _doctor(args) -> int:
     print(f"provider    {provider.name} → {provider.base_url or 'api.anthropic.com'}"
           f" ({provider.source})")
     print(f"auth        {auth_source(provider)}")
+    if not provider.is_local:
+        print(f"login       {_login_state()}")
     if provider.is_local:
         ok, detail = probe(provider)
         print(f"endpoint    {ui.green(detail) if ok else ui.red(detail)}")
@@ -409,6 +416,48 @@ def _print_sessions(root, limit: int = 20) -> list:
     return listed
 
 
+def _auth(subcommand: str, rest: list[str]) -> int:
+    """Hand the terminal to Claude Code's own `auth` flow.
+
+    scivo does not implement sign-in and must not: Anthropic requires it to
+    complete in Claude Code. What it adds is finding the binary — a user who
+    installed only scivo has Claude Code bundled inside the Agent SDK and no
+    `claude` on PATH, so "run claude auth login" was an instruction they could
+    not follow.
+    """
+    import os
+
+    from .failures import claude_binary
+
+    binary = claude_binary()
+    argv = [binary, "auth", subcommand, *rest]
+    print(ui.dim(f"→ {' '.join(argv)}"), flush=True)
+    os.execv(binary, argv)
+    return 0  # not reached
+
+
+def _login_state() -> str:
+    import json
+    import os
+    import subprocess
+
+    from .failures import claude_binary
+
+    try:
+        result = subprocess.run([claude_binary(), "auth", "status"], capture_output=True,
+                                text=True, timeout=30)
+        state = json.loads(result.stdout)
+    except Exception as exc:  # noqa: BLE001
+        return f"unknown ({type(exc).__name__})"
+    text = (f"signed in ({state.get('authMethod')})" if state.get("loggedIn")
+            else "not signed in — scivo login")
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        # auth status reports the stored login even when an API key in the
+        # environment is what will actually be used.
+        text += " · ANTHROPIC_API_KEY is set and takes precedence"
+    return text
+
+
 async def _sessions(args) -> int:
     config = load()
     _print_sessions(config.root)
@@ -475,6 +524,9 @@ async def _chat(args, prompt_text: str | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = sys.argv[1:] if argv is None else argv
+    if raw[:1] in (["login"], ["logout"]):
+        return _auth(raw[0], raw[1:])
     args = _parser().parse_args(argv)
     handlers = {
         "status": _status,

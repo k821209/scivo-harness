@@ -33,8 +33,9 @@ def explain(error: Exception) -> str | None:
 
     if any(marker in text for marker in AUTH_MARKERS):
         return (
-            "Not authenticated.\n\n"
-            f"  {claude_binary()} auth login\n\n"
+            "Not signed in.\n\n"
+            "  scivo login              (a Claude subscription)\n"
+            "  scivo login --console    (Anthropic Console, API billing)\n\n"
             "scivo does not handle sign-in: it supplies no credentials of its own and "
             "stores none. Signing in happens in Claude Code itself, which is where "
             "Anthropic requires it to happen.\n"

@@ -225,4 +225,29 @@ def probe(provider: Provider, timeout: float = 180.0) -> tuple[bool, str]:
     if "tool_use" not in kinds:
         return False, (f"/v1/messages works but returned {', '.join(sorted(kinds)) or 'nothing'} "
                        "instead of tool_use — the agent loop needs tool calls")
-    return True, f"/v1/messages + tool_use ok (model {payload.get('model', '?')})"
+
+    # Passing the tool call is not enough. Claude Code puts operator notes into
+    # messages[] as role "system", and many GGUF chat templates (Qwen3's) raise
+    # on that: the probe used to pass and the first real turn then died with
+    # "System message must be at the beginning". Ask the same way it will.
+    shaped = json.dumps({
+        "model": provider.model or "default", "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"},
+                     {"role": "system", "content": "Be brief."}, {"role": "user", "content": "say ok"}],
+    }).encode()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(
+                provider.base_url.rstrip("/") + "/v1/messages", data=shaped,
+                headers=request.headers), timeout=timeout):
+            pass
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        if "system" in detail.lower():
+            return False, ("tool_use works, but this model's chat template rejects the "
+                           "mid-conversation system messages Claude Code sends. Run "
+                           f"`scivo shim --upstream {provider.base_url} --port 8191` and "
+                           "point base_url at http://localhost:8191")
+        return False, f"HTTP {exc.code} on a mid-conversation system message: {detail[:160]}"
+    except Exception:  # noqa: BLE001 - slow or unreachable; the first check already passed
+        pass
+    return True, f"/v1/messages + tool_use + system messages ok (model {payload.get('model', '?')})"
