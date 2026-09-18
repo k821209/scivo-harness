@@ -34,6 +34,11 @@ CLAUDE_MODELS = {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5",
                  "haiku": "claude-haiku-4-5", "fable": "claude-fable-5-1"}
 from .skills import discover
 
+# Handled by Claude Code itself, not here: they go through as a prompt. Listed
+# so they complete and appear in /help, because a command that works but cannot
+# be discovered may as well not exist.
+PASSTHROUGH = {"/compact"}
+
 LOCAL_COMMANDS = {
     "/exit": "leave",
     "/quit": "leave",
@@ -45,6 +50,7 @@ LOCAL_COMMANDS = {
     "/permissions": "show or change: default · acceptEdits · auto · plan · always <tool> · always -<tool>",
     "/dangerously-skip-permissions": "stop asking for anything (`off` to ask again); guardrails still apply",
     "/tools": "which scivo tools this profile loaded",
+    "/compact": "summarise the conversation so far and carry on with a shorter one",
     "/scivo-control": "drive this session from the scivo web page (`off` to stop)",
     "/help": "this list",
 }
@@ -84,6 +90,7 @@ class Repl:
         self.control: Control | None = None
         self.session_id: str | None = session.options.resume
         self.mode: str = session.options.permission_mode or "default"
+        self._compacting = False
 
     # ------------------------------------------------------------ rendering
 
@@ -121,6 +128,26 @@ class Repl:
         self._streamed = ""
         if self.control:
             self.control.end_assistant()
+
+    def _on_system(self, message: SystemMessage) -> None:
+        """Compaction is the one background step long enough to look like a hang."""
+        data = message.data or {}
+        if message.subtype == "status" and data.get("status") == "compacting":
+            if not self._compacting:
+                self._compacting = True
+                self._say(ui.dim("\n  compacting the conversation…"))
+            return
+        if message.subtype == "status" and data.get("compact_result"):
+            self._compacting = False
+            outcome = str(data["compact_result"])
+            self._say(ui.dim(f"  compaction {outcome}"))
+            return
+        if message.subtype == "compact_boundary":
+            meta = data.get("compact_metadata") or {}
+            before = meta.get("pre_tokens")
+            trigger = meta.get("trigger", "")
+            detail = f" — {before:,} tokens summarised" if isinstance(before, int) else ""
+            self._say(ui.dim(f"  conversation compacted ({trigger}){detail}\n"))
 
     def _on_retry(self, data: dict) -> None:
         """Claude Code retries a failing API call quietly. Say so, or it looks hung."""
@@ -454,7 +481,8 @@ class Repl:
 
     def _run_local(self, line: str) -> bool:
         """Run a local command, mirroring its output to the page when it is on."""
-        if line.split()[0] not in LOCAL_COMMANDS:
+        name = line.split()[0]
+        if name in PASSTHROUGH or name not in LOCAL_COMMANDS:
             return False
         buffer = io.StringIO()
         try:
@@ -491,6 +519,8 @@ class Repl:
                     self._on_stream(message)
                 elif isinstance(message, SystemMessage) and message.subtype == "api_retry":
                     self._on_retry(message.data or {})
+                elif isinstance(message, SystemMessage):
+                    self._on_system(message)
                 elif isinstance(message, AssistantMessage):
                     self._on_assistant(message)
                 elif isinstance(message, ResultMessage):
