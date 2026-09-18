@@ -531,10 +531,12 @@ async def _chat(args, prompt_text: str | None = None) -> int:
     resume_id = resolve_session(config.root, args.resume) if args.resume else None
     continue_last = False
     if args.continue_last and not resume_id:
-        if latest_session(config.root) is None:
+        newest = latest_session(config.root)
+        if newest is None:
             print(ui.dim("No earlier session in this project — starting a new one."))
         else:
             continue_last = True
+            resumed_id = newest
     session = await build(
         config,
         profile=args.profile,
@@ -550,6 +552,8 @@ async def _chat(args, prompt_text: str | None = None) -> int:
         max_budget_usd=args.budget,
         add_dirs=args.add_dir,
     )
+    if session.resumed is None and continue_last:
+        session.resumed = resumed_id
     if prompt_text is not None:
         from claude_agent_sdk import AssistantMessage, TextBlock, query
 

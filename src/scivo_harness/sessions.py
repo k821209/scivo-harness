@@ -9,6 +9,7 @@ lets a session be named by its row number or the first few characters of its id.
 from __future__ import annotations
 
 import datetime
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,3 +61,64 @@ def resolve(root: Path, token: str) -> str:
 def latest(root: Path) -> str | None:
     found = rows(root, limit=1)
     return found[0].session_id if found else None
+
+
+def transcript_path(session_id: str) -> Path | None:
+    """Claude Code's own log for a session, under ~/.claude/projects/<slug>/."""
+    root = Path.home() / ".claude" / "projects"
+    if not root.is_dir():
+        return None
+    for candidate in root.glob(f"*/{session_id}.jsonl"):
+        return candidate
+    return None
+
+
+def _visible_text(content: object) -> str:
+    """The part a person would have seen: no tool calls, no injected reminders."""
+    if isinstance(content, str):
+        blocks = [{"type": "text", "text": content}]
+    elif isinstance(content, list):
+        blocks = [b for b in content if isinstance(b, dict)]
+    else:
+        return ""
+    out = []
+    for block in blocks:
+        if block.get("type") != "text":
+            continue
+        text = str(block.get("text", ""))
+        if text.lstrip().startswith("<system-reminder>") or text.lstrip().startswith("[operator note]"):
+            continue
+        out.append(text.strip())
+    return "\n".join(t for t in out if t)
+
+
+def recap(session_id: str, exchanges: int = 2) -> list[tuple[str, str]]:
+    """The last few turns of a session, as (role, text) — what `-c` continues.
+
+    Resuming printed only a banner, so a session that continued the wrong
+    conversation looked exactly like one that continued the right one.
+    """
+    path = transcript_path(session_id)
+    if path is None:
+        return []
+    turns: list[tuple[str, str]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") not in ("user", "assistant") or entry.get("isMeta"):
+                    continue
+                text = _visible_text((entry.get("message") or {}).get("content"))
+                if not text:
+                    continue
+                role = entry["type"]
+                if turns and turns[-1][0] == role:
+                    turns[-1] = (role, turns[-1][1] + "\n" + text)
+                else:
+                    turns.append((role, text))
+    except OSError:
+        return []
+    return turns[-(exchanges * 2):]

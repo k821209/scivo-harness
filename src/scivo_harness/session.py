@@ -63,6 +63,7 @@ class Session:
     full_options: Any = None
     lean_append: str = ""
     scivo_tools: tuple[str, ...] = ()
+    resumed: str | None = None
 
     def options_for(self, provider: Provider, **changes: Any) -> ClaudeAgentOptions:
         """Options for `provider`: the full session, or the lean one for a local model."""
@@ -189,7 +190,7 @@ async def build(
                       config=config, provider=chosen, model=model, approver=approver,
                       endpoint=endpoint, full_options=options,
                       lean_append=prompt.build(briefing, plan, guide=None),
-                      scivo_tools=tuple(tool_names))
+                      scivo_tools=tuple(tool_names), resumed=resume)
     session.options = session.options_for(chosen)
     return session
 

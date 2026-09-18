@@ -513,6 +513,29 @@ class Repl:
                 watcher.cancel()
                 await asyncio.gather(watcher, return_exceptions=True)
 
+    def _print_recap(self) -> None:
+        """Show the tail of a resumed conversation.
+
+        `scivo -c` printed the same banner as a fresh session, so there was no
+        way to tell whether it had picked up the conversation you meant.
+        """
+        if not self.session.resumed:
+            return
+        from . import sessions
+
+        turns = sessions.recap(self.session.resumed)
+        if not turns:
+            print(ui.dim(f"  continuing {self.session.resumed[:8]} — no transcript to show\n"))
+            return
+        print(ui.dim(f"  continuing {self.session.resumed[:8]}, from where it left off:"))
+        for role, text in turns:
+            who = "you" if role == "user" else "scivo"
+            body = " ".join(text.split())
+            if len(body) > 240:
+                body = body[:240] + " …"
+            print(ui.dim(f"    {who:>5}  ") + ui.dim(body))
+        print()
+
     async def run(self) -> None:
         briefing = self.session.briefing
         label = self.session.model
@@ -525,6 +548,7 @@ class Repl:
         if self.session.endpoint is not None and self.session.endpoint.note:
             print(ui.dim(f"  · {self.session.endpoint.note}"))
         print()
+        self._print_recap()
 
         self.client = ClaudeSDKClient(options=self.session.options)
         await self.client.connect()
