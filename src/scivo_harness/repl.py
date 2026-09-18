@@ -11,6 +11,7 @@ import sys
 from typing import Any
 
 from claude_agent_sdk import (
+    ConversationResetMessage,
     AssistantMessage,
     ClaudeSDKClient,
     ResultMessage,
@@ -37,7 +38,7 @@ from .skills import discover
 # Handled by Claude Code itself, not here: they go through as a prompt. Listed
 # so they complete and appear in /help, because a command that works but cannot
 # be discovered may as well not exist.
-PASSTHROUGH = {"/compact"}
+PASSTHROUGH = {"/compact", "/clear"}
 
 LOCAL_COMMANDS = {
     "/exit": "leave",
@@ -51,6 +52,7 @@ LOCAL_COMMANDS = {
     "/dangerously-skip-permissions": "stop asking for anything (`off` to ask again); guardrails still apply",
     "/tools": "which scivo tools this profile loaded",
     "/compact": "summarise the conversation so far and carry on with a shorter one",
+    "/clear": "start a fresh conversation — the way out when the old one no longer fits",
     "/scivo-control": "drive this session from the scivo web page (`off` to stop)",
     "/help": "this list",
 }
@@ -140,7 +142,16 @@ class Repl:
         if message.subtype == "status" and data.get("compact_result"):
             self._compacting = False
             outcome = str(data["compact_result"])
-            self._say(ui.dim(f"  compaction {outcome}"))
+            if outcome == "success":
+                self._say(ui.dim(f"  compaction {outcome}"))
+                return
+            # Compacting sends the whole conversation to the model, so a
+            # conversation already over the window cannot be compacted out of
+            # it. /clear is the way out, and it keeps the session and its id.
+            self._say(ui.red(f"  compaction {outcome}")
+                      + ui.dim("\n  A conversation that no longer fits cannot be summarised either —"
+                               "\n  summarising sends all of it to the model. `/clear` starts a fresh"
+                               "\n  conversation; this one stays in `scivo sessions`.\n"))
             return
         if message.subtype == "compact_boundary":
             meta = data.get("compact_metadata") or {}
@@ -519,6 +530,10 @@ class Repl:
                     self._on_stream(message)
                 elif isinstance(message, SystemMessage) and message.subtype == "api_retry":
                     self._on_retry(message.data or {})
+                elif isinstance(message, ConversationResetMessage):
+                    self._say(ui.green("\n  conversation cleared")
+                              + ui.dim(" — a new conversation, with its own id. `/session` shows it;"
+                                       "\n  the old one is still in `scivo sessions`.\n"))
                 elif isinstance(message, SystemMessage):
                     self._on_system(message)
                 elif isinstance(message, AssistantMessage):
