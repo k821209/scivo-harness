@@ -77,6 +77,33 @@ def quiet_echo() -> "Iterator[None]":
                 termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
+@contextlib.contextmanager
+def echoing() -> "Iterator[None]":
+    """Echo back on for a plain `input()`, which has nothing else to show it."""
+    fd = None
+    before = None
+    try:
+        if sys.stdin.isatty():
+            import termios
+
+            fd = sys.stdin.fileno()
+            before = termios.tcgetattr(fd)
+            loud = termios.tcgetattr(fd)
+            loud[3] |= termios.ECHO
+            termios.tcsetattr(fd, termios.TCSANOW, loud)
+    except Exception:  # noqa: BLE001
+        fd, before = None, None
+    try:
+        yield
+    finally:
+        if fd is not None and before is not None:
+            import contextlib as _contextlib
+            import termios
+
+            with _contextlib.suppress(Exception):
+                termios.tcsetattr(fd, termios.TCSADRAIN, before)
+
+
 class KeyWatcher:
     """Raw-mode stdin for the duration of a turn. A no-op off a terminal."""
 

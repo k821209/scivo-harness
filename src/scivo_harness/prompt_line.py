@@ -62,6 +62,31 @@ def _build_completer(commands: dict[str, str], skills: list[Skill]) -> Any:
     return SlashCompleter()
 
 
+def _style() -> str:
+    """How the input line is drawn: menu (default), list, or simple.
+
+    The floating completion menu has to know where the cursor is, and on at
+    least one terminal — GNU screen, ko_KR.utf8 — it draws one column out and
+    eats a character. Nothing here reproduces it, so rather than keep guessing
+    at the cause, the drawing can be turned down a step at a time:
+
+        SCIVO_PROMPT_STYLE=list     completions listed below the line
+        SCIVO_PROMPT_STYLE=simple   plain input(), nothing redrawn at all
+    """
+    value = os.environ.get("SCIVO_PROMPT_STYLE", "").strip().lower()
+    if value in ("list", "simple"):
+        return value
+    if os.environ.get("SCIVO_SIMPLE_PROMPT", "").strip() not in ("", "0", "no", "false"):
+        return "simple"       # the earlier name for the same thing
+    return "menu"
+
+
+def _complete_style():
+    from prompt_toolkit.shortcuts import CompleteStyle
+
+    return CompleteStyle.READLINE_LIKE if _style() == "list" else CompleteStyle.COLUMN
+
+
 class Line:
     """One prompt, reading with completion where the terminal allows it."""
 
@@ -71,7 +96,7 @@ class Line:
         # what was typed: SCIVO_SIMPLE_PROMPT=1 reads with plain input(), no
         # redraw and no menu, so the terminal is never told where to put
         # anything. `scivo status` still lists the commands.
-        if os.environ.get("SCIVO_SIMPLE_PROMPT", "").strip() not in ("", "0", "no", "false"):
+        if _style() == "simple":
             return
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             return
@@ -92,17 +117,10 @@ class Line:
             completer=_build_completer(commands, skills),
             history=history,
             complete_while_typing=True,
-            reserve_space_for_menu=9,
+            reserve_space_for_menu=0 if _style() == "list" else 9,
+            complete_style=_complete_style(),
         )
-        # Inside GNU screen (and tmux, and some SSH paths) the terminal never
-        # answers "where is the cursor?". prompt_toolkit says so and then draws
-        # from a guessed position, one column out: the cursor lands on the
-        # character after the slash and reads as a block eating a letter.
-        # Drawing without the question is the same rendering, minus the guess.
-        try:
-            self._session.output.enable_cpr = False
-        except Exception:  # noqa: BLE001 - not every output has it
-            pass
+
 
     @property
     def rich(self) -> bool:
@@ -132,4 +150,7 @@ class Line:
 async def _thread_input(plain_text: str) -> str:
     import asyncio
 
-    return await asyncio.to_thread(input, plain_text)
+    from .interrupts import echoing
+
+    with echoing():
+        return await asyncio.to_thread(input, plain_text)

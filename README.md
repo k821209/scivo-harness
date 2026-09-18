@@ -108,11 +108,12 @@ the input line one column off, so the cursor eats a character and the
 completion menu lands on the text. If that happens:
 
 ```bash
-SCIVO_SIMPLE_PROMPT=1 scivo    # plain input(): no redraw, no menu
+SCIVO_PROMPT_STYLE=list scivo     # completions listed below the line, no floating menu
+SCIVO_PROMPT_STYLE=simple scivo   # plain input(): nothing is redrawn at all
 ```
 
 Everything else works the same; `scivo status` lists the commands the menu
-would have offered.
+would have offered. Put the one that behaves in your shell profile.
 
 ## Permissions, inside a session
 
