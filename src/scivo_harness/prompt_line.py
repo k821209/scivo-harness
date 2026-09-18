@@ -67,6 +67,12 @@ class Line:
 
     def __init__(self, root: Path, commands: dict[str, str], skills: list[Skill]) -> None:
         self._session = None
+        # An escape hatch for a terminal where the drawn line does not match
+        # what was typed: SCIVO_SIMPLE_PROMPT=1 reads with plain input(), no
+        # redraw and no menu, so the terminal is never told where to put
+        # anything. `scivo status` still lists the commands.
+        if os.environ.get("SCIVO_SIMPLE_PROMPT", "").strip() not in ("", "0", "no", "false"):
+            return
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             return
         try:

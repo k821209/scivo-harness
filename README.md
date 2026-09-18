@@ -101,6 +101,19 @@ server. `scivo providers use <name>` makes a provider this project's default.
 Local turns show "local model" instead of a price. Claude Code prices even
 models it does not know, and nothing is billed for them.
 
+## When the typed line looks wrong
+
+Some terminals — GNU screen with CJK width settings, a few SSH paths — draw
+the input line one column off, so the cursor eats a character and the
+completion menu lands on the text. If that happens:
+
+```bash
+SCIVO_SIMPLE_PROMPT=1 scivo    # plain input(): no redraw, no menu
+```
+
+Everything else works the same; `scivo status` lists the commands the menu
+would have offered.
+
 ## Permissions, inside a session
 
 By default each tool that changes something asks first: `[y]es / [a]lways /
