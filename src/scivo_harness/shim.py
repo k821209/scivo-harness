@@ -22,6 +22,7 @@ free.
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -166,6 +167,23 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"0\r\n\r\n")
 
 
+class _QuietServer(ThreadingHTTPServer):
+    """A dropped connection is normal here, not an incident.
+
+    Claude Code opens and abandons connections as turns end, and the stdlib
+    server prints a full traceback for each one. In a session that traceback
+    lands on top of the prompt and reads like a crash. Anything else still
+    prints — a real bug in the shim must not be swallowed with them.
+    """
+
+    QUIET = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError)
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        if isinstance(sys.exc_info()[1], self.QUIET):
+            return
+        super().handle_error(request, client_address)
+
+
 def start_background(upstream: str) -> tuple[str, "Callable[[], None]"]:
     """Run the shim inside this process on a free port; return its URL and a stop.
 
@@ -176,7 +194,7 @@ def start_background(upstream: str) -> tuple[str, "Callable[[], None]"]:
     import threading
 
     handler = type("BoundShimHandler", (_Handler,), {"upstream": upstream, "verbose": False})
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server = _QuietServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, name="scivo-shim", daemon=True)
     thread.start()
 
@@ -190,7 +208,7 @@ def start_background(upstream: str) -> tuple[str, "Callable[[], None]"]:
 def serve(upstream: str, port: int, verbose: bool = False) -> None:
     _Handler.upstream = upstream
     _Handler.verbose = verbose
-    server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+    server = _QuietServer(("127.0.0.1", port), _Handler)
     print(f"scivo shim · 127.0.0.1:{port} → {upstream}")
     print("  folding mid-conversation system messages into the adjacent user turn")
     print("  point a provider's base_url at this address. ctrl-c to stop.")
