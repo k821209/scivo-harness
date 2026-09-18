@@ -27,6 +27,11 @@
 #   supports_effort    false for non-Anthropic models — effort/thinking are
 #                      Anthropic-model features and a proxy may 400 on them.
 #   max_output_tokens  caps the CLI's output request.
+#   context_tokens     the server's context window. Usually unnecessary: a
+#                      llama.cpp server is asked (/props) and the answer is
+#                      passed to the CLI, which auto-compacts against it
+#                      instead of guessing. Set it for a server that does not
+#                      report one.
 #   note               shown by `scivo providers`.
 #   env                extra environment variables for the CLI subprocess.
 

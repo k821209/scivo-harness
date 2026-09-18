@@ -51,6 +51,7 @@ class Provider:
     auth_token_env: str | None = None
     supports_effort: bool = True
     max_output_tokens: int | None = None
+    context_tokens: int | None = None
     env: dict[str, str] = field(default_factory=dict)
     note: str = ""
     source: str = "built-in"
@@ -340,6 +341,34 @@ class Endpoint:
             self.stop()
 
 
+def context_window(provider: Provider, timeout: float = 5.0) -> int | None:
+    """The server's real context size, from its own /props.
+
+    Claude Code does not know a local model, so it assumes a window, compacts
+    against that, and the assumption was larger than this server: a session
+    grew past 131,072 tokens and every further turn came back as
+    "400 request exceeds the available context size". llama.cpp reports the
+    number it was started with, so ask instead of assuming.
+    """
+    if provider.context_tokens:
+        return provider.context_tokens
+    if not provider.base_url:
+        return None
+    import json as _json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(provider.base_url.rstrip("/") + "/props", timeout=timeout) as response:
+            props = _json.loads(response.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 - any failure just means "do not claim to know"
+        return None
+    for value in (props.get("n_ctx"),
+                  (props.get("default_generation_settings") or {}).get("n_ctx")):
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
 def prepare(provider: Provider, timeout: float = 30.0) -> Endpoint:
     """Resolve a provider into environment for Claude Code, fixing what can be fixed.
 
@@ -353,6 +382,12 @@ def prepare(provider: Provider, timeout: float = 30.0) -> Endpoint:
     if not provider.base_url:
         return Endpoint(env)
     reachable(provider)
+    window = context_window(provider)
+    if window:
+        # Leave the reply room inside the window: the error counts the prompt
+        # and the generation together, so compacting at the window itself is
+        # already too late.
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(max(8192, window - (provider.max_output_tokens or 4096)))
     verdict = system_messages_ok(provider.base_url, provider, timeout)
     if verdict is not False:
         return Endpoint(env)

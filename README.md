@@ -261,6 +261,12 @@ in-process, with one line saying so, so there is nothing to set up.
 `scivo shim --help` explains what it does. A server that is not running is
 refused before the session starts, instead of retrying for a minute.
 
+scivo asks a local server for its context window (`/props`) and passes it to
+the CLI, which does not know the model and would otherwise guess: a session
+that grew past the window failed every turn with "request exceeds the available
+context size" instead of compacting. Set `context_tokens` in providers.toml for
+a server that reports none.
+
 A local session carries a smaller kit than a Claude one: no project guide in
 the prompt, the core file and shell tools, and ~36 scivo tools for reading
 and editing a paper, its todos and memory, and running jobs on registered servers. A local server re-reads the whole

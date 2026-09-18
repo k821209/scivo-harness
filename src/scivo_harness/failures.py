@@ -44,6 +44,17 @@ def explain(error: Exception) -> str | None:
             "Using a local model instead? `scivo --provider <name>`."
         )
 
+    if "prompt is too long" in text or "exceeds the available context" in text:
+        return (
+            "The conversation no longer fits in this model's context window.\n\n"
+            "scivo reads the window from a local server (`/props`) and tells the CLI, "
+            "which compacts the conversation before it gets here. Seeing this anyway "
+            "means the window is smaller than reported or was never reported.\n"
+            "Set it explicitly in providers.toml — `context_tokens = <the server's -c "
+            "value>` — or start a fresh session and resume only what you need.\n"
+            "Restarting the server with a larger `-c` works too, if it has the memory."
+        )
+
     if any(marker in text for marker in REFUSAL_MARKERS):
         return (
             "The model declined this request.\n\n"
