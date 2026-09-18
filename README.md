@@ -286,8 +286,12 @@ context size" instead of compacting. Set `context_tokens` in providers.toml for
 a server that reports none.
 
 A local session carries a smaller kit than a Claude one: no project guide in
-the prompt, the core file and shell tools, and ~36 scivo tools for reading
-and editing a paper, its todos and memory, and running jobs on registered servers. A local server re-reads the whole
+the prompt, the core file and shell tools, and ~36 scivo tools for reading and
+editing a paper, its todos and memory, and running jobs on registered servers.
+`--profile video`, `deck` or `analysis` loads that domain's tools on top, which
+is how a local session gets `add_video` or the deck tools; the paper domain is
+115 tools and stays pruned, its everyday half already being in the core.
+A local server re-reads the whole
 prompt on every request, with no caching and no deferred tool loading, and the
 full session is about 100k tokens (a 27B model sat for minutes before its first
 word). The lean one is about 14k. `/model opus` restores everything.

@@ -46,6 +46,13 @@ LOCAL_SCIVO_TOOLS = (
     "create_analysis", "record_analysis_run",
 )
 
+# Everything else comes in by domain, and only when asked for: `--profile
+# video` on a local model loads the 16 video tools on top of the core, because
+# a session that cannot call `add_video` cannot do the video work at all. The
+# paper domain is left out — it is 115 tools, and its everyday half is already
+# in the core list above.
+LOCAL_DOMAIN_LIMIT = 60
+
 
 @dataclass
 class Session:
@@ -64,17 +71,34 @@ class Session:
     lean_append: str = ""
     scivo_tools: tuple[str, ...] = ()
     resumed: str | None = None
+    local_tools: int | None = None
 
     def options_for(self, provider: Provider, **changes: Any) -> ClaudeAgentOptions:
         """Options for `provider`: the full session, or the lean one for a local model."""
         base = replace(self.full_options, **changes)
         if not provider.is_local:
             return base
-        return lean(base, self.lean_append, self.scivo_tools)
+        return lean(base, self.lean_append, self.scivo_tools, self.plan.profile)
 
 
-def lean(options: ClaudeAgentOptions, append: str, scivo_tools: tuple[str, ...]) -> ClaudeAgentOptions:
-    keep = set(LOCAL_SCIVO_TOOLS)
+def local_kit(scivo_tools: tuple[str, ...], profile: str) -> set[str]:
+    """The scivo tools a local session carries: the core, plus asked-for domains."""
+    keep = set(LOCAL_SCIVO_TOOLS) & set(scivo_tools)
+    if profile == "full":
+        return keep
+    sizes: dict[str, list[str]] = {}
+    for name in scivo_tools:
+        sizes.setdefault(toolsets._domain_of(name), []).append(name)
+    for domain in toolsets.PROFILES.get(profile, ()):  # the profile's own domains
+        members = sizes.get(domain, [])
+        if len(members) <= LOCAL_DOMAIN_LIMIT:
+            keep.update(members)
+    return keep
+
+
+def lean(options: ClaudeAgentOptions, append: str, scivo_tools: tuple[str, ...],
+         profile: str = "full") -> ClaudeAgentOptions:
+    keep = local_kit(scivo_tools, profile)
     dropped = [PREFIX + n for n in scivo_tools if n not in keep]
     return replace(
         options,
@@ -192,6 +216,8 @@ async def build(
                       lean_append=prompt.build(briefing, plan, guide=None),
                       scivo_tools=tuple(tool_names), resumed=resume)
     session.options = session.options_for(chosen)
+    if chosen.is_local:
+        session.local_tools = len(local_kit(tuple(tool_names), profile))
     return session
 
 

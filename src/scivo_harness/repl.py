@@ -248,6 +248,10 @@ class Repl:
         elif command == "/tools":
             plan = self.session.plan
             print(f"\n  {plan.summary()}")
+            if self.session.local_tools:
+                print(ui.dim(f"  local kit: {self.session.local_tools} of them are loaded — a local "
+                             "model reads every schema on every request."))
+                print(ui.dim("  `scivo --profile video` (or deck, analysis) loads that domain too."))
             if plan.dropped:
                 print(ui.dim(f"  dropped: {', '.join(plan.dropped[:12])}"
                              + (" …" if len(plan.dropped) > 12 else "")))
@@ -648,6 +652,10 @@ class Repl:
                         self.session.plan.summary(), label))
         for line in ui.attention(briefing):
             print(line)
+        if self.session.local_tools:
+            print(ui.dim(f"  local kit: {self.session.local_tools} scivo tools"
+                         + ("" if self.session.plan.profile != "full"
+                            else " — `--profile video | deck | analysis` loads that domain too")))
         if self.session.endpoint is not None and self.session.endpoint.note:
             print(ui.dim(f"  · {self.session.endpoint.note}"))
         print()
