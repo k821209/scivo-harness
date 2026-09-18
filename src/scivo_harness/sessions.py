@@ -122,3 +122,32 @@ def recap(session_id: str, exchanges: int = 2) -> list[tuple[str, str]]:
     except OSError:
         return []
     return turns[-(exchanges * 2):]
+
+
+def last_model(session_id: str) -> str | None:
+    """The model that session was last answering with, from its own transcript.
+
+    Resuming rebuilt the session from the project's default, so a conversation
+    held with a local model came back on Claude — and the first reply read as a
+    non sequitur, because the history it was continuing was not its own.
+    """
+    path = transcript_path(session_id)
+    if path is None:
+        return None
+    model = None
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                name = (entry.get("message") or {}).get("model")
+                if not name:
+                    identity = ((entry.get("attachment") or {}).get("identity") or {})
+                    name = identity.get("modelId")
+                if name and name != "<synthetic>":
+                    model = str(name)
+    except OSError:
+        return None
+    return model

@@ -526,10 +526,35 @@ async def _resume(args) -> int:
     return await _chat(args)
 
 
+def _carry_model(args, session_id: str) -> None:
+    """Resume on the model that session was using, unless told otherwise.
+
+    A conversation held with a local model came back on Claude, because the
+    session was rebuilt from the project default. Nothing said so, and the
+    first reply simply did not fit the history it claimed to continue.
+    """
+    from . import sessions as session_log
+    from .providers import provider_for_model
+
+    if args.provider_reason == "--provider" or args.model:
+        return
+    model = session_log.last_model(session_id)
+    if not model:
+        return
+    provider = provider_for_model(model)
+    if provider is None:
+        print(ui.dim(f"  that session used {model}, which no provider here serves — "
+                     f"continuing on {args.provider}"))
+        return
+    args.provider, args.model = provider, model
+    args.provider_reason = f"carried over from {session_id[:8]}"
+
+
 async def _chat(args, prompt_text: str | None = None) -> int:
     config = load()
     resume_id = resolve_session(config.root, args.resume) if args.resume else None
     continue_last = False
+    resumed_id = None
     if args.continue_last and not resume_id:
         newest = latest_session(config.root)
         if newest is None:
@@ -537,6 +562,10 @@ async def _chat(args, prompt_text: str | None = None) -> int:
         else:
             continue_last = True
             resumed_id = newest
+    resumed_id = resume_id or resumed_id
+    if resumed_id:
+        _carry_model(args, resumed_id)
+
     session = await build(
         config,
         profile=args.profile,

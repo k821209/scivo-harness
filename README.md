@@ -21,6 +21,11 @@ Sessions are named by the number `scivo sessions` shows or by the first few
 characters of the id. `/session` inside a session prints its id, and leaving
 prints the command that resumes it.
 
+Resuming prints the last two exchanges of the conversation it is joining, so
+you can see which one you got, and it comes back on the model that session was
+using — a conversation held with a local model does not resume on Claude.
+`--provider` or `--model` overrides that.
+
 Inside a session, `/scivo-control` drives it from a web page — see below.
 
 ## Why this exists

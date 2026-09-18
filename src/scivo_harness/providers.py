@@ -368,3 +368,12 @@ def prepare(provider: Provider, timeout: float = 30.0) -> Endpoint:
     if through is False:
         note += " It still refuses after reordering — check the server."
     return Endpoint(env, note, stop)
+
+def provider_for_model(model: str) -> str | None:
+    """Which configured provider serves this model name, if any."""
+    if model.startswith("claude-"):
+        return BUILTIN_NAME
+    for name, provider in load_all().items():
+        if provider.model == model or provider.small_model == model:
+            return name
+    return None
