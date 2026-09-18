@@ -531,8 +531,12 @@ class Repl:
         first sign of it used to be every turn failing at once.
         """
         try:
-            usage = await client.get_context_usage()
+            # Bounded: an endpoint that never answers this must not hold the
+            # session at the end of an otherwise finished turn.
+            usage = await asyncio.wait_for(client.get_context_usage(), timeout=10)
         except Exception:  # noqa: BLE001 - never let a display fail a turn
+            if not brief:
+                self._say(ui.dim("\n  context usage is not available from this endpoint\n"))
             return
         total, limit = usage.get("totalTokens"), usage.get("maxTokens")
         percent = usage.get("percentage")

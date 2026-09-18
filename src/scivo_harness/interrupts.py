@@ -42,6 +42,41 @@ def paused() -> Iterator[None]:
         watcher.resume()
 
 
+@contextlib.contextmanager
+def quiet_echo() -> "Iterator[None]":
+    """Stop the terminal echoing keys that nothing is reading yet.
+
+    Between the moment scivo starts and the moment the prompt opens — and again
+    between a turn's last line and the next prompt — nothing reads stdin, so
+    the terminal echoed each key where the cursor happened to be: a lone "/"
+    printed into the middle of the banner, and then dropped when the prompt
+    redrew. Echo off means the keys wait in the terminal's own buffer and the
+    prompt shows them when it opens, which is where they were going.
+    """
+    fd = None
+    saved = None
+    try:
+        if sys.stdin.isatty():
+            import termios
+
+            fd = sys.stdin.fileno()
+            saved = termios.tcgetattr(fd)
+            quiet = termios.tcgetattr(fd)
+            quiet[3] &= ~termios.ECHO      # lflag
+            termios.tcsetattr(fd, termios.TCSADRAIN, quiet)
+    except Exception:  # noqa: BLE001 - a terminal we cannot change still works
+        fd, saved = None, None
+    try:
+        yield
+    finally:
+        if fd is not None and saved is not None:
+            import contextlib as _contextlib
+            import termios
+
+            with _contextlib.suppress(Exception):
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
 class KeyWatcher:
     """Raw-mode stdin for the duration of a turn. A no-op off a terminal."""
 

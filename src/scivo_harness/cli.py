@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import sys
 
 from . import ui
@@ -551,6 +552,15 @@ def _carry_model(args, session_id: str) -> None:
 
 
 async def _chat(args, prompt_text: str | None = None) -> int:
+    from .interrupts import quiet_echo
+
+    # Assembling a session takes a few seconds (preflight, MCP, the endpoint
+    # check) and nothing reads the keyboard during it.
+    with quiet_echo() if prompt_text is None else contextlib.nullcontext():
+        return await _build_and_run(args, prompt_text)
+
+
+async def _build_and_run(args, prompt_text: str | None) -> int:
     config = load()
     resume_id = resolve_session(config.root, args.resume) if args.resume else None
     continue_last = False
