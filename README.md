@@ -145,6 +145,10 @@ refuses to switch to it mid-session.
 /clear        start a fresh conversation, when the old one no longer fits
 ```
 
+**Esc stops the turn that is running** — in the terminal, and on the page,
+where the Stop button does the same. Keys pressed during a turn are not lost:
+they open the next prompt already typed.
+
 Every turn ends with the percentage used, and the line turns yellow as the
 auto-compact threshold approaches. Compacting sends the whole conversation to
 the model, so a conversation already past the window cannot be compacted out of

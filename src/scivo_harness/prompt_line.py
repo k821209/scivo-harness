@@ -92,7 +92,7 @@ class Line:
     def rich(self) -> bool:
         return self._session is not None
 
-    async def ask(self, styled: str, plain: str) -> str:
+    async def ask(self, styled: str, plain: str, default: str = "") -> str:
         """`styled` may carry ANSI; `plain` is the fallback for a dumb stdin.
 
         Anything printed while this prompt is live — a web message echo, a
@@ -103,12 +103,14 @@ class Line:
         was answering whatever was typed next.
         """
         if self._session is None:
-            return await _thread_input(plain)
+            if default:
+                print(default, end="", flush=True)  # it is already "typed"
+            return default + await _thread_input(plain)
         from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit.patch_stdout import patch_stdout
 
         with patch_stdout(raw=True):
-            return await self._session.prompt_async(ANSI(styled))
+            return await self._session.prompt_async(ANSI(styled), default=default)
 
 
 async def _thread_input(plain_text: str) -> str:

@@ -26,6 +26,7 @@ from . import ui
 from .control import Control
 from .preflight import to_markdown
 from .failures import explain
+from .interrupts import KeyWatcher
 from .prompt_line import Line
 from .permissions import is_outward
 from .session import Session, scivo_tool_label
@@ -94,6 +95,8 @@ class Repl:
         self.session_id: str | None = session.options.resume
         self.mode: str = session.options.permission_mode or "default"
         self._compacting = False
+        self._typed_ahead = ""
+        self._stopping = False
 
     # ------------------------------------------------------------ rendering
 
@@ -196,7 +199,10 @@ class Repl:
         local = self.session.provider.is_local
         turn_cost = 0.0 if local else (message.total_cost_usd or 0.0)
         self.cost += turn_cost
-        if message.is_error:
+        if message.is_error and not self._stopping:
+            # A turn stopped on purpose comes back as an error with no text.
+            # Reporting "! error:" for a stop the person asked for reads as a
+            # fault in the harness.
             print(ui.red(f"\n  ! {message.stop_reason or 'error'}: {message.result or ''}"))
         price = "local model" if local else f"${turn_cost:.3f}"
         print(ui.dim(f"\n  ({message.num_turns} turns · {price} · ${self.cost:.3f} session)\n"))
@@ -217,6 +223,7 @@ class Repl:
             print()
             for name, description in LOCAL_COMMANDS.items():
                 print(f"  {ui.cyan(name):<22} {description}")
+            print(ui.dim("  Esc                    stop the turn that is running"))
             print(ui.dim(f"\n  and {len(self.skills)} skills — press / to list them"
                          + ("" if self.line.rich else " (see `scivo status`)") + "\n"))
         elif command == "/status":
@@ -297,8 +304,9 @@ class Repl:
         else:
             prompt = ui.cyan("scivo› ")
         plain = f"scivo[{tag}]> " if tag else "scivo> "
+        typed, self._typed_ahead = self._typed_ahead, ""
         if not (self.control and self.control.active):
-            return await self.line.ask(prompt, plain), "terminal"
+            return await self.line.ask(prompt, plain, default=typed), "terminal"
 
         web = asyncio.create_task(self.control.messages.get())
         waiting = {web}
@@ -307,7 +315,7 @@ class Repl:
         # would swallow the next typed line after a web message won. Only the
         # prompt_toolkit prompt can be cancelled cleanly.
         if self.line.rich:
-            terminal = asyncio.create_task(self.line.ask(prompt, plain))
+            terminal = asyncio.create_task(self.line.ask(prompt, plain, default=typed))
             waiting.add(terminal)
         done, pending = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
@@ -557,22 +565,37 @@ class Repl:
                 self.control.status("interrupted", level="warn")
 
             watcher = asyncio.create_task(watch())
+        self._stopping = False
+
+        def stop_now() -> None:
+            self._stopping = True
+            self._say(ui.yellow("\n  stopping…"))
+            asyncio.create_task(client.interrupt())
+
         try:
-            async for message in client.receive_response():
-                if isinstance(message, StreamEvent):
-                    self._on_stream(message)
-                elif isinstance(message, SystemMessage) and message.subtype == "api_retry":
-                    self._on_retry(message.data or {})
-                elif isinstance(message, ConversationResetMessage):
-                    self._say(ui.green("\n  conversation cleared")
-                              + ui.dim(" — a new conversation, with its own id. `/session` shows it;"
-                                       "\n  the old one is still in `scivo sessions`.\n"))
-                elif isinstance(message, SystemMessage):
-                    self._on_system(message)
-                elif isinstance(message, AssistantMessage):
-                    self._on_assistant(message)
-                elif isinstance(message, ResultMessage):
-                    self._on_result(message)
+            with KeyWatcher(stop_now) as keys:
+                async for message in client.receive_response():
+                    if isinstance(message, StreamEvent):
+                        self._on_stream(message)
+                    elif isinstance(message, SystemMessage) and message.subtype == "api_retry":
+                        self._on_retry(message.data or {})
+                    elif isinstance(message, ConversationResetMessage):
+                        self._say(ui.green("\n  conversation cleared")
+                                  + ui.dim(" — a new conversation, with its own id. `/session` shows it;"
+                                           "\n  the old one is still in `scivo sessions`.\n"))
+                    elif isinstance(message, SystemMessage):
+                        self._on_system(message)
+                    elif isinstance(message, AssistantMessage):
+                        self._on_assistant(message)
+                    elif isinstance(message, ResultMessage):
+                        self._on_result(message)
+            # Keys pressed during the turn were read here, not by the terminal.
+            # Hand them to the next prompt so they are not silently eaten.
+            self._typed_ahead = keys.typed_ahead.strip("\r\n")
+            if keys.interrupted:
+                self._say(ui.yellow("  stopped\n"))
+                if self.control and self.control.active:
+                    self.control.status("stopped from the terminal", level="warn")
         except KeyboardInterrupt:
             await client.interrupt()
             print(ui.yellow("\n  interrupted\n"))

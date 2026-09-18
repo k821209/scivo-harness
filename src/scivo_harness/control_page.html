@@ -389,12 +389,20 @@
       if (e.key === "ArrowDown") { e.preventDefault(); S.menuIndex = (S.menuIndex + 1) % list.length; return showMenu(); }
       if (e.key === "ArrowUp") { e.preventDefault(); S.menuIndex = (S.menuIndex - 1 + list.length) % list.length; return showMenu(); }
       if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); return pick(list[S.menuIndex]); }
-      if (e.key === "Escape") return hideMenu();
+      // Without this the document handler below sees the same Escape once the
+      // menu is closed, and closing the menu would also stop the turn.
+      if (e.key === "Escape") { e.stopPropagation(); return hideMenu(); }
     }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   });
   $("sc-send").onclick = send;
   $("sc-stop").onclick = stop;
+  // Esc stops the turn, as it does in the terminal. In the message box it
+  // closes the command menu first, so a menu Esc never interrupts a turn.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || menu.hidden === false) return;
+    e.preventDefault(); stop();
+  });
 
   window.__scivoControl = S;  // for inspection
   start();
