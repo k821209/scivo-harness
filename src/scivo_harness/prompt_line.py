@@ -93,12 +93,22 @@ class Line:
         return self._session is not None
 
     async def ask(self, styled: str, plain: str) -> str:
-        """`styled` may carry ANSI; `plain` is the fallback for a dumb stdin."""
+        """`styled` may carry ANSI; `plain` is the fallback for a dumb stdin.
+
+        Anything printed while this prompt is live — a web message echo, a
+        retry notice, a stray traceback from a background thread — goes through
+        prompt_toolkit's proxy, which draws it above the prompt. Without it the
+        write lands in the middle of the rendered line and the terminal only
+        sorts itself out at the next keystroke, so half a reply looked like it
+        was answering whatever was typed next.
+        """
         if self._session is None:
             return await _thread_input(plain)
         from prompt_toolkit.formatted_text import ANSI
+        from prompt_toolkit.patch_stdout import patch_stdout
 
-        return await self._session.prompt_async(ANSI(styled))
+        with patch_stdout(raw=True):
+            return await self._session.prompt_async(ANSI(styled))
 
 
 async def _thread_input(plain_text: str) -> str:
