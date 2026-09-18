@@ -10,6 +10,7 @@ Falls back to `input()` when stdin is not a terminal, so piping a script into
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -87,6 +88,15 @@ class Line:
             complete_while_typing=True,
             reserve_space_for_menu=9,
         )
+        # Inside GNU screen (and tmux, and some SSH paths) the terminal never
+        # answers "where is the cursor?". prompt_toolkit says so and then draws
+        # from a guessed position, one column out: the cursor lands on the
+        # character after the slash and reads as a block eating a letter.
+        # Drawing without the question is the same rendering, minus the guess.
+        try:
+            self._session.output.enable_cpr = False
+        except Exception:  # noqa: BLE001 - not every output has it
+            pass
 
     @property
     def rich(self) -> bool:
