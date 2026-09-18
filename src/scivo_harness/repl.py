@@ -300,13 +300,20 @@ class Repl:
         print(ui.dim("  Typing here still works. `/scivo-control off` unpublishes the page.\n"))
 
     async def _next_input(self) -> tuple[str, str]:
-        """The next line, from the terminal or the web page, whichever comes first."""
+        """The next line, from the terminal or the web page, whichever comes first.
+
+        The prompt is plain ASCII on purpose. It used to end in "›", which
+        Unicode calls ambiguous-width: prompt_toolkit counts it as one column
+        and a terminal configured for CJK draws it as two. Every redraw was
+        then one column out, so the cursor sat on the character after the
+        slash and ate it — "/model" showed as "om" with a block over it.
+        """
         tag = MODE_TAGS.get(self.mode, self.mode)
         if tag:
             colour = ui.red if self.mode == "bypassPermissions" else ui.yellow
-            prompt = ui.cyan("scivo") + colour(f"[{tag}]") + ui.cyan("› ")
+            prompt = ui.cyan("scivo") + colour(f"[{tag}]") + ui.cyan("> ")
         else:
-            prompt = ui.cyan("scivo› ")
+            prompt = ui.cyan("scivo> ")
         plain = f"scivo[{tag}]> " if tag else "scivo> "
         typed, self._typed_ahead = self._typed_ahead, ""
         if not (self.control and self.control.active):
