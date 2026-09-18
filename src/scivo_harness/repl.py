@@ -51,6 +51,7 @@ LOCAL_COMMANDS = {
     "/permissions": "show or change: default · acceptEdits · auto · plan · always <tool> · always -<tool>",
     "/dangerously-skip-permissions": "stop asking for anything (`off` to ask again); guardrails still apply",
     "/tools": "which scivo tools this profile loaded",
+    "/context": "how much of the context window is in use, and what fills it",
     "/compact": "summarise the conversation so far and carry on with a shorter one",
     "/clear": "start a fresh conversation — the way out when the old one no longer fits",
     "/scivo-control": "drive this session from the scivo web page (`off` to stop)",
@@ -511,6 +512,38 @@ class Repl:
             self.control.note(plain if is_markdown else f"```\n{plain}\n```")
         return True
 
+    async def _context(self, client: ClaudeSDKClient, brief: bool) -> None:
+        """Context usage — a percentage after each turn, the breakdown on demand.
+
+        A local model's window is small enough to hit in an afternoon, and the
+        first sign of it used to be every turn failing at once.
+        """
+        try:
+            usage = await client.get_context_usage()
+        except Exception:  # noqa: BLE001 - never let a display fail a turn
+            return
+        total, limit = usage.get("totalTokens"), usage.get("maxTokens")
+        percent = usage.get("percentage")
+        if not isinstance(total, int) or not isinstance(limit, int) or not limit:
+            return
+        percent = int(percent if isinstance(percent, (int, float)) else total * 100 / limit)
+        threshold = usage.get("autoCompactThreshold")
+        line = f"  context {percent}%  ({total:,} of {limit:,} tokens)"
+        if brief:
+            near = isinstance(threshold, int) and total >= threshold * 0.8
+            self._say((ui.yellow(line) if near else ui.dim(line))
+                      + (ui.dim("  · /compact before it fills") if near else ""))
+            return
+        self._say("\n" + ui.cyan(line))
+        if isinstance(threshold, int):
+            self._say(ui.dim(f"  auto-compacts at {threshold:,}"
+                             + ("" if usage.get("isAutoCompactEnabled") else " — but auto-compact is off")))
+        for category in usage.get("categories", []):
+            name, tokens = category.get("name"), category.get("tokens")
+            if isinstance(tokens, int) and tokens:
+                self._say(ui.dim(f"    {str(name):<20} {tokens:>8,}"))
+        self._say("")
+
     async def _turn(self, client: ClaudeSDKClient, line: str) -> None:
         await client.query(line)
         watcher = None
@@ -553,6 +586,8 @@ class Repl:
             print(ui.red(f"\n  {text}\n"))
             if self.control:
                 self.control.status(text, level="error")
+        else:
+            await self._context(client, brief=True)
         finally:
             if watcher is not None:
                 watcher.cancel()
@@ -617,6 +652,11 @@ class Repl:
                         if self.control and self.control.active:
                             self.control.user(line, via)
                         await self._permissions(self.client, command, argument.strip())
+                        continue
+                    if command == "/context":
+                        if self.control and self.control.active:
+                            self.control.user(line, via)
+                        await self._context(self.client, brief=False)
                         continue
                     if command == "/model":
                         if self.control and self.control.active:

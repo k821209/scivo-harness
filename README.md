@@ -137,6 +137,20 @@ Every session is launched with bypass made *available*, via the CLI's
 `--allow-dangerously-skip-permissions`, but not turned on. Without that the CLI
 refuses to switch to it mid-session.
 
+## Context, inside a session
+
+```
+/context      what fills the window right now, by category
+/compact      summarise the conversation and carry on with a shorter one
+/clear        start a fresh conversation, when the old one no longer fits
+```
+
+Every turn ends with the percentage used, and the line turns yellow as the
+auto-compact threshold approaches. Compacting sends the whole conversation to
+the model, so a conversation already past the window cannot be compacted out of
+it — `/clear` is the way out, and the old conversation stays in
+`scivo sessions`.
+
 ## Driving a session from the web — `/scivo-control`
 
 Inside a running `scivo`, type `/scivo-control`. It prints a link and a
