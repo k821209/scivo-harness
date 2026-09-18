@@ -14,9 +14,32 @@ it already typed, which is where the person thought it was going.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
-from typing import Callable
+from typing import Callable, Iterator
+
+_ACTIVE: "KeyWatcher | None" = None
+
+
+@contextlib.contextmanager
+def paused() -> Iterator[None]:
+    """Give stdin back to whoever wants to read a line.
+
+    The watcher holds the terminal in cbreak mode and reads every byte, so a
+    permission prompt asked in the middle of a turn — which is when they are
+    all asked — got no input at all: the answer was being eaten one character
+    at a time by the thing watching for Esc.
+    """
+    watcher = _ACTIVE
+    if watcher is None:
+        yield
+        return
+    watcher.suspend()
+    try:
+        yield
+    finally:
+        watcher.resume()
 
 
 class KeyWatcher:
@@ -28,8 +51,11 @@ class KeyWatcher:
         self._saved = None
         self.typed_ahead = ""
         self.interrupted = False
+        self._suspended = False
 
     def __enter__(self) -> "KeyWatcher":
+        global _ACTIVE
+
         try:
             if not sys.stdin.isatty():
                 return self
@@ -40,12 +66,42 @@ class KeyWatcher:
             self._saved = termios.tcgetattr(self._fd)
             tty.setcbreak(self._fd)
             asyncio.get_running_loop().add_reader(self._fd, self._read)
+            _ACTIVE = self
         except Exception:  # noqa: BLE001 - a terminal we cannot put in raw mode still works
             self._restore()
         return self
 
     def __exit__(self, *exception: object) -> None:
+        global _ACTIVE
+
+        if _ACTIVE is self:
+            _ACTIVE = None
         self._restore()
+
+    def suspend(self) -> None:
+        """Stop reading stdin, and put the terminal back in line mode."""
+        if self._fd is None or self._suspended:
+            return
+        self._suspended = True
+        import contextlib as _contextlib
+        import termios
+
+        with _contextlib.suppress(Exception):
+            asyncio.get_running_loop().remove_reader(self._fd)
+        if self._saved is not None:
+            with _contextlib.suppress(Exception):
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
+
+    def resume(self) -> None:
+        if self._fd is None or not self._suspended:
+            return
+        self._suspended = False
+        import contextlib as _contextlib
+        import tty
+
+        with _contextlib.suppress(Exception):
+            tty.setcbreak(self._fd)
+            asyncio.get_running_loop().add_reader(self._fd, self._read)
 
     def _restore(self) -> None:
         fd, self._fd = self._fd, None

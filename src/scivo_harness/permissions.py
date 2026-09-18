@@ -15,6 +15,7 @@ allowed it, so the model relays an instruction instead of guessing at a cause.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import Any
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from . import ui
+from .interrupts import paused
 from .session import scivo_tool_label
 
 # Tools whose effects leave this machine or cannot be undone from here. They are
@@ -77,9 +79,16 @@ class Approvals:
             # of a batch should settle the rest without asking.
             if tool_name in self.always and not hold:
                 return PermissionResultAllow(updated_input=payload)
-            if hold:
-                return await self._hold(tool_name, payload, hold)
-            return await self._ask(tool_name, payload)
+            # stdin goes back to line mode BEFORE the question is printed.
+            # Pausing around the input() call alone left a window between the
+            # printed question and the read, and an answer typed in that window
+            # went to the Esc watcher instead — the prompt then sat there
+            # ignoring the keyboard.
+            terminal = self.remote is None or not self.remote.active
+            with paused() if terminal else contextlib.nullcontext():
+                if hold:
+                    return await self._hold(tool_name, payload, hold)
+                return await self._ask(tool_name, payload)
 
     async def _hold(self, tool_name: str, payload: dict[str, Any], reason: str):
         """A guardrail asked. The prompt used to read like every other one:
