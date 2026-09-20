@@ -210,6 +210,11 @@ async def build(
         continue_conversation=continue_last and not resume,
         max_budget_usd=max_budget_usd,
         include_partial_messages=True,
+        # One stdio message can carry a whole image: a rendered slide read back
+        # for checking is a few MB of base64, and the SDK's 1 MB default killed
+        # the turn with "JSON message exceeded maximum buffer size". Deck and
+        # figure work does that routinely.
+        max_buffer_size=64 * 1024 * 1024,
     )
     session = Session(options=options, briefing=briefing, plan=plan, rails=rails,
                       config=config, provider=chosen, model=model, approver=approver,

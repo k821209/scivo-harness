@@ -44,6 +44,15 @@ def explain(error: Exception) -> str | None:
             "Using a local model instead? `scivo --provider <name>`."
         )
 
+    if "maximum buffer size" in text:
+        return (
+            "One message from Claude Code was too large to read in.\n\n"
+            "scivo allows 64 MB per message, which covers rendered slides and figures. "
+            "Something bigger than that came back — usually a very large file read whole.\n"
+            "Read it in parts (`offset`/`limit`, or `head`), or point the model at a "
+            "smaller rendering of it. The session itself is fine; only this turn was lost."
+        )
+
     if "prompt is too long" in text or "exceeds the available context" in text:
         return (
             "The conversation no longer fits in this model's context window.\n\n"
