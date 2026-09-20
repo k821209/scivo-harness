@@ -21,6 +21,30 @@ from mcp.client.stdio import stdio_client
 from .config import ScivoConfig
 
 
+def _hush_group_kill() -> None:
+    """Silence one warning that macOS produces on every clean shutdown.
+
+    Closing the server, the `mcp` package tries to kill the child's process
+    group; on macOS that is refused (EPERM) and it logs "Process group
+    termination failed for PID …, falling back to simple terminate" before
+    terminating the child normally, which works. The line printed twice on
+    every `scivo` command and read like a fault. Only that message is dropped —
+    the same logger's other warnings still come through.
+    """
+    import logging
+
+    class _Quiet(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return "Process group termination failed" not in record.getMessage()
+
+    logger = logging.getLogger("mcp.os.posix.utilities")
+    if not any(isinstance(f, _Quiet) for f in logger.filters):
+        logger.addFilter(_Quiet())
+
+
+_hush_group_kill()
+
+
 @dataclass
 class ToolOutcome:
     """A tool call that either produced items or a reason it did not.
