@@ -154,6 +154,26 @@ Every session is launched with bypass made *available*, via the CLI's
 `--allow-dangerously-skip-permissions`, but not turned on. Without that the CLI
 refuses to switch to it mid-session.
 
+## When the model asks you something
+
+Claude Code's question tool expects whatever shows permission prompts to
+collect the answers. Nothing here did, so every question came back to the
+model as "The user did not answer the questions" and it decided alone — once,
+which paper a lecture would be built on. Now the question is asked:
+
+```
+  논문 선택: 어느 논문으로 발표를 준비할까요?
+    1. A. Meconopsis — SRA 공개데이터라 재현 가능
+    2. B. Fagopyrum — 그림이 적음
+  a number, your own words, or blank to skip:
+```
+
+Type a number, several numbers for a multi-choice question, or your own words
+— an answer that is not one of the options is passed through as written.
+Blank skips, and the model is told nobody answered. In `scivo run` the tool is
+refused with instructions to put the question in its answer instead. While
+`/scivo-control` is on, the page says a question is waiting in the terminal.
+
 ## Context, inside a session
 
 ```

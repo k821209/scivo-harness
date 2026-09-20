@@ -30,7 +30,8 @@ AUTO_APPROVED_HOST_TOOLS = ["Read", "Glob", "Grep", "TodoWrite", "WebSearch", "W
 # 285 KB of tool schemas (272 tools) and 89 KB of system prompt, 71 KB of it the
 # project guide. A 27B model spends minutes on that before its first token, so
 # a local session carries a working core instead.
-LOCAL_HOST_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite", "WebFetch", "Skill"]
+LOCAL_HOST_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite", "WebFetch",
+                    "Skill", "AskUserQuestion"]
 LOCAL_SCIVO_TOOLS = (
     "whoami", "list_papers", "get_paper_state", "get_manuscript", "list_sections",
     "get_section", "add_section", "update_section", "list_references",

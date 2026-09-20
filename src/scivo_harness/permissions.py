@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import os
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,10 @@ class Approvals:
         self._one_at_a_time = asyncio.Lock()
 
     async def __call__(self, tool_name: str, payload: dict[str, Any], context: Any):
+        if tool_name == "AskUserQuestion":
+            async with self._one_at_a_time:
+                with paused():
+                    return await self._questions(payload)
         # A guardrail hold arrives with the hook's reason. It is a question
         # about THIS call's content, so an earlier "always" for the tool does
         # not answer it.
@@ -89,6 +94,47 @@ class Approvals:
                 if hold:
                     return await self._hold(tool_name, payload, hold)
                 return await self._ask(tool_name, payload)
+
+    async def _questions(self, payload: dict[str, Any]):
+        """Actually ask the model's question, instead of reporting no answer.
+
+        `AskUserQuestion` expects whatever presents the permission prompt to
+        collect the answers and hand them back as `answers`. Nothing here did,
+        so every question came back "The user did not answer the questions."
+        and the model picked for itself — once, choosing which paper a lecture
+        would be built on.
+        """
+        questions = payload.get("questions") or []
+        if self.remote is not None and self.remote.active:
+            self.remote.status("a question is waiting in the terminal", level="warn")
+        answers: dict[str, Any] = {}
+        for item in questions:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("question", "")).strip()
+            options = [o for o in (item.get("options") or []) if isinstance(o, dict)]
+            multi = bool(item.get("multiSelect"))
+            print()
+            print(ui.yellow(f"  {item.get('header') or 'question'}: ") + text)
+            for index, option in enumerate(options, start=1):
+                print(f"    {index}. {ui.bold(str(option.get('label', '')))}"
+                      + (ui.dim(f" — {option['description']}") if option.get("description") else ""))
+            hint = "numbers, comma-separated" if multi else "a number"
+            reply = (await asyncio.to_thread(
+                input, ui.cyan(f"  {hint}, your own words, or blank to skip: "))).strip()
+            if not reply:
+                continue
+            picked = [options[int(n) - 1].get("label") for n in re.findall(r"\d+", reply)
+                      if 0 < int(n) <= len(options)]
+            if picked:
+                answers[text] = picked if multi else picked[0]
+            else:
+                answers[text] = [reply] if multi else reply
+        if not answers:
+            print(ui.dim("  (skipped — the model is told nobody answered)\n"))
+            return PermissionResultAllow(updated_input=payload)
+        print()
+        return PermissionResultAllow(updated_input={**payload, "answers": answers})
 
     async def _hold(self, tool_name: str, payload: dict[str, Any], reason: str):
         """A guardrail asked. The prompt used to read like every other one:
@@ -182,6 +228,10 @@ class Explain:
         self.denied: list[str] = []
 
     async def __call__(self, tool_name: str, payload: dict[str, Any], context: Any):
+        if tool_name == "AskUserQuestion":
+            async with self._one_at_a_time:
+                with paused():
+                    return await self._questions(payload)
         self.denied.append(tool_name)
         label = scivo_tool_label(tool_name)
         hold = getattr(context, "decision_reason", None)
