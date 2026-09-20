@@ -78,3 +78,9 @@ def attention(briefing) -> list[str]:
     for error in briefing.errors:
         lines.append(red(f"  ! preflight: {error}"))
     return lines
+
+
+# Set by the REPL while a turn runs: anything that prints during a turn calls
+# this first, so the "still working" line is wiped rather than written over.
+def clear_activity() -> None:
+    return None

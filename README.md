@@ -169,6 +169,16 @@ Four identical `ssh` lines in a row used to give no way to tell a call still
 running from one the model had reissued. An open number is a call still in
 flight; a failed one says `failed after`.
 
+When nothing has printed for two seconds, a line keeps count:
+
+```
+  ⠹ working 47s  ·  esc to stop
+```
+
+It appears while the model thinks and while a slow tool runs, and the next
+real output wipes it — so a quiet session is never ambiguous between working
+and hung.
+
 ## When the model asks you something
 
 Claude Code's question tool expects whatever shows permission prompts to

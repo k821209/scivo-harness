@@ -101,10 +101,14 @@ class Repl:
         self._stopping = False
         self.tool_calls = 0
         self._tool_started: dict[str, tuple[int, float]] = {}
+        self._activity_shown = False
+        self._last_output = time.monotonic()
+        ui.clear_activity = self._clear_activity
 
     # ------------------------------------------------------------ rendering
 
     def _on_stream(self, event: StreamEvent) -> None:
+        self._mark_output()
         raw = event.event or {}
         if raw.get("type") != "content_block_delta":
             return
@@ -116,7 +120,48 @@ class Repl:
             if self.control:
                 self.control.delta(text)
 
+    # ------------------------------------------------------------- waiting
+
+    def _mark_output(self) -> None:
+        """Something is about to print: wipe the waiting line, restart the clock."""
+        self._clear_activity()
+        self._last_output = time.monotonic()
+
+    def _clear_activity(self) -> None:
+        if getattr(self, "_activity_shown", False):
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+            self._activity_shown = False
+
+    async def _heartbeat(self) -> None:
+        """A turn with nothing to show looks exactly like a hung one.
+
+        Latency before the first token, a slow tool, a remote command that
+        takes minutes — all printed nothing at all, and the session read as
+        frozen. This draws the seconds on one line, which the next real output
+        wipes.
+        """
+        frames = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+        started = time.monotonic()
+        frame = 0
+        try:
+            while True:
+                await asyncio.sleep(0.4)
+                if time.monotonic() - self._last_output < 2.0 or self._stopping:
+                    continue
+                elapsed = int(time.monotonic() - started)
+                shown = f"{elapsed}s" if elapsed < 60 else f"{elapsed // 60}m{elapsed % 60:02d}s"
+                frame = (frame + 1) % len(frames)
+                tail = "  \u00b7  esc to stop" if elapsed >= 10 else ""
+                sys.stdout.write("\r\033[K  " + ui.dim(f"{frames[frame]} working {shown}{tail}"))
+                sys.stdout.flush()
+                self._activity_shown = True
+        except asyncio.CancelledError:
+            self._clear_activity()
+            raise
+
     def _on_assistant(self, message: AssistantMessage) -> None:
+        self._mark_output()
         for block in message.content:
             if isinstance(block, TextBlock):
                 # Already printed as deltas unless partial streaming was absent.
@@ -149,6 +194,7 @@ class Repl:
         Without this a long `ssh` and a stuck one look the same, and a model
         that reissues a call looks like one call being slow.
         """
+        self._mark_output()
         content = getattr(message, "content", None)
         for block in content if isinstance(content, list) else []:
             identifier = getattr(block, "tool_use_id", None)
@@ -466,6 +512,7 @@ class Repl:
     # ---------------------------------------------------------- permissions
 
     def _say(self, text: str) -> None:
+        self._mark_output()
         print(text)
         if self.control and self.control.active:
             self.control.note(f"```\n{ANSI.sub('', text).strip()}\n```")
@@ -611,6 +658,8 @@ class Repl:
 
             watcher = asyncio.create_task(watch())
         self._stopping = False
+        self._last_output = time.monotonic()
+        beat = asyncio.create_task(self._heartbeat())
 
         def stop_now() -> None:
             self._stopping = True
@@ -670,6 +719,9 @@ class Repl:
         else:
             await self._context(client, brief=True)
         finally:
+            beat.cancel()
+            await asyncio.gather(beat, return_exceptions=True)
+            self._clear_activity()
             if watcher is not None:
                 watcher.cancel()
                 await asyncio.gather(watcher, return_exceptions=True)
