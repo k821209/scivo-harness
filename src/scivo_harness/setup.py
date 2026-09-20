@@ -15,6 +15,7 @@ there is nothing to search for.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -56,17 +57,54 @@ class Result:
         self.warnings.append(message)
 
 
-def mcp_config(key: str, interpreter: str | None = None) -> dict:
+def mcp_config(key: str, interpreter: str | None = None, checkout: Path | None = None) -> dict:
+    env = {"CO_SCIENTIST_API_KEY": key}
+    if checkout is not None:
+        # Run the MCP straight out of the clone, ahead of any installed copy.
+        # This is what someone with a checkout means by having one: `git pull`
+        # updates every project, with no pip step and nothing to keep in sync.
+        env["PYTHONPATH"] = str(checkout / "apps" / "local-mcp")
     return {
         "mcpServers": {
             "scivo": {
                 "type": "stdio",
                 "command": interpreter or sys.executable,
                 "args": ["-m", "co_scientist_local"],
-                "env": {"CO_SCIENTIST_API_KEY": key},
+                "env": env,
             }
         }
     }
+
+
+def usable_checkout(interpreter: str | None = None) -> tuple[Path | None, str | None]:
+    """A source checkout this interpreter can actually run, and why not if not.
+
+    A machine with `~/co-scientist-mcp-public` on it has one for a reason, and
+    the reason is that edits should take effect. Before this, setup wrote the
+    installed snapshot instead and the session opened with a warning saying so,
+    leaving the person to fix by hand what we could see from here.
+    """
+    from .update import checkout_for_mcp
+
+    checkout = checkout_for_mcp()
+    if checkout is None:
+        return None, None
+    package = checkout / "apps" / "local-mcp"
+    # The server module, not just the package: importing the package alone
+    # succeeded in an environment that could not actually start the server,
+    # and setup then wrote a config whose MCP died on first contact.
+    probe = subprocess.run(
+        [interpreter or sys.executable, "-c",
+         "import co_scientist_local.mcp_server as m; print(m.__file__)"],
+        capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(package)},
+    )
+    if probe.returncode != 0:
+        first = (probe.stderr or "").strip().splitlines()[-1:] or [""]
+        return None, f"{checkout} cannot run here ({first[0]}); using the installed copy"
+    if str(package) not in probe.stdout:
+        return None, f"{checkout} did not take precedence; using the installed copy"
+    return checkout, None
 
 
 def environment_note() -> str | None:
@@ -113,10 +151,13 @@ def environment_note() -> str | None:
     return "\n".join(lines)
 
 
-def check_mcp_importable(interpreter: str | None = None) -> None:
+def check_mcp_importable(interpreter: str | None = None, checkout: Path | None = None) -> None:
     interpreter = interpreter or sys.executable
+    env = dict(os.environ)
+    if checkout is not None:
+        env["PYTHONPATH"] = str(checkout / "apps" / "local-mcp")
     probe = subprocess.run(
-        [interpreter, "-c", "import co_scientist_local"], capture_output=True, text=True
+        [interpreter, "-c", "import co_scientist_local"], capture_output=True, text=True, env=env
     )
     if probe.returncode != 0:
         raise SetupError(
@@ -127,7 +168,9 @@ def check_mcp_importable(interpreter: str | None = None) -> None:
         )
 
 
-def write_mcp_json(root: Path, key: str, force: bool, result: Result) -> tuple[Path, Path | None]:
+def write_mcp_json(root: Path, key: str, force: bool, result: Result,
+                   interpreter: str | None = None,
+                   checkout: Path | None = None) -> tuple[Path, Path | None]:
     path = root / ".mcp.json"
     backup: Path | None = None
     if path.exists():
@@ -139,9 +182,12 @@ def write_mcp_json(root: Path, key: str, force: bool, result: Result) -> tuple[P
         backup = path.with_suffix(".json.bak")
         backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
         result.warn(f"replaced {path.name}; previous config kept as {backup.name}")
-    path.write_text(json.dumps(mcp_config(key), indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(mcp_config(key, interpreter, checkout), indent=2) + "\n",
+                    encoding="utf-8")
     path.chmod(0o600)  # it holds a credential
-    result.did(f"wrote {path.name} (interpreter {sys.executable})")
+    result.did(f"wrote {path.name} (interpreter {interpreter or sys.executable})")
+    if checkout is not None:
+        result.did(f"the MCP runs from your checkout at {checkout} — `git pull` there updates it")
     return path, backup
 
 
@@ -197,3 +243,32 @@ def link_skills(root: Path, result: Result) -> None:
     else:
         result.warn("skill install failed; the MCP re-links them on startup. "
                     + (probe.stdout + probe.stderr).strip()[-200:])
+
+
+def point_at_checkout(root: Path, interpreter: str | None = None) -> str | None:
+    """Make an existing project run the MCP from the checkout on this machine.
+
+    A project set up before this — or on a machine where the clone arrived
+    later — keeps running the installed snapshot, and every session opens with
+    the warning saying edits do not take effect. The fix is one line in
+    `.mcp.json`, so do it rather than print instructions for it.
+    """
+    path = root / ".mcp.json"
+    if not path.is_file():
+        return None
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        server = config["mcpServers"]["scivo"]
+    except (OSError, ValueError, KeyError):
+        return None
+    env = server.setdefault("env", {})
+    checkout, _ = usable_checkout(interpreter or server.get("command"))
+    if checkout is None:
+        return None
+    package = str(checkout / "apps" / "local-mcp")
+    if env.get("PYTHONPATH") == package:
+        return None
+    env["PYTHONPATH"] = package
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return f"this project now runs the MCP from {checkout}"

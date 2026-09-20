@@ -412,6 +412,18 @@ alone has Claude Code bundled inside the Agent SDK and no `claude` on PATH, so
 The third way needs no Claude account at all: a local model. See
 [Model endpoints](#model-endpoints).
 
+## If you keep a co-scientist-mcp-public checkout
+
+`scivo setup` finds it (at `~/co-scientist-mcp-public`, or wherever
+`$CO_SCIENTIST_CHECKOUT` points) and writes a `.mcp.json` that runs the MCP
+from it, so `git pull` in the clone updates every project and no pip step has
+to be remembered. It checks first that the checkout actually starts under that
+interpreter, and falls back to the installed copy — saying why — when it does
+not. `scivo update` does the same repair for a project set up earlier.
+
+`--no-checkout` on either command uses the installed copy instead;
+`scivo setup --python PATH` names a different interpreter to run the MCP.
+
 ## Updating
 
 ```bash

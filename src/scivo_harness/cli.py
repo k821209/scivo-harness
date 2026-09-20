@@ -27,6 +27,8 @@ from .providers import (
 from .scivo_mcp import connect
 from .sessions import SessionLookupError, latest as latest_session, resolve as resolve_session, rows as session_rows
 from .setup import (
+    point_at_checkout,
+    usable_checkout,
     Result,
     SetupError,
     check_mcp_importable,
@@ -105,12 +107,21 @@ def _parser() -> argparse.ArgumentParser:
     setup.add_argument("--key", help="the project API key (else $CO_SCIENTIST_API_KEY, else prompt)")
     setup.add_argument("--project", help="expected project id; setup fails if the key binds elsewhere")
     setup.add_argument("--force", action="store_true", help="replace an existing .mcp.json")
+    setup.add_argument("--no-checkout", action="store_true",
+                       help="ignore a co-scientist-mcp-public checkout and use the installed MCP")
+    setup.add_argument("--python", metavar="PATH",
+                       help="the interpreter that runs the MCP server for this project "
+                            "(default: the one running scivo). Use it when the Scivo MCP you "
+                            "want is installed elsewhere — an editable checkout, say")
 
     update = sub.add_parser("update", help="update scivo and the Scivo MCP, and re-link skills")
     update.add_argument("--check", action="store_true",
                         help="report what would happen; change nothing")
     update.add_argument("--no-self", action="store_true",
                         help="update only the MCP, leaving scivo itself alone")
+    update.add_argument("--no-checkout", action="store_true",
+                        help="leave .mcp.json alone even if a co-scientist-mcp-public checkout "
+                             "on this machine could run the MCP")
     update.add_argument("--restore-editable", action="store_true",
                         help="if the MCP is a snapshot over a source checkout, point it back at the checkout")
     shim = sub.add_parser(
@@ -227,9 +238,17 @@ async def _setup(args) -> int:
         return 2
 
     result = Result()
-    check_mcp_importable()
-    shared = environment_note()
-    mcp_path, backup = write_mcp_json(root, key, args.force, result)
+    interpreter = args.python
+    if interpreter:
+        interpreter = str(Path(interpreter).expanduser().resolve())
+    # The checkout is settled first: it is what makes the MCP importable at
+    # all when the harness lives in its own venv without an installed copy.
+    checkout, why_not = (None, None) if args.no_checkout else usable_checkout(interpreter)
+    if why_not:
+        result.warn(why_not)
+    check_mcp_importable(interpreter, checkout)
+    shared = environment_note() if not (interpreter or checkout) else None
+    mcp_path, backup = write_mcp_json(root, key, args.force, result, interpreter, checkout)
     ensure_gitignore(root, result)
     link_setup_skills(root, result)
 
@@ -372,6 +391,11 @@ async def _update(args) -> int:
     if args.check:
         return 0
 
+    if not args.no_checkout:
+        pointed = point_at_checkout(config.root)
+        if pointed:
+            print(ui.dim(f"  {'checkout':20} {pointed}"))
+            config = load(config.root)   # the verdict below must use the new config
     linked, link_output = link_skills(config)
     print(ui.dim(f"  {'skills':20} {'re-linked' if linked else link_output[:90]}"))
 
