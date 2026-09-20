@@ -103,9 +103,11 @@ models it does not know, and nothing is billed for them.
 
 ## When the typed line looks wrong
 
-Some terminals — GNU screen with CJK width settings, a few SSH paths — draw
-the input line one column off, so the cursor eats a character and the
-completion menu lands on the text. If that happens:
+Inside GNU screen the input line can draw one column off: the cursor eats a
+character and the completion menu lands on the text. Only the drawing is
+wrong — what you typed still runs. Observed in screen 4.09.01 at ko_KR.utf8,
+and not in the macOS Terminal with the same build, so it is the terminal
+rather than the harness. If it happens:
 
 ```bash
 SCIVO_PROMPT_STYLE=list scivo     # completions listed below the line, no floating menu
