@@ -154,6 +154,21 @@ Every session is launched with bypass made *available*, via the CLI's
 `--allow-dangerously-skip-permissions`, but not turned on. Without that the CLI
 refuses to switch to it mid-session.
 
+## Reading the tool lines
+
+Each tool call is numbered and stamped when it starts, and closed when it
+returns:
+
+```
+  #7 21:45:27  Bash  ssh node2 'docker exec comfyui-h3 …
+  #7 done in 94.2s
+  #8 21:47:01  Bash  ssh node2 'docker exec comfyui-h3 …
+```
+
+Four identical `ssh` lines in a row used to give no way to tell a call still
+running from one the model had reissued. An open number is a call still in
+flight; a failed one says `failed after`.
+
 ## When the model asks you something
 
 Claude Code's question tool expects whatever shows permission prompts to

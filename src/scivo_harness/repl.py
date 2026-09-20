@@ -8,6 +8,7 @@ import io
 import json
 import re
 import sys
+import time
 from typing import Any
 
 from claude_agent_sdk import (
@@ -20,6 +21,7 @@ from claude_agent_sdk import (
     TextBlock,
     ThinkingBlock,
     ToolUseBlock,
+    UserMessage,
 )
 
 from . import guardrails, ui
@@ -97,6 +99,8 @@ class Repl:
         self._compacting = False
         self._typed_ahead = ""
         self._stopping = False
+        self.tool_calls = 0
+        self._tool_started: dict[str, tuple[int, float]] = {}
 
     # ------------------------------------------------------------ rendering
 
@@ -123,17 +127,42 @@ class Repl:
             elif isinstance(block, ThinkingBlock):
                 continue
             elif isinstance(block, ToolUseBlock):
-                if self._streamed or not self._streamed:
-                    print()
+                print()
                 label = scivo_tool_label(block.name)
                 detail = _preview(block.name, block.input or {})
-                line = f"  · {label}" + (f"  {detail}" if detail else "")
+                # Numbered and clocked: four identical `ssh …` lines in a row
+                # gave no way to tell a retry from a call still running.
+                self.tool_calls += 1
+                self._tool_started[block.id] = (self.tool_calls, time.monotonic())
+                stamp = time.strftime("%H:%M:%S")
+                line = f"  #{self.tool_calls} {stamp}  {label}" + (f"  {detail}" if detail else "")
                 print(ui.dim(line), flush=True)
                 if self.control:
-                    self.control.tool(label, detail)
+                    self.control.tool(f"#{self.tool_calls} {stamp} {label}", detail)
         self._streamed = ""
         if self.control:
             self.control.end_assistant()
+
+    def _on_tool_result(self, message: Any) -> None:
+        """Close the line its call opened, with how long it took.
+
+        Without this a long `ssh` and a stuck one look the same, and a model
+        that reissues a call looks like one call being slow.
+        """
+        content = getattr(message, "content", None)
+        for block in content if isinstance(content, list) else []:
+            identifier = getattr(block, "tool_use_id", None)
+            if identifier is None or identifier not in self._tool_started:
+                continue
+            number, started = self._tool_started.pop(identifier)
+            seconds = time.monotonic() - started
+            failed = bool(getattr(block, "is_error", False))
+            took = f"{seconds:.1f}s" if seconds < 60 else f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+            mark = "failed after" if failed else "done in"
+            line = f"  #{number} {mark} {took}"
+            print(ui.red(line) if failed else ui.dim(line), flush=True)
+            if self.control:
+                self.control.tool(f"#{number}", f"{mark} {took}")
 
     def _on_system(self, message: SystemMessage) -> None:
         """Compaction is the one background step long enough to look like a hang."""
@@ -603,6 +632,8 @@ class Repl:
                         self._on_system(message)
                     elif isinstance(message, AssistantMessage):
                         self._on_assistant(message)
+                    elif isinstance(message, UserMessage):
+                        self._on_tool_result(message)
                     elif isinstance(message, ResultMessage):
                         self._on_result(message)
                     if self.session.rails.looping and not self._stopping:
