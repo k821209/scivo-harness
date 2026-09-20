@@ -55,6 +55,7 @@ to a failure the guide documents as having actually happened:
 | `pgrep -f` / `pkill -f` over ssh — the pattern matches the ssh line carrying it | denied, with the bracketed-pattern fix |
 | a memory write containing an IP, GPU model, core count or conda env | held for the user — machines belong in the servers registry |
 | the second analysis-shaped shell command in a session | a reminder that this is where provenance is lost |
+| the same tool call, same arguments, three times in one turn | denied, with the result it already has named; at five the turn is stopped |
 
 **The tool surface is pruned — for correctness, not for context.** The scivo
 server exposes 234 tools. `--profile` drops whole domains, so they are absent

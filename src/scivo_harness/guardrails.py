@@ -9,6 +9,7 @@ fires at that moment instead.
 from __future__ import annotations
 
 import re
+import json
 from typing import Any
 
 from claude_agent_sdk import HookMatcher
@@ -64,12 +65,63 @@ def _note(context: str) -> dict[str, Any]:
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context}}
 
 
+# How many times the same call, with the same arguments, may repeat inside one
+# turn before the harness stops answering it.
+SAME_CALL_LIMIT = 3
+SAME_CALL_STOP = 5
+
+# Watching something change is not a loop: these are asked again on purpose,
+# with the same arguments, until the thing they watch has moved.
+POLLING = (
+    "tail_remote_log", "poll_remote_pids", "refresh_log_tail", "server_status",
+    "list_analysis_runs", "get_analysis_run", "heartbeat_run", "scan_untracked_jobs",
+    "scan_recent_outputs", "youtube_check", "youtube_status",
+)
+
+
 class Guardrails:
     """Session-scoped state for the rules that need to count."""
 
     def __init__(self) -> None:
         self.adhoc_runs = 0
         self.blocked: list[str] = []
+        self.repeats: dict[tuple[str, str], int] = {}
+        self.looping: str | None = None
+
+    def new_turn(self) -> None:
+        """Repetition is counted per turn: asking again next turn is fine."""
+        self.repeats.clear()
+        self.looping = None
+
+    async def on_any_tool(self, payload: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
+        """Break a tool-call loop.
+
+        A local model answered "확인" by calling list_todos and list_papers,
+        reading both results, and then calling them again — twenty times. The
+        results were delivered correctly each time; the model simply would not
+        stop. Nothing in the loop changes, so the harness stops carrying it.
+        """
+        name = str(payload.get("tool_name", ""))
+        if any(marker in name for marker in POLLING):
+            return {}
+        try:
+            arguments = json.dumps(payload.get("tool_input", {}), sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            arguments = str(payload.get("tool_input", {}))
+        key = (name, arguments)
+        seen = self.repeats[key] = self.repeats.get(key, 0) + 1
+        if seen < SAME_CALL_LIMIT:
+            return {}
+        label = name.split("__")[-1]
+        if seen >= SAME_CALL_STOP:
+            self.looping = label
+        return _deny(
+            f"Blocked: `{label}` has already run {seen - 1} times in this turn with exactly "
+            "these arguments, and returned each time. Calling it again cannot produce anything "
+            "new.\n"
+            "Use the result you already have and answer the user. If it genuinely did not answer "
+            "the question, say that in words instead of repeating the call."
+        )
 
     async def on_bash(self, payload: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         command = str(payload.get("tool_input", {}).get("command", ""))
@@ -131,5 +183,6 @@ def build(rails: Guardrails) -> dict[str, list[HookMatcher]]:
                 matcher="mcp__scivo__append_project_memory|mcp__scivo__update_project_memory",
                 hooks=[rails.on_memory_write],
             ),
+            HookMatcher(hooks=[rails.on_any_tool]),   # no matcher: every tool
         ]
     }

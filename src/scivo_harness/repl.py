@@ -22,7 +22,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
-from . import ui
+from . import guardrails, ui
 from .control import Control
 from .preflight import to_markdown
 from .failures import explain
@@ -568,6 +568,7 @@ class Repl:
         self._say("")
 
     async def _turn(self, client: ClaudeSDKClient, line: str) -> None:
+        self.session.rails.new_turn()
         await client.query(line)
         watcher = None
         if self.control and self.control.active:
@@ -604,6 +605,17 @@ class Repl:
                         self._on_assistant(message)
                     elif isinstance(message, ResultMessage):
                         self._on_result(message)
+                    if self.session.rails.looping and not self._stopping:
+                        # Denying the repeat did not stop it either. End the
+                        # turn rather than let it spend the context on a loop.
+                        self._stopping = True
+                        label = self.session.rails.looping
+                        self._say(ui.yellow(f"\n  stopped: {label} was called the same way "
+                                            f"{guardrails.SAME_CALL_STOP} times in this turn")
+                                  + ui.dim("\n  The results were delivered each time; the model "
+                                           "kept asking. Try a more specific instruction, or "
+                                           "`/model opus` for this one.\n"))
+                        await client.interrupt()
             # Keys pressed during the turn were read here, not by the terminal.
             # Hand them to the next prompt so they are not silently eaten.
             self._typed_ahead = keys.typed_ahead.strip("\r\n")
