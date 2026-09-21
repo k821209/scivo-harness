@@ -219,8 +219,9 @@ it — `/clear` is the way out, and the old conversation stays in
 
 ## Driving a session from the web — `/scivo-control`
 
-Inside a running `scivo`, type `/scivo-control`. It prints a link and a
-passcode. Open the link on any device, and the same local session is driven
+Inside a running `scivo`, type `/scivo-control`. It prints a link, and the
+page also appears in a dock in the dashboard. Open it on any device you are
+signed in on, and the same local session is driven
 from there: send messages, watch replies stream in, answer tool approvals with
 buttons, and press **Stop** to interrupt a turn. The terminal keeps working at
 the same time, and anything typed there shows up on the page too.
@@ -231,7 +232,8 @@ scivo› /scivo-control
 
   scivo-control on
   open      https://co-scientist-5af1a.web.app/p/<project>/<pub>
-  passcode  XXXXXXXXXX   (yours only — it acts on this machine)
+            open it from the dashboard's dock, or this link while signed in
+            it opens for you and nobody else — no code to type or forward
 ```
 
 A message sent while a turn is running is shown at once and marked queued —
@@ -250,14 +252,17 @@ That preview sits in a `sandbox=""` iframe, so scripts are off and it has no
 origin. A lone `~` stays a tilde, because in research text it means
 "approximately"; strikethrough needs `~~`.
 
-**It is for one person driving their own session.** The page gets one
-passcode, labelled `owner`, and the local side acts only on input carrying that
-label. The server stamps the label from the passcode, so page code cannot
-forge it. Do not hand the passcode to a collaborator. Whoever holds it is
-typing into a shell on your machine, and would be doing so on your Claude
-account. The passcode is kept in `.scivo/control.json` (mode 600, gitignored)
-and stays the same across sessions, which is what makes it practical to use
-from a phone.
+**It is for one person driving their own session.** The page is published as
+`kind="control"`, and the dashboard signs the project owner in from their own
+login, stamping every response `reviewer: "owner"` — the only label this side
+acts on. Page code cannot forge it; the server puts it there. No passcode is
+minted, so there is nothing to type and nothing to forward: anyone else
+opening the link has no way in. Codes issued by earlier versions are revoked
+the next time `/scivo-control` starts.
+
+Which also means: whoever is signed in to the dashboard on that device can
+type into a shell on your machine, on your Claude account. Sign out on a
+device you share.
 
 **The page runs in the dashboard's origin, and it can send the agent
 instructions.** That combination is why model output is never trusted as

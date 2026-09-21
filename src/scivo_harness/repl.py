@@ -396,7 +396,8 @@ class Repl:
         print()
         print(ui.green("  scivo-control on"))
         print(f"  open      {ui.bold(link.url)}")
-        print(f"  passcode  {ui.bold(link.passcode)}   {ui.dim('(yours only — it acts on this machine)')}")
+        print(ui.dim("            open it from the dashboard's dock, or this link while signed in"))
+        print(ui.dim("            it opens for you and nobody else — no code to type or forward"))
         print(ui.dim("  The page drives this session: messages, approvals and Stop."))
         print(ui.dim("  Typing here still works. `/scivo-control off` unpublishes the page.\n"))
 

@@ -21,10 +21,11 @@ What the probes established, and how the layout follows from each:
   approvals doc relies on that — while an array is replaced whole, which is what
   the inbox relies on.
 
-Scope is one person driving their own session. The publication gets a single
-passcode labelled `owner`, and every response is checked for that label before
-it is acted on. A second label is a second person, and routing someone else's
-prompts through this machine's Claude login is not something to do quietly.
+Scope is one person driving their own session. The dashboard signs the project
+owner in to a `kind="control"` page from their own login and stamps every
+response `reviewer: "owner"`; this side acts on nothing else. No passcode is
+minted, so there is no code to forward — routing someone else's prompts through
+this machine's Claude login is not something to do quietly.
 """
 
 from __future__ import annotations
@@ -65,10 +66,9 @@ def _now_ms() -> int:
 class Link:
     pub_id: str
     url: str
-    passcode: str
 
     def to_json(self) -> dict[str, str]:
-        return {"pub_id": self.pub_id, "url": self.url, "passcode": self.passcode}
+        return {"pub_id": self.pub_id, "url": self.url}
 
 
 @dataclass
@@ -175,8 +175,13 @@ class Control:
     async def _ensure_publication(self) -> Link:
         """Reuse this project's control page if it still exists, else publish one.
 
-        Reuse keeps the passcode stable, which is what makes it usable from a
-        phone. The page is re-uploaded every time so a harness update reaches it.
+        No passcode is issued. The dashboard signs the owner in to a
+        `kind="control"` page from their own session — they are already logged
+        in to reach the dock — and stamps `reviewer: "owner"`, which is the
+        label every response here is checked against. `require_passcode` stays
+        True with no codes minted, so the page opens for the owner and for
+        nobody else: a visitor with the link has no code to present and none
+        exists to be forwarded.
         """
         state_path = self.config.root / STATE_FILE
         stored: dict[str, Any] = {}
@@ -187,12 +192,15 @@ class Control:
                 stored = {}
 
         html = page_html()
-        if stored.get("pub_id") and stored.get("passcode"):
+        if stored.get("pub_id") and stored.get("url"):
             outcome = await self._call("update_publication", pub_id=stored["pub_id"],
                                        html=html, active=True, require_passcode=True,
                                        kind="control")
             if outcome.ok:
-                return Link(stored["pub_id"], stored["url"], stored["passcode"])
+                link = Link(stored["pub_id"], stored["url"])
+                if stored.get("passcode"):
+                    await self._retire_passcodes(link, state_path)
+                return link
 
         published = await self._call(
             "publish_page",
@@ -208,15 +216,27 @@ class Control:
         if not published.ok or not isinstance(published.first, dict):
             raise RuntimeError(f"could not publish the control page: {published.error}")
         pub = published.first
-        code = await self._call("add_passcode", pub_id=pub["pub_id"], label=OWNER)
-        if not code.ok or not isinstance(code.first, dict):
-            raise RuntimeError(f"could not issue the owner passcode: {code.error}")
+        link = Link(pub["pub_id"], pub["url"])
+        self._remember(link, state_path)
+        return link
 
-        link = Link(pub["pub_id"], pub["url"], code.first["passcode"])
+    def _remember(self, link: Link, state_path: Path) -> None:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(link.to_json(), indent=2) + "\n", encoding="utf-8")
-        state_path.chmod(0o600)  # the passcode is a credential for this machine
-        return link
+        state_path.chmod(0o600)
+
+    async def _retire_passcodes(self, link: Link, state_path: Path) -> None:
+        """Clear the codes issued before the dashboard could sign the owner in.
+
+        A code that still exists is a code that can be forwarded, and this page
+        drives a shell. Nothing needs it now, so nothing should keep it.
+        """
+        listed = await self._call("list_passcodes", pub_id=link.pub_id)
+        for item in listed.items if listed.ok else []:
+            code_id = item.get("code_id") if isinstance(item, dict) else None
+            if code_id:
+                await self._call("revoke_passcode", pub_id=link.pub_id, code_id=code_id)
+        self._remember(link, state_path)
 
     async def _call(self, name: str, **arguments: Any):
         async with self._lock:
