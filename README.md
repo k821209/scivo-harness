@@ -469,6 +469,10 @@ to be remembered. It checks first that the checkout actually starts under that
 interpreter, and falls back to the installed copy — saying why — when it does
 not. `scivo update` does the same repair for a project set up earlier.
 
+`scivo update` also runs `git pull` in that clone, because the clone is what
+the session runs: updating only the pip copy left every session on the old
+code while the MCP kept reporting a newer version available.
+
 `--no-checkout` on either command uses the installed copy instead;
 `scivo setup --python PATH` names a different interpreter to run the MCP.
 

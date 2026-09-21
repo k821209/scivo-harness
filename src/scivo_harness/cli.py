@@ -40,6 +40,8 @@ from .setup import (
     write_mcp_json,
 )
 from .update import (
+    checkout_in_use,
+    pull_checkout,
     apply as apply_update,
     inspect as inspect_install,
     has_remote,
@@ -390,6 +392,13 @@ async def _update(args) -> int:
 
     if args.check:
         return 0
+
+    # The clone the session actually runs is updated by git, not by pip.
+    running = checkout_in_use(config)
+    if running is not None:
+        ok, note = pull_checkout(running)
+        print(f"  {'checkout':20} {note if ok else ui.red(note)}")
+        failed = failed or not ok
 
     if not args.no_checkout:
         pointed = point_at_checkout(config.root)

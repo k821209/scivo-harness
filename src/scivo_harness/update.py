@@ -210,3 +210,31 @@ def drop_inapplicable_warning(config: ScivoConfig, identity: dict) -> dict:
     if install.found and install.dedicated_venv:
         return {k: v for k, v in identity.items() if k != "install_warning"}
     return identity
+
+
+def checkout_in_use(config) -> Path | None:
+    """The checkout this project's `.mcp.json` actually runs, if it names one."""
+    package = (config.env or {}).get("PYTHONPATH", "")
+    for entry in package.split(":"):
+        candidate = Path(entry)
+        if candidate.name == "local-mcp" and (candidate / "co_scientist_local").is_dir():
+            return candidate.parent.parent
+    return None
+
+
+def pull_checkout(checkout: Path) -> tuple[bool, str]:
+    """`git pull` the clone the session runs from.
+
+    Updating only the pip copy left the session on the old code and the MCP
+    kept saying a new version was available — `scivo update` twice over, with
+    nothing changing, because the thing being updated was not the thing being
+    run.
+    """
+    before = _run(["git", "rev-parse", "--short", "HEAD"], cwd=str(checkout))[1]
+    code, output = _run(["git", "pull", "--ff-only"], cwd=str(checkout))
+    if code != 0:
+        return False, f"git pull in {checkout} failed:\n{output}"
+    after = _run(["git", "rev-parse", "--short", "HEAD"], cwd=str(checkout))[1]
+    if before == after:
+        return True, f"{checkout} already current ({after})"
+    return True, f"pulled {before} → {after}"
