@@ -323,9 +323,34 @@
 
   function onHead(head) { queue = queue.then(() => applyHead(head)).catch((e) => setDot("stale", e.message)); }
 
+  let headSub = null;
+
+  function listenHead() {
+    if (!LIVE) return;
+    try { headSub && headSub(); } catch (_) {}
+    headSub = C.subscribeDoc("content", "head", onHead);
+  }
+
+  // A phone suspends the page the moment you switch away, and the live
+  // subscription does not always survive it: coming back showed "no heartbeat
+  // for 94s" on a session that was running fine. So on the way back, fetch the
+  // head once and start the subscriptions again from scratch.
+  async function resume() {
+    if (document.visibilityState !== "visible") return;
+    setDot("stale", "reconnecting…");
+    for (const un of chunkSubs.values()) { try { un(); } catch (_) {} }
+    chunkSubs.clear();
+    listenHead();
+    try { onHead(await C.get("content", "head")); await queue; refreshDot(); }
+    catch (e) { setDot("stale", e.message); }
+  }
+
   function start() {
     setInterval(refreshDot, 2000);  // the heartbeat can go quiet without any write to notice
-    if (LIVE) { C.subscribeDoc("content", "head", onHead); return; }
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("focus", resume);
+    window.addEventListener("online", resume);
+    if (LIVE) { listenHead(); return; }
     const poll = async () => { try { onHead(await C.get("content", "head")); await queue; } catch (e) { setDot("stale", e.message); } setTimeout(poll, HEAD_EVERY); };
     poll();
   }

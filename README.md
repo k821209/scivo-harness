@@ -236,6 +236,10 @@ scivo› /scivo-control
             it opens for you and nobody else — no code to type or forward
 ```
 
+Leaving the page on a phone and coming back re-opens the live subscriptions
+and re-reads the session's heartbeat, so a suspended tab does not come back
+reading "disconnected" on a session that is running fine.
+
 A message sent while a turn is running is shown at once and marked queued —
 it used to sit as "sending…" for as long as the turn took, which reads as a
 lost message. When the page opens it posts the last few exchanges of the session, so a page
