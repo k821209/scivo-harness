@@ -361,9 +361,35 @@ class Repl:
         commands = [{"name": name, "help": text} for name, text in LOCAL_COMMANDS.items()]
         commands += [{"name": f"/{skill.name}", "help": skill.summary} for skill in self.skills]
         await self.control.put_commands(commands)
+        self._post_recap_to_page()
         if self.session.approver is not None:
             self.session.approver.remote = self.control
         self._print_link()
+
+    def _post_recap_to_page(self) -> None:
+        """Put the conversation so far on the page it just opened.
+
+        The page starts empty because it starts when you type the command, and
+        everything before that — including the recap `-c` printed — went to the
+        terminal only. Opening the page mid-conversation showed nothing and
+        read like a different session.
+        """
+        from . import sessions
+
+        identifier = self.session_id or self.session.resumed
+        if not (identifier and self.control):
+            return
+        turns = sessions.recap(identifier, exchanges=3)
+        if not turns:
+            return
+        lines = [f"**Earlier in this session** ({identifier[:8]})", ""]
+        for role, text in turns:
+            body = " ".join(text.split())
+            if len(body) > 600:
+                body = body[:600] + " …"
+            lines.append(f"**{'you' if role == 'user' else 'scivo'}** — {body}")
+            lines.append("")
+        self.control.note("\n".join(lines))
 
     def _print_link(self) -> None:
         link = self.control.link

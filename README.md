@@ -234,6 +234,10 @@ scivo› /scivo-control
   passcode  XXXXXXXXXX   (yours only — it acts on this machine)
 ```
 
+When the page opens it posts the last few exchanges of the session, so a page
+opened mid-conversation — or after `scivo -c` — shows what it is joining
+rather than an empty log.
+
 **Everything still runs on your machine.** The page is only a window onto it:
 the tools, the shell and the files are local, and so is the Claude login.
 
