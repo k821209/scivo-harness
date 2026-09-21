@@ -106,6 +106,9 @@ class Control:
     _inbox_seen: int = 0
     _interrupt_seen: int = 0
     _started: int = 0
+    # Set by the REPL: True while a turn is running, so a message arriving now
+    # is queued rather than answered.
+    waiting: bool = False
     _head_chunks: int = -1
     _last_activity: float = 0.0
 
@@ -357,7 +360,15 @@ class Control:
                         if seq > self._inbox_seen and str(message.get("text", "")).strip():
                             self._inbox_seen = seq
                             self._last_activity = time.monotonic()
-                            await self.messages.put(str(message["text"]))
+                            text = str(message["text"])
+                            # Echo it here rather than when the session gets
+                            # round to it: a message sent while a turn is
+                            # running sat as "sending…" on the page for as long
+                            # as the turn took, which reads as a lost message.
+                            self.user(text, "web")
+                            if self.waiting:
+                                self.status("queued — the session is busy with the previous turn")
+                            await self.messages.put(text)
                 elif kind == "approvals":
                     for rid, decision in (doc.get("decisions") or {}).items():
                         pending = self._approvals.get(rid)

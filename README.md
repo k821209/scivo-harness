@@ -234,7 +234,9 @@ scivo› /scivo-control
   passcode  XXXXXXXXXX   (yours only — it acts on this machine)
 ```
 
-When the page opens it posts the last few exchanges of the session, so a page
+A message sent while a turn is running is shown at once and marked queued —
+it used to sit as "sending…" for as long as the turn took, which reads as a
+lost message. When the page opens it posts the last few exchanges of the session, so a page
 opened mid-conversation — or after `scivo -c` — shows what it is joining
 rather than an empty log.
 

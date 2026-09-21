@@ -684,6 +684,8 @@ class Repl:
 
             watcher = asyncio.create_task(watch())
         self._stopping = False
+        if self.control and self.control.active:
+            self.control.waiting = True
         self._last_output = time.monotonic()
         beat = asyncio.create_task(self._heartbeat())
 
@@ -745,6 +747,8 @@ class Repl:
         else:
             await self._context(client, brief=True)
         finally:
+            if self.control and self.control.active:
+                self.control.waiting = False
             beat.cancel()
             await asyncio.gather(beat, return_exceptions=True)
             self._clear_activity()
@@ -812,21 +816,21 @@ class Repl:
                         await self._control(argument.strip())
                         continue
                     if command in {"/permissions", "/dangerously-skip-permissions"}:
-                        if self.control and self.control.active:
+                        if self.control and self.control.active and via != "web":
                             self.control.user(line, via)
                         await self._permissions(self.client, command, argument.strip())
                         continue
                     if command == "/context":
-                        if self.control and self.control.active:
+                        if self.control and self.control.active and via != "web":
                             self.control.user(line, via)
                         await self._context(self.client, brief=False)
                         continue
                     if command == "/model":
-                        if self.control and self.control.active:
+                        if self.control and self.control.active and via != "web":
                             self.control.user(line, via)
                         await self._model(argument.strip())
                         continue
-                    if self.control and self.control.active:
+                    if self.control and self.control.active and via != "web":
                         self.control.user(line, via)
                     try:
                         if self._run_local(line):
