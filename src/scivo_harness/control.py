@@ -189,7 +189,8 @@ class Control:
         html = page_html()
         if stored.get("pub_id") and stored.get("passcode"):
             outcome = await self._call("update_publication", pub_id=stored["pub_id"],
-                                       html=html, active=True, require_passcode=True)
+                                       html=html, active=True, require_passcode=True,
+                                       kind="control")
             if outcome.ok:
                 return Link(stored["pub_id"], stored["url"], stored["passcode"])
 
@@ -199,6 +200,10 @@ class Control:
             description="Drive a local scivo session from the web. Owner only.",
             html=html,
             require_passcode=True,
+            # The dashboard knows this kind: it docks the page in the project's
+            # corner and keeps it out of the Published list, where a link that
+            # drives someone's terminal does not belong.
+            kind="control",
         )
         if not published.ok or not isinstance(published.first, dict):
             raise RuntimeError(f"could not publish the control page: {published.error}")
