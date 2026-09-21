@@ -357,11 +357,21 @@ def context_window(provider: Provider, timeout: float = 5.0) -> int | None:
     import json as _json
     import urllib.request
 
-    try:
-        with urllib.request.urlopen(provider.base_url.rstrip("/") + "/props", timeout=timeout) as response:
-            props = _json.loads(response.read().decode("utf-8", "replace"))
-    except Exception:  # noqa: BLE001 - any failure just means "do not claim to know"
-        return None
+    def ask(path: str):
+        try:
+            with urllib.request.urlopen(provider.base_url.rstrip("/") + path, timeout=timeout) as response:
+                return _json.loads(response.read().decode("utf-8", "replace"))
+        except Exception:  # noqa: BLE001 - any failure just means "do not claim to know"
+            return None
+
+    # A slot's own n_ctx first: `--parallel N` splits the server's context
+    # between N slots, and a session gets one slot, not the whole thing.
+    slots = ask("/slots")
+    if isinstance(slots, list):
+        sizes = [s.get("n_ctx") for s in slots if isinstance(s, dict) and isinstance(s.get("n_ctx"), int)]
+        if sizes:
+            return min(size for size in sizes if size > 0)
+    props = ask("/props") or {}
     for value in (props.get("n_ctx"),
                   (props.get("default_generation_settings") or {}).get("n_ctx")):
         if isinstance(value, int) and value > 0:
