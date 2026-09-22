@@ -46,6 +46,57 @@ from .scivo_mcp import ScivoClient, connect
 OWNER = "owner"
 CHUNK = 20                 # events per log doc; keeps a doc well under Firestore's 1 MB
 MAX_TEXT = 150_000         # one event's text, same reason
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+               ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
+MAX_IMG_BYTES = 200_000    # per image, before base64
+MAX_INLINE_BYTES = 300_000  # per assistant message, before base64
+_MD_IMG = None             # compiled lazily, once
+
+
+def _inline_local_images(text: str, project_root: Path) -> str:
+    """Rewrite `![alt](local/path.png)` to a data URI so the page can show it.
+
+    The page runs on an https origin and cannot fetch file:// paths, so
+    without this a screenshot the model referenced was just a broken image
+    icon. Cap per image and per message so a big render cannot break the doc.
+    """
+    global _MD_IMG
+    if _MD_IMG is None:
+        import re
+        _MD_IMG = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
+    if "![" not in text:
+        return text
+    import base64
+    added = 0
+
+    def sub(match):
+        nonlocal added
+        alt, ref = match.group(1), match.group(2).strip()
+        if "://" in ref or ref.startswith("data:") or ref.startswith("#"):
+            return match.group(0)
+        try:
+            path = Path(ref).expanduser()
+            if not path.is_absolute():
+                path = project_root / path
+            path = path.resolve()
+        except (OSError, ValueError):
+            return match.group(0)
+        if not path.is_file():
+            return match.group(0)
+        mime = IMAGE_TYPES.get(path.suffix.lower())
+        if mime is None:
+            return match.group(0)
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return match.group(0)
+        if len(data) > MAX_IMG_BYTES or added + len(data) > MAX_INLINE_BYTES:
+            return f"{match.group(0)}\n\n_[{path.name}: {len(data)//1024} KB — not inlined for the web view]_"
+        added += len(data)
+        return f"![{alt}](data:{mime};base64,{base64.b64encode(data).decode('ascii')})"
+
+    return _MD_IMG.sub(sub, text)
+
 FLUSH_EVERY = 0.1          # seconds; streaming deltas coalesce into one write
 POLL_ACTIVE = 0.15         # seconds between reads of web input while the session is busy
 POLL_IDLE = 0.5            # … and once it has been quiet for ACTIVE_WINDOW
@@ -275,7 +326,9 @@ class Control:
 
     def end_assistant(self) -> None:
         if self._assistant is not None:
-            self.events[self._assistant]["done"] = True
+            event = self.events[self._assistant]
+            event["text"] = _inline_local_images(event["text"], self.config.root)
+            event["done"] = True
             self._touch(self._assistant)
             self._assistant = None
 

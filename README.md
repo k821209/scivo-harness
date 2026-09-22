@@ -61,14 +61,20 @@ to a failure the guide documents as having actually happened:
 server exposes 234 tools. `--profile` drops whole domains, so they are absent
 from the model's tool list rather than merely denied:
 
-| profile | scivo tools |
+| profile | domains it carries |
 |---|---|
-| `full` | 234 |
-| `paper` | 201 |
-| `deck` / `video` | 161 / 160 |
-| `writing` | 144 |
-| `analysis` | 92 |
-| `--read-only` | 93 (no writing tool at all) |
+| `full` | paper, materials, analysis, deck, video |
+| `paper` | paper, materials, analysis |
+| `writing` | paper, materials |
+| `deck` | deck, materials |
+| `video` | video, materials |
+| `analysis` | analysis |
+| `--read-only` | any of the above, minus every writing tool |
+
+`materials` is its own domain: uploading a reference image, a clip, a
+briefing document is what materials are for, so a video or a deck session
+carries them. The video profile no longer drags in the paper tools you do
+not need to upload a video.
 
 Measured, so the claim is not guesswork: the prefix costs **33,188 tokens at
 `full` and 31,263 at `analysis`** — dropping 142 tools saves about 1,900, not the
@@ -167,7 +173,9 @@ returns:
 
 Four identical `ssh` lines in a row used to give no way to tell a call still
 running from one the model had reissued. An open number is a call still in
-flight; a failed one says `failed after`.
+flight. A `blocked after` line (yellow) is a soft refusal the model can
+rephrase — a Claude Code policy like `sleep N` chained to a command, or a
+permission you declined — and `failed after` (red) is a real error.
 
 When nothing has printed for two seconds, a line keeps count:
 
@@ -248,6 +256,12 @@ rather than an empty log.
 
 **Everything still runs on your machine.** The page is only a window onto it:
 the tools, the shell and the files are local, and so is the Claude login.
+
+**Local images render.** A `![](path/to/screenshot.png)` in the model's
+reply is inlined as a data URI on the way to the page (up to 200 KB each,
+300 KB per message; larger ones are left with a size note). The page runs on
+an https origin and cannot fetch file:// paths, so without this a shot the
+model referenced was just a broken-image icon.
 
 **The page renders what the model writes.** Markdown comes out with tables,
 code highlighting and Korean text, and slash commands complete from a menu

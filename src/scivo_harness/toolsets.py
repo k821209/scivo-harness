@@ -25,10 +25,15 @@ DOMAINS: dict[str, tuple[str, ...]] = {
     "paper": (
         "paper", "section", "figure", "table", "reference", "review", "citation",
         "manuscript", "export", "submission", "requirement", "journal", "author",
-        "affiliation", "material", "asset", "supplementary", "doi", "works",
+        "affiliation", "supplementary", "doi", "works",
         "finding", "anchor", "legend", "image", "publication", "passcode",
         "publish_page", "page_data", "stud",
     ),
+    # A domain of its own: uploading a reference image, a clip, a briefing
+    # document is what materials are for, so a video or a deck session needs
+    # them as much as a paper session does, and a paper session with no
+    # materials tools was a paper session that could not attach anything.
+    "materials": ("material", "asset"),
     "analysis": (
         "analysis", "analyses", "run", "server", "dataset", "pipeline", "job",
         "workdir", "remote", "local_job", "log", "output", "graph", "plan",
@@ -54,12 +59,15 @@ READ_ONLY_PREFIXES = (
 )
 
 PROFILES: dict[str, tuple[str, ...]] = {
-    "full": ("paper", "analysis", "deck", "video"),
-    "paper": ("paper", "analysis"),
-    "writing": ("paper",),
+    "full": ("paper", "materials", "analysis", "deck", "video"),
+    "paper": ("paper", "materials", "analysis"),
+    "writing": ("paper", "materials"),
     "analysis": ("analysis",),
-    "deck": ("paper", "deck"),
-    "video": ("video", "paper"),
+    # Decks and videos both attach materials, so those profiles carry them —
+    # and no longer drag along the paper tools you do not need to make a deck
+    # or upload a video.
+    "deck": ("deck", "materials"),
+    "video": ("video", "materials"),
 }
 
 

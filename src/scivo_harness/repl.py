@@ -71,6 +71,28 @@ MODE_ALIASES = {"default": "default", "ask": "default", "acceptedits": "acceptEd
                 "skip": "bypassPermissions"}
 
 
+def _result_state(block) -> str:
+    """Classify a tool_result: `blocked` (a soft refusal we can rephrase),
+    `failed` (something really went wrong), or `ok`.
+
+    Claude Code's own tool guards return `<tool_use_error>Blocked: …` on things
+    like `sleep N` chained to a command, and our permission callback denies
+    with a message starting `Blocked:` or `Held`. Painting those red as
+    "failed" reads as a fault; they are a nudge to try another approach.
+    """
+    if not bool(getattr(block, "is_error", False)):
+        return "ok"
+    content = getattr(block, "content", "")
+    if isinstance(content, list):
+        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    head = str(content).lstrip()[:120]
+    if head.startswith("<tool_use_error>") or head.startswith("Blocked:") or head.startswith("Held"):
+        return "blocked"
+    if "declined this tool call" in head or "did not approve this held call" in head:
+        return "blocked"
+    return "failed"
+
+
 def _preview(tool: str, payload: dict[str, Any]) -> str:
     """One line describing a tool call, without dumping its arguments."""
     if tool == "Bash":
@@ -202,11 +224,12 @@ class Repl:
                 continue
             number, started = self._tool_started.pop(identifier)
             seconds = time.monotonic() - started
-            failed = bool(getattr(block, "is_error", False))
             took = f"{seconds:.1f}s" if seconds < 60 else f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
-            mark = "failed after" if failed else "done in"
+            state = _result_state(block)
+            mark = {"blocked": "blocked after", "failed": "failed after"}.get(state, "done in")
             line = f"  #{number} {mark} {took}"
-            print(ui.red(line) if failed else ui.dim(line), flush=True)
+            paint = {"blocked": ui.yellow, "failed": ui.red}.get(state, ui.dim)
+            print(paint(line), flush=True)
             if self.control:
                 self.control.tool(f"#{number}", f"{mark} {took}")
 
