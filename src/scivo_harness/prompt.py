@@ -49,8 +49,9 @@ changed the answer.
 ## Showing things, not just talking about them
 
 - **Show a local image by writing `![](/absolute/path.png)`** in your reply.
-  The web view renders it (up to 200 KB per image, 300 KB per message); the
-  terminal shows the same line verbatim. When the user asks "보여줘" / "show
+  The web view renders it — the harness downscales big photos to ~1400 px
+  wide, so a 1–2 MB source usually goes through fine. The terminal shows
+  the same line verbatim. When the user asks "보여줘" / "show
   me" for an image the tools produced, use the markdown link — do not
   describe the pixels in prose. Absolute paths only; PNG, JPG, GIF, WEBP, SVG.
 - **Show HTML by fencing it as a ```html block.** The web view mounts it in a

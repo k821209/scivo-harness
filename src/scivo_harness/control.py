@@ -48,8 +48,10 @@ CHUNK = 20                 # events per log doc; keeps a doc well under Firestor
 MAX_TEXT = 150_000         # one event's text, same reason
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
-MAX_IMG_BYTES = 200_000    # per image, before base64
-MAX_INLINE_BYTES = 300_000  # per assistant message, before base64
+MAX_IMG_DIMENSION = 1400     # downscale before inlining, if PIL is around
+MAX_IMG_BYTES = 800_000      # per image, after downscale
+MAX_INLINE_BYTES = 1_500_000 # per assistant message
+_PIL_MISSING_NOTED = False
 _MD_IMG = None             # compiled lazily, once
 
 
@@ -90,12 +92,60 @@ def _inline_local_images(text: str, project_root: Path) -> str:
             data = path.read_bytes()
         except OSError:
             return match.group(0)
+        original = len(data)
+        data, mime, note = _shrink_for_web(data, mime, path.suffix.lower())
         if len(data) > MAX_IMG_BYTES or added + len(data) > MAX_INLINE_BYTES:
-            return f"{match.group(0)}\n\n_[{path.name}: {len(data)//1024} KB — not inlined for the web view]_"
+            hint = "" if note is None else f" — {note}"
+            return (f"{match.group(0)}\n\n_[{path.name}: {original // 1024} KB — "
+                    f"not inlined for the web view{hint}]_")
         added += len(data)
-        return f"![{alt}](data:{mime};base64,{base64.b64encode(data).decode('ascii')})"
+        caption = f"{alt}" if alt else path.name
+        return f"![{caption}](data:{mime};base64,{base64.b64encode(data).decode('ascii')})"
 
     return _MD_IMG.sub(sub, text)
+
+
+def _shrink_for_web(data: bytes, mime: str, suffix: str) -> tuple[bytes, str, str | None]:
+    """Downscale a big image so it fits the chat, using Pillow when installed.
+
+    A camera-sized JPG blew past every cap and came back to the user as a
+    "not inlined" note. Pillow is not required, but if it is around we resize
+    to a web-friendly width and re-encode; without it, big images stay big
+    and skip inlining, with a note saying how to enable it.
+    """
+    global _PIL_MISSING_NOTED
+    if mime == "image/svg+xml":
+        return data, mime, None
+    try:
+        from PIL import Image
+        import io as _io
+    except ImportError:
+        if not _PIL_MISSING_NOTED:
+            _PIL_MISSING_NOTED = True
+            return data, mime, "install Pillow to auto-downscale"
+        return data, mime, None
+    try:
+        img = Image.open(_io.BytesIO(data))
+        img.load()
+        w, h = img.size
+        if max(w, h) > MAX_IMG_DIMENSION:
+            scale = MAX_IMG_DIMENSION / max(w, h)
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        buf = _io.BytesIO()
+        keeps_alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
+        if suffix == ".png" or keeps_alpha or mime == "image/gif":
+            img.save(buf, "PNG", optimize=True)
+            new_mime = "image/png"
+        else:
+            img.convert("RGB").save(buf, "JPEG", quality=85, optimize=True, progressive=True)
+            new_mime = "image/jpeg"
+        smaller = buf.getvalue()
+    except Exception:  # noqa: BLE001 - a corrupt or exotic image should not break the turn
+        return data, mime, None
+    if len(smaller) < len(data):
+        return smaller, new_mime, None
+    return data, mime, None
+
 
 FLUSH_EVERY = 0.1          # seconds; streaming deltas coalesce into one write
 POLL_ACTIVE = 0.15         # seconds between reads of web input while the session is busy
