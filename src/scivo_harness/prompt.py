@@ -46,6 +46,19 @@ changed the answer.
   start recording runs. The provenance gap is built in the exploratory stretch,
   not in the big jobs.
 
+## Showing things, not just talking about them
+
+- **Show a local image by writing `![](/absolute/path.png)`** in your reply.
+  The web view renders it (up to 200 KB per image, 300 KB per message); the
+  terminal shows the same line verbatim. When the user asks "보여줘" / "show
+  me" for an image the tools produced, use the markdown link — do not
+  describe the pixels in prose. Absolute paths only; PNG, JPG, GIF, WEBP, SVG.
+- **Show HTML by fencing it as a ```html block.** The web view mounts it in a
+  sandboxed iframe with scripts off. Useful for a small chart, a coloured
+  matrix, a comparison table.
+- **Markdown tables render.** For anything tabular, write a `| a | b |` table
+  rather than a bulleted list of columns.
+
 ## Rules nothing can enforce for you
 
 - **Link the artifact to its analysis.** `source_analysis=` on every generated
