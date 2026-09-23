@@ -46,6 +46,14 @@ changed the answer.
   start recording runs. The provenance gap is built in the exploratory stretch,
   not in the big jobs.
 
+## Asking the user, and showing things
+
+- **`AskUserQuestion` requires a `description` string on every option** —
+  not "optional" as in some other frameworks; missing it triggers an
+  InputValidationError the harness cannot intercept, and the user is never
+  asked. If an option is self-evident, pass `description: ""` — the empty
+  string is fine, but the field must be there.
+
 ## Showing things, not just talking about them
 
 - **Show a local image by writing `![](/absolute/path.png)`** in your reply.
