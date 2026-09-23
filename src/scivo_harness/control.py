@@ -147,7 +147,7 @@ def _shrink_for_web(data: bytes, mime: str, suffix: str) -> tuple[bytes, str, st
     return data, mime, None
 
 
-FLUSH_EVERY = 0.1          # seconds; streaming deltas coalesce into one write
+FLUSH_EVERY = 0.03         # seconds; streaming deltas coalesce into one write
 POLL_ACTIVE = 0.15         # seconds between reads of web input while the session is busy
 POLL_IDLE = 0.5            # … and once it has been quiet for ACTIVE_WINDOW
 ACTIVE_WINDOW = 60.0       # seconds of quiet before polling slows down
@@ -446,6 +446,12 @@ class Control:
         return True
 
     async def _writer(self) -> None:
+        """Flush dirty chunks and keep the head's heartbeat alive.
+
+        Wrapped in try/except so a transient MCP hiccup (a dropped stdio
+        stream during a chunk write) does not leave the writer dead while
+        deltas keep piling into `_dirty` and never reach the page.
+        """
         last_beat = time.monotonic()
         while True:
             try:
@@ -454,14 +460,25 @@ class Control:
                 pass
             self._wake.clear()
             await asyncio.sleep(FLUSH_EVERY)  # let a burst of deltas coalesce
-            await self._flush()
+            try:
+                await self._flush()
+            except Exception as exc:  # noqa: BLE001
+                self.errors.append(f"flush: {type(exc).__name__}: {exc}")
+                await asyncio.sleep(0.5)   # do not spin on the same failure
+            # Drain anything that arrived while we were flushing, without
+            # waiting again — otherwise the tail of a burst waits a full cycle.
+            if self._dirty:
+                self._wake.set()
             # The page subscribes to the chunks themselves, so the head only has
             # to move when a new chunk begins — that is how the page learns to
             # listen to it — or when the heartbeat is due. Writing it on every
             # flush doubled the calls on a server that answers one at a time.
             chunks_now = (len(self.events) - 1) // CHUNK if self.events else -1
             if chunks_now != self._head_chunks or time.monotonic() - last_beat >= BEAT_EVERY:
-                await self._write_head(state="live")
+                try:
+                    await self._write_head(state="live")
+                except Exception as exc:  # noqa: BLE001
+                    self.errors.append(f"head: {type(exc).__name__}: {exc}")
                 last_beat = time.monotonic()
 
     async def _poller(self) -> None:
