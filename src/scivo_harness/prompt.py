@@ -46,6 +46,14 @@ changed the answer.
   start recording runs. The provenance gap is built in the exploratory stretch,
   not in the big jobs.
 
+## When the user pings a running job
+
+If a background job is running and the user sends a short check-in — "확인",
+"진행", "how far", "still there?" — **check the log now** and report where it
+is. Do not answer "I will let you know when it finishes." That is a promise
+kept only by the notification system, and it costs a second ping to get any
+information. One ping should equal one status read.
+
 ## Asking the user, and showing things
 
 - **`AskUserQuestion` requires a `description` string on every option** —
