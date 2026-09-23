@@ -69,6 +69,7 @@ def _note(context: str) -> dict[str, Any]:
 # turn before the harness stops answering it.
 SAME_CALL_LIMIT = 3
 SAME_CALL_STOP = 5
+BASH_NUDGE = 5     # after five identical Bash calls, suggest Monitor once
 
 # Watching something change is not a loop: these are asked again on purpose,
 # with the same arguments, until the thing they watch has moved.
@@ -96,10 +97,16 @@ class Guardrails:
     async def on_any_tool(self, payload: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         """Break a tool-call loop.
 
-        A local model answered "확인" by calling list_todos and list_papers,
-        reading both results, and then calling them again — twenty times. The
-        results were delivered correctly each time; the model simply would not
-        stop. Nothing in the loop changes, so the harness stops carrying it.
+        The rule fires on MCP tools: a local model that answered "확인" by
+        calling list_todos and list_papers, reading both results, and then
+        calling them again — twenty times — is stuck; nothing in that loop
+        changes and the results were delivered every time.
+
+        Bash is different. A `ssh … tail log` run five times in a row is the
+        model watching a long-running job, not a stuck loop; the log's tail
+        changes between calls. So Bash never denies — it notes on the fifth
+        identical run that `Monitor` with an until-loop is the pattern for
+        that, and stays out of the way.
         """
         name = str(payload.get("tool_name", ""))
         if any(marker in name for marker in POLLING):
@@ -110,6 +117,14 @@ class Guardrails:
             arguments = str(payload.get("tool_input", {}))
         key = (name, arguments)
         seen = self.repeats[key] = self.repeats.get(key, 0) + 1
+        if name == "Bash":
+            if seen == BASH_NUDGE:
+                return _note(
+                    "This Bash command has run identically several times. If it is polling for a "
+                    "log line or a file to appear, use `Monitor` with an until-loop instead — that "
+                    "backs off, times out cleanly, and does not spend a turn per check."
+                )
+            return {}
         if seen < SAME_CALL_LIMIT:
             return {}
         label = name.split("__")[-1]
