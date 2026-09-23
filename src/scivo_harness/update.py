@@ -23,6 +23,42 @@ from pathlib import Path
 
 from .config import ScivoConfig
 
+MISSING_DEPS_PROBE = r"""
+import json, re, sys
+try:
+    from importlib.metadata import distribution, PackageNotFoundError
+except ImportError:
+    from importlib_metadata import distribution, PackageNotFoundError
+try:
+    dist = distribution(sys.argv[1])
+except PackageNotFoundError:
+    print("[]"); sys.exit(0)
+missing = []
+for line in (dist.requires or []):
+    line = line or ""
+    if "extra ==" in line:
+        continue
+    if ";" in line:
+        req, marker = line.split(";", 1)
+        try:
+            from packaging.markers import Marker
+            if not Marker(marker.strip()).evaluate():
+                continue
+        except Exception:
+            pass
+    else:
+        req = line
+    name = re.split(r"[<>=!~\[\s]", req.strip(), maxsplit=1)[0]
+    if not name:
+        continue
+    try:
+        distribution(name)
+    except PackageNotFoundError:
+        missing.append(name)
+print(json.dumps(missing))
+"""
+
+
 PROBE = r"""
 import json, sys, importlib.metadata as md
 from pathlib import Path
@@ -154,6 +190,41 @@ def apply(install: Install) -> tuple[bool, str]:
     code, output = _run([install.interpreter, "-m", "pip", "install", "--upgrade",
                          "--force-reinstall", "--no-deps", requirement])
     return code == 0, output[-1200:]
+
+
+def fill_missing_deps(install: Install) -> tuple[bool, str]:
+    """Install declared runtime deps that the interpreter is missing.
+
+    `scivo update` uses `git pull` or `pip install --no-deps` on purpose — the
+    latter to avoid moving pins that other projects on a shared interpreter
+    depend on. But that also means a NEW dep declared upstream (PyMuPDF, say)
+    never lands, and the tool that needs it fails at import time with no
+    hint from the update. This tops up just those, one at a time, with
+    `--no-deps` so their own sub-deps do not cascade into pin changes.
+    """
+    if not install.found:
+        return True, ""
+    code, output = _run([install.interpreter, "-c", MISSING_DEPS_PROBE, install.dist])
+    if code != 0:
+        return False, f"could not probe declared deps: {output.strip()[:200]}"
+    import json as _json
+    try:
+        missing = _json.loads(output.strip().splitlines()[-1] if output else "[]")
+    except _json.JSONDecodeError:
+        return False, f"cannot parse dep list: {output[:200]}"
+    if not missing:
+        return True, ""
+    # Fill *with* deps: `--no-deps` would leave every new package's own
+    # transitive requirements missing, and `import pymupdf` succeeds but
+    # `import google.cloud.firestore` immediately errors on api_core. The
+    # apply()-level `--no-deps` still stands for the reinstall of
+    # co-scientist-local itself (that is what protects existing pins); we
+    # only lift the guard for a package pip did not know about before, whose
+    # dependency tree is new to this env.
+    code, out = _run([install.interpreter, "-m", "pip", "install", *missing])
+    if code != 0:
+        return False, f"pip install failed for {missing}:\n{out[-400:]}"
+    return True, f"filled {', '.join(missing)}"
 
 
 def checkout_for_mcp() -> Path | None:

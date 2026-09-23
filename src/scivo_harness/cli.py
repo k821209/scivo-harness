@@ -41,6 +41,7 @@ from .setup import (
 )
 from .update import (
     checkout_in_use,
+    fill_missing_deps,
     pull_checkout,
     apply as apply_update,
     inspect as inspect_install,
@@ -332,6 +333,13 @@ async def _update_one(install, check: bool) -> tuple[bool, bool]:
         print(f"  {'':20} {ui.red('failed')}")
         return False, False
 
+    # A new declared dependency added upstream won't be pulled by git-pull
+    # or by pip's --no-deps reinstall. Fill just the missing ones now.
+    filled_ok, filled_note = fill_missing_deps(install)
+    if filled_note:
+        colour = ui.dim if filled_ok else ui.red
+        print(colour(f"  {'':20} deps: {filled_note[:100]}"))
+
     after = inspect_install(install.interpreter, install.dist)
     moved = after.fingerprint != install.fingerprint
     return True, moved
@@ -356,6 +364,10 @@ async def _restore_mcp(install, args) -> tuple[bool, bool]:
     if not ok or not after.editable:
         print(f"  {'':20} {ui.red('restore failed')}")
         return False, False
+    filled_ok, filled_note = fill_missing_deps(install)
+    if filled_note:
+        colour = ui.dim if filled_ok else ui.red
+        print(colour(f"  {'':20} deps: {filled_note[:100]}"))
     print(f"  {'':20} {ui.green('editable again → ' + str(checkout))}")
     return True, True
 
