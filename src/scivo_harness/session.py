@@ -31,7 +31,7 @@ AUTO_APPROVED_HOST_TOOLS = ["Read", "Glob", "Grep", "TodoWrite", "WebSearch", "W
 # project guide. A 27B model spends minutes on that before its first token, so
 # a local session carries a working core instead.
 LOCAL_HOST_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite", "WebFetch",
-                    "Skill", "AskUserQuestion"]
+                    "Skill", "AskUserQuestion", "Monitor"]
 LOCAL_SCIVO_TOOLS = (
     "whoami", "list_papers", "get_paper_state", "get_manuscript", "list_sections",
     "get_section", "add_section", "update_section", "list_references",
