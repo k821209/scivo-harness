@@ -489,8 +489,11 @@ requires sign-in to happen. The command exists because an install of scivo
 alone has Claude Code bundled inside the Agent SDK and no `claude` on PATH, so
 "run `claude auth login`" was an instruction a new user could not follow.
 `scivo logout` signs out. `scivo doctor` shows whether you are signed in. An
-`ANTHROPIC_API_KEY` in the environment wins over a stored login, and
-`doctor` says so when both are present.
+`ANTHROPIC_API_KEY` in the environment wins over a stored login (Claude Code's
+default; a key present is read as explicit consent to be billed there), and
+`doctor` says so when both are set. Pass `scivo --subscription` for a single
+run, or `unset ANTHROPIC_API_KEY` in the shell, to fall back to the claude.ai
+login without touching the key on disk.
 
 The third way needs no Claude account at all: a local model. See
 [Model endpoints](#model-endpoints).

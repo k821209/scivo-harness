@@ -69,6 +69,9 @@ def _parser() -> argparse.ArgumentParser:
                         help="override the provider's model")
     parser.add_argument("--effort", default=DEFAULT_EFFORT,
                         choices=["low", "medium", "high", "xhigh", "max"])
+    parser.add_argument("--subscription", action="store_true",
+                        help="ignore ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN so the CLI "
+                             "falls back to your claude.ai login (subscription billing)")
     parser.add_argument("--add-dir", action="append", default=[], metavar="PATH",
                         help="let the session reach this directory too; repeatable")
     parser.add_argument("--permission-mode", default="default",
@@ -529,10 +532,12 @@ def _login_state() -> str:
         return f"unknown ({type(exc).__name__})"
     text = (f"signed in ({state.get('authMethod')})" if state.get("loggedIn")
             else "not signed in — scivo login")
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         # auth status reports the stored login even when an API key in the
         # environment is what will actually be used.
-        text += " · ANTHROPIC_API_KEY is set and takes precedence"
+        var = "ANTHROPIC_API_KEY" if os.environ.get("ANTHROPIC_API_KEY") else "ANTHROPIC_AUTH_TOKEN"
+        text += (f" · {var} is set and takes precedence — pass `--subscription` "
+                 "(or unset it) to use the claude.ai login instead")
     return text
 
 
