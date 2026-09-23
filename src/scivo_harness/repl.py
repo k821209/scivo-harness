@@ -71,6 +71,27 @@ MODE_ALIASES = {"default": "default", "ask": "default", "acceptedits": "acceptEd
                 "skip": "bypassPermissions"}
 
 
+def _result_reason(block) -> str:
+    """One-line summary of why a call failed or was blocked.
+
+    Reading `#76 failed after 0.0s` on its own left the user wondering whether
+    the call was still running; the reason line makes the state read at a
+    glance: an aspect_ratio validation error is a real failure, a Blocked
+    line is a nudge to try another way.
+    """
+    content = getattr(block, "content", "")
+    if isinstance(content, list):
+        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    head = str(content).lstrip().replace("\n", " ")
+    # trim wrappers we already convey by colour
+    for prefix in ("<tool_use_error>", "Error executing tool ", "Blocked: ", "Held ",
+                   "The user declined this tool call. ", "The user did not approve this held call. "):
+        if head.startswith(prefix):
+            head = head[len(prefix):]
+    head = head.strip("\"' \t")
+    return head[:80] + ("…" if len(head) > 80 else "")
+
+
 def _result_state(block) -> str:
     """Classify a tool_result: `blocked` (a soft refusal we can rephrase),
     `failed` (something really went wrong), or `ok`.
@@ -227,11 +248,12 @@ class Repl:
             took = f"{seconds:.1f}s" if seconds < 60 else f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
             state = _result_state(block)
             mark = {"blocked": "blocked after", "failed": "failed after"}.get(state, "done in")
-            line = f"  #{number} {mark} {took}"
+            reason = _result_reason(block) if state != "ok" else ""
+            line = f"  #{number} {mark} {took}" + (f"  {reason}" if reason else "")
             paint = {"blocked": ui.yellow, "failed": ui.red}.get(state, ui.dim)
             print(paint(line), flush=True)
             if self.control:
-                self.control.tool(f"#{number}", f"{mark} {took}")
+                self.control.tool(f"#{number}", f"{mark} {took}" + (f" — {reason}" if reason else ""))
 
     def _on_system(self, message: SystemMessage) -> None:
         """Compaction is the one background step long enough to look like a hang."""
