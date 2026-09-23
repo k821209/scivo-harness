@@ -71,6 +71,31 @@ MODE_ALIASES = {"default": "default", "ask": "default", "acceptedits": "acceptEd
                 "skip": "bypassPermissions"}
 
 
+def _billed_to_api(provider) -> bool:
+    """True when this session's requests hit an API tab, not a subscription.
+
+    A claude.ai plan is billed by the plan, not the request; showing the CLI's
+    per-turn dollar figure to that user reads as a bill they will not receive.
+    Only three shapes are billed per request:
+      · a gateway provider that carries a real token (auth_token_env);
+      · the built-in `anthropic` provider with ANTHROPIC_API_KEY /
+        ANTHROPIC_AUTH_TOKEN in the environment;
+    Everything else — a local llama-server, a subscription-signed CLI — is not.
+    """
+    import os
+    # A provider with a real token (auth_token_env) is billed by that gateway.
+    # `auth_token = "unused"` on a local server does not count.
+    if provider.auth_token_env:
+        return True
+    if not provider.is_local:
+        # The built-in `anthropic` provider: billed only if the environment
+        # names an API key.
+        for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            if os.environ.get(var):
+                return True
+    return False
+
+
 def _result_reason(block) -> str:
     """One-line summary of why a call failed or was blocked.
 
@@ -315,17 +340,27 @@ class Repl:
         self.turns += message.num_turns
         # Claude Code prices every turn from its own table, including models it
         # does not know: a Qwen turn on a local server came back as $0.334.
-        # Nothing was billed, so it is neither shown nor added to the total.
+        # A claude.ai subscription is billed by the plan, not the request, so
+        # the dollar figure the CLI reports is what an equivalent API call
+        # would cost — the user is not paying it. Only show a price when the
+        # session is actually API-billed.
         local = self.session.provider.is_local
-        turn_cost = 0.0 if local else (message.total_cost_usd or 0.0)
+        billed = _billed_to_api(self.session.provider)
+        turn_cost = (message.total_cost_usd or 0.0) if (billed and not local) else 0.0
         self.cost += turn_cost
         if message.is_error and not self._stopping:
             # A turn stopped on purpose comes back as an error with no text.
             # Reporting "! error:" for a stop the person asked for reads as a
             # fault in the harness.
             print(ui.red(f"\n  ! {message.stop_reason or 'error'}: {message.result or ''}"))
-        price = "local model" if local else f"${turn_cost:.3f}"
-        print(ui.dim(f"\n  ({message.num_turns} turns · {price} · ${self.cost:.3f} session)\n"))
+        if local:
+            price, total = "local model", "local model"
+        elif billed:
+            price, total = f"${turn_cost:.3f}", f"${self.cost:.3f} session"
+        else:
+            # claude.ai subscription: no per-turn dollars, keep the shape.
+            price, total = "claude.ai", "on your plan"
+        print(ui.dim(f"\n  ({message.num_turns} turns · {price} · {total})\n"))
         if self.control:
             self.control.result(message.num_turns, turn_cost, self.cost,
                                 error=(message.stop_reason or "error") if message.is_error else None)
@@ -364,7 +399,12 @@ class Repl:
             else:
                 print(ui.dim("\n  no id yet — it is assigned with the first reply\n"))
         elif command == "/cost":
-            print(ui.dim(f"\n  ${self.cost:.4f} over {self.turns} turns\n"))
+            if _billed_to_api(self.session.provider):
+                print(ui.dim(f"\n  ${self.cost:.4f} over {self.turns} turns\n"))
+            elif self.session.provider.is_local:
+                print(ui.dim(f"\n  local model — {self.turns} turns, no cost\n"))
+            else:
+                print(ui.dim(f"\n  claude.ai subscription — {self.turns} turns, on your plan\n"))
         elif command == "/tools":
             plan = self.session.plan
             print(f"\n  {plan.summary()}")
@@ -891,6 +931,9 @@ class Repl:
             await self.client.disconnect()
             if self.session.endpoint is not None:
                 self.session.endpoint.close()
-        print(ui.dim(f"session total ${self.cost:.4f}"))
+        if _billed_to_api(self.session.provider):
+            print(ui.dim(f"session total ${self.cost:.4f}"))
+        elif not self.session.provider.is_local:
+            print(ui.dim(f"session ended — {self.turns} turns on your claude.ai plan"))
         if self.session_id:
             print(ui.dim(f"resume: scivo resume {self.session_id[:8]}   (or scivo -c)"))

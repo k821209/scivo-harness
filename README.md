@@ -106,8 +106,13 @@ under the new model. A different provider cannot: the endpoint belongs to the
 Claude Code process, so switching restarts it, and scivo says it is starting a
 new conversation rather than trying to carry Claude's history onto a local
 server. `scivo providers use <name>` makes a provider this project's default.
-Local turns show "local model" instead of a price. Claude Code prices even
-models it does not know, and nothing is billed for them.
+Local turns show "local model" instead of a price — Claude Code prices even
+models it does not know. A claude.ai subscription shows "claude.ai · on your
+plan" for the same reason: the CLI's per-turn dollar figure is what an
+equivalent API call would cost, and that is not what the plan is billed for.
+The dollar figure only appears when the session is API-billed —
+`ANTHROPIC_API_KEY` in the environment, or a gateway provider with its own
+token.
 
 ## When the typed line looks wrong
 
