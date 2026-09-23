@@ -21,6 +21,8 @@ from claude_agent_sdk import (
     TextBlock,
     ThinkingBlock,
     ToolUseBlock,
+    TaskNotificationMessage,
+    TaskUpdatedMessage,
     UserMessage,
 )
 
@@ -279,6 +281,33 @@ class Repl:
             print(paint(line), flush=True)
             if self.control:
                 self.control.tool(f"#{number}", f"{mark} {took}" + (f" — {reason}" if reason else ""))
+
+    def _on_task_note(self, message) -> None:
+        """A background task finished, failed, or was stopped — show it live.
+
+        Without this, notifications sat unnoticed in the trace until the
+        user typed something and the model then reported on them in a batch.
+        Now the terminal shows them the moment the CLI delivers them.
+        """
+        stamp = time.strftime("%H:%M:%S")
+        status = str(getattr(message, "status", ""))
+        task = str(getattr(message, "task_id", ""))[:12]
+        summary = str(getattr(message, "summary", "")).strip().replace("\n", " ")[:120]
+        paint = ui.red if status in ("failed", "errored") else ui.yellow
+        line = f"  · task {task} {status}" + (f" — {summary}" if summary else "")
+        print(paint(f"\n[{stamp}]") + " " + paint(line), flush=True)
+        if self.control and self.control.active:
+            self.control.status(f"task {task} {status}: {summary}", level="warn")
+
+    def _on_task_update(self, message) -> None:
+        # Terminal state updates only; running/queued spam the log.
+        patch = getattr(message, "patch", {}) or {}
+        status = str(patch.get("status") or getattr(message, "status", "") or "")
+        if status in ("running", "queued", "starting", "resumed", ""):
+            return
+        stamp = time.strftime("%H:%M:%S")
+        task = str(getattr(message, "task_id", ""))[:12]
+        print(ui.dim(f"\n[{stamp}]  · task {task} {status}"), flush=True)
 
     def _on_system(self, message: SystemMessage) -> None:
         """Compaction is the one background step long enough to look like a hang."""
@@ -791,6 +820,10 @@ class Repl:
                         self._say(ui.green("\n  conversation cleared")
                                   + ui.dim(" — a new conversation, with its own id. `/session` shows it;"
                                            "\n  the old one is still in `scivo sessions`.\n"))
+                    elif isinstance(message, TaskNotificationMessage):
+                        self._on_task_note(message)
+                    elif isinstance(message, TaskUpdatedMessage):
+                        self._on_task_update(message)
                     elif isinstance(message, SystemMessage):
                         self._on_system(message)
                     elif isinstance(message, AssistantMessage):
