@@ -180,6 +180,13 @@ class _Approval:
 
 
 @dataclass
+class _Question:
+    rid: str
+    index: int
+    future: asyncio.Future
+
+
+@dataclass
 class Control:
     """The live channel. Created by `/scivo-control`, closed by `off` or exit."""
 
@@ -204,6 +211,7 @@ class Control:
     _tasks: list[asyncio.Task] = field(default_factory=list)
     _assistant: int | None = None
     _approvals: dict[str, _Approval] = field(default_factory=dict)
+    _questions_pending: dict[str, _Question] = field(default_factory=dict)
     _inbox_seen: int = 0
     _interrupt_seen: int = 0
     _started: int = 0
@@ -259,6 +267,9 @@ class Control:
         for pending in self._approvals.values():
             if not pending.future.done():
                 pending.future.set_result("deny")
+        for pending in self._questions_pending.values():
+            if not pending.future.done():
+                pending.future.set_result(None)
         try:
             await self._flush()
             await self._write_head(state="ended")
@@ -398,6 +409,39 @@ class Control:
             self.end_assistant()
             self._append({"kind": "status", "text": text, "level": level})
 
+    async def ask_question(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Post the model's questions on the page and wait for the owner's answers.
+
+        Returned as `{question_text: label_or_text}` or `{question_text: [labels]}`
+        for multi-select, matching what Claude Code's AskUserQuestion tool checks
+        against the option set. `None` means the page skipped it — the caller
+        tells the model nobody answered.
+        """
+        self.end_assistant()
+        rid = secrets.token_hex(6)
+        # Deep-copy just enough that the page can render it without exposing
+        # the harness's own dict to Firestore's non-JSON quirks.
+        questions = [
+            {"question": str(q.get("question", "")), "header": str(q.get("header", "")),
+             "multiSelect": bool(q.get("multiSelect")),
+             "options": [{"label": str(o.get("label", "")),
+                          "description": str(o.get("description") or "")}
+                         for o in (q.get("options") or []) if isinstance(o, dict)]}
+            for q in (payload.get("questions") or []) if isinstance(q, dict)
+        ]
+        index = self._append({"kind": "question", "rid": rid, "questions": questions,
+                              "state": "pending"})
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._questions_pending[rid] = _Question(rid, index, future)
+        try:
+            answers = await future
+        finally:
+            self._questions_pending.pop(rid, None)
+        self.events[index]["state"] = "answered" if answers else "skipped"
+        self.events[index]["answers"] = answers
+        self._touch(index)
+        return answers
+
     async def ask_approval(self, tool: str, detail: str, outward: bool) -> str:
         """Post an approval card and wait for the owner's decision on the page."""
         self.end_assistant()
@@ -484,7 +528,8 @@ class Control:
     async def _poller(self) -> None:
         while True:
             busy = (time.monotonic() - self._last_activity < ACTIVE_WINDOW
-                    or any(not a.future.done() for a in self._approvals.values()))
+                    or any(not a.future.done() for a in self._approvals.values())
+                    or any(not q.future.done() for q in self._questions_pending.values()))
             await asyncio.sleep(POLL_ACTIVE if busy else POLL_IDLE)
             outcome = await self._call("list_responses", pub_id=self.link.pub_id)
             if not outcome.ok:
@@ -519,6 +564,17 @@ class Control:
                         pending = self._approvals.get(rid)
                         if pending and not pending.future.done() and decision in {"allow", "always", "deny"}:
                             pending.future.set_result(decision)
+                elif kind == "questions":
+                    for rid, answered in (doc.get("answers") or {}).items():
+                        pending = self._questions_pending.get(rid)
+                        if not (pending and not pending.future.done()):
+                            continue
+                        # The page sends {question_text: label_or_text} directly,
+                        # or `None` on skip. Trust the shape; the tool validates.
+                        if answered in (None, {}):
+                            pending.future.set_result(None)
+                        elif isinstance(answered, dict):
+                            pending.future.set_result(answered)
                 elif kind == "control":
                     seq = int(doc.get("interrupt") or 0)
                     if seq > self._interrupt_seen:

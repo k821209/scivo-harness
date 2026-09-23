@@ -197,6 +197,7 @@
         break;
       }
       case "approval": approvalNode(el, ev); break;
+      case "question": questionNode(el, ev); break;
       default:
         el.className = "sc-status " + (ev.level || "");
         el.textContent = ev.text || "";
@@ -222,6 +223,66 @@
       const s = document.createElement("div"); s.className = "sc-decided";
       s.textContent = { allow: "✓ allowed", always: "✓ allowed for the rest of the session", deny: "✗ denied" }[ev.state] || ev.state;
       el.append(s);
+    }
+  }
+
+  function questionNode(el, ev) {
+    el.className = "sc-approval";
+    const head = document.createElement("div"); head.className = "sc-q";
+    head.textContent = ev.state === "pending" ? "❔ The model is asking:" : "❔ Asked earlier";
+    el.append(head);
+    (ev.questions || []).forEach((q, qi) => {
+      const box = document.createElement("div"); box.className = "sc-question";
+      const label = document.createElement("div"); label.className = "sc-detail";
+      label.textContent = (q.header ? "[" + q.header + "] " : "") + q.question;
+      box.append(label);
+      if (ev.state === "pending") {
+        const row = document.createElement("div"); row.className = "sc-btns";
+        (q.options || []).forEach((o) => {
+          const b = document.createElement("button"); b.className = "sc-btn primary";
+          b.textContent = o.label + (o.description ? "  — " + o.description : "");
+          b.style.whiteSpace = "normal"; b.style.textAlign = "left";
+          b.onclick = () => submitQuestionAnswer(ev, qi, o.label);
+          row.append(b);
+        });
+        const input = document.createElement("input"); input.type = "text";
+        input.className = "sc-question-text"; input.placeholder = "or type your own answer, then Enter";
+        input.style.marginTop = "6px"; input.style.width = "100%";
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && input.value.trim()) { e.preventDefault(); submitQuestionAnswer(ev, qi, input.value.trim()); }
+        });
+        const skip = document.createElement("button"); skip.className = "sc-btn danger";
+        skip.textContent = "skip this question";
+        skip.onclick = () => submitQuestionAnswer(ev, qi, null);
+        box.append(row, input, skip);
+      } else if (ev.answers && ev.answers[q.question] !== undefined) {
+        const s2 = document.createElement("div"); s2.className = "sc-decided";
+        s2.textContent = "✓ " + (Array.isArray(ev.answers[q.question]) ? ev.answers[q.question].join(", ") : String(ev.answers[q.question]));
+        box.append(s2);
+      }
+      el.append(box);
+    });
+  }
+
+  // The page keeps a per-question answer draft in memory; when every question
+  // has an answer (or was skipped), the whole set is submitted so the harness
+  // can hand the model one answers object.
+  const questionDrafts = new Map();  // rid -> { [question_text]: label_or_text_or_null }
+  function submitQuestionAnswer(ev, qi, value) {
+    const q = ev.questions[qi];
+    if (!questionDrafts.has(ev.rid)) questionDrafts.set(ev.rid, {});
+    const draft = questionDrafts.get(ev.rid);
+    draft[q.question] = value;
+    // Grey out this question row's buttons and input.
+    const rows = Array.from(document.querySelectorAll(".sc-question"));
+    if (rows[qi]) rows[qi].style.opacity = "0.5";
+    // When every question is answered or skipped, push.
+    if (ev.questions.every((qq) => draft[qq.question] !== undefined)) {
+      const answers = {};
+      for (const [k, v] of Object.entries(draft)) if (v !== null) answers[k] = v;
+      C.put("responses", "questions", { doc: "questions", sid: S.sid,
+        answers: { [ev.rid]: Object.keys(answers).length ? answers : null } });
+      questionDrafts.delete(ev.rid);
     }
   }
 
