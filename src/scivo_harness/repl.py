@@ -27,6 +27,7 @@ from claude_agent_sdk import (
 )
 
 from . import guardrails, ui
+from .pump import MessagePump, PumpClosed
 from .control import Control
 from .preflight import to_markdown
 from .failures import explain
@@ -281,6 +282,28 @@ class Repl:
             print(paint(line), flush=True)
             if self.control:
                 self.control.tool(f"#{number}", f"{mark} {took}" + (f" — {reason}" if reason else ""))
+
+    async def _start_pump(self) -> None:
+        self.pump = MessagePump(self.client.receive_messages(), self._on_idle_message)
+        await self.pump.start()
+
+    async def _stop_pump(self) -> None:
+        pump = getattr(self, "pump", None)
+        if pump is not None:
+            await pump.stop()
+
+    def _on_idle_message(self, message) -> None:
+        """A message that arrived between turns — printed now, above the
+        prompt (prompt_toolkit's patch_stdout keeps the input line intact).
+        Task notifications are the point: a Monitor's event or a finished
+        background job used to wait for the next user message."""
+        if isinstance(message, TaskNotificationMessage):
+            self._on_task_note(message)
+        elif isinstance(message, TaskUpdatedMessage):
+            self._on_task_update(message)
+        elif isinstance(message, SystemMessage):
+            self._on_system(message)
+        # Anything else between turns has no turn to belong to; nothing to show.
 
     def _on_task_note(self, message) -> None:
         """A background task finished, failed, or was stopped — show it live.
@@ -625,6 +648,7 @@ class Repl:
         if endpoint.note:
             self._say(ui.dim(f"  · {endpoint.note}"))
         self._say(ui.dim(f"  switching to {target_name} ({model}) — this starts a new conversation…"))
+        await self._stop_pump()
         await self.client.disconnect()
         self.client = ClaudeSDKClient(options=options)
         try:
@@ -634,8 +658,10 @@ class Repl:
             self._say(ui.red(f"  could not start on {target_name}: {exc}"))
             self.client = ClaudeSDKClient(options=self.session.options)
             await self.client.connect()
+            await self._start_pump()
             self._say(ui.dim(f"  back on {provider.name} ({self.session.model}), in a new conversation\n"))
             return
+        await self._start_pump()
         if self.mode != (options.permission_mode or "default"):
             await self.client.set_permission_mode(self.mode)
         if self.session.endpoint is not None:
@@ -814,9 +840,15 @@ class Repl:
             # exception was never retrieved" instead of as a line here.
             interrupts.append(asyncio.create_task(client.interrupt()))
 
+        queue = self.pump.open_turn()
         try:
             with KeyWatcher(stop_now) as keys:
-                async for message in client.receive_response():
+                while True:
+                    message = await queue.get()
+                    if isinstance(message, PumpClosed):
+                        raise RuntimeError(
+                            "the CLI stream ended mid-turn"
+                            + (f": {type(message.error).__name__}: {message.error}" if message.error else ""))
                     if isinstance(message, StreamEvent):
                         self._on_stream(message)
                     elif isinstance(message, SystemMessage) and message.subtype == "api_retry":
@@ -837,6 +869,8 @@ class Repl:
                         self._on_tool_result(message)
                     elif isinstance(message, ResultMessage):
                         self._on_result(message)
+                    if isinstance(message, ResultMessage):
+                        break
                     if self.session.rails.looping and not self._stopping:
                         # Denying the repeat did not stop it either. End the
                         # turn rather than let it spend the context on a loop.
@@ -871,6 +905,7 @@ class Repl:
         else:
             await self._context(client, brief=True)
         finally:
+            self.pump.close_turn()
             if self.control and self.control.active:
                 self.control.waiting = False
             beat.cancel()
@@ -928,6 +963,7 @@ class Repl:
 
         self.client = ClaudeSDKClient(options=self.session.options)
         await self.client.connect()
+        await self._start_pump()
         try:
             if True:
                 while True:
@@ -971,6 +1007,7 @@ class Repl:
         finally:
             if self.control and self.control.active:
                 await self.control.stop()
+            await self._stop_pump()
             await self.client.disconnect()
             if self.session.endpoint is not None:
                 self.session.endpoint.close()
