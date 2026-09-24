@@ -549,3 +549,10 @@ this harness is built to respect — it does not use the Claude Code name or
 imitate its interface, and it neither supplies, stores nor intermediates
 anyone's credentials: sign-in happens in Claude Code itself, which is where
 Anthropic requires it to happen.
+
+## Testing
+
+`pytest tests` — a small suite that stubs the Agent SDK where needed. The
+build was exercised with one-off scratch scripts (a pty + `pyte` screen for
+the REPL, a mock SSE server, Playwright with a stubbed `window.scivo` for the
+control page); pieces of that get codified here as they are touched.

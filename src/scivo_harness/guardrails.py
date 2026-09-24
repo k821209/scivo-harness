@@ -79,6 +79,25 @@ POLLING = (
     "scan_recent_outputs", "youtube_check", "youtube_status",
 )
 
+# An MCP tool whose name starts with one of these only READS. Anything else
+# on the scivo server writes something — and after a write, any read may
+# return something new, so the repeat counters start over. The breaker used
+# to compare arguments alone: `preview_slide(slug, deck, slide)` after
+# `update_slide(...)` looked identical to the call before the edit and was
+# blocked on the third try, which is the edit → preview → fix loop
+# /paper-deck requires (Scivo feedback 635e07ec5631).
+READ_PREFIXES = (
+    "get_", "list_", "search_", "preview_", "lint_", "count_", "read_", "check_",
+    "compare_", "verify_", "whoami", "project_guide", "tail_", "poll_", "scan_",
+)
+
+
+def is_scivo_write(tool_name: str) -> bool:
+    if not tool_name.startswith("mcp__"):
+        return False
+    label = tool_name.split("__")[-1]
+    return not label.startswith(READ_PREFIXES)
+
 
 class Guardrails:
     """Session-scoped state for the rules that need to count."""
@@ -116,6 +135,11 @@ class Guardrails:
         except (TypeError, ValueError):
             arguments = str(payload.get("tool_input", {}))
         key = (name, arguments)
+        if is_scivo_write(name):
+            # A write may change what every read returns: forget the reads
+            # counted so far (this call's own count stays, so the same write
+            # repeated verbatim is still a loop).
+            self.repeats = {key: self.repeats.get(key, 0)}
         seen = self.repeats[key] = self.repeats.get(key, 0) + 1
         if name == "Bash":
             if seen == BASH_NUDGE:
