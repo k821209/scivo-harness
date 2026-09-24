@@ -84,3 +84,9 @@ def attention(briefing) -> list[str]:
 # this first, so the "still working" line is wiped rather than written over.
 def clear_activity() -> None:
     return None
+
+
+# > 0 while a permission/question prompt is waiting for input. The REPL's
+# "working" spinner redrew `\r\033[K` over the prompt and over what was being
+# typed into it every 0.4 s once output was 2 s stale.
+prompt_open = 0

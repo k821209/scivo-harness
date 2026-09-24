@@ -115,8 +115,26 @@ class _Handler(BaseHTTPRequestHandler):
         if self.verbose:
             super().log_message(fmt, *args)
 
+    def _read_body(self) -> bytes:
+        """The request body, chunked or with a Content-Length. A chunked POST
+        used to read as empty, and fold_system_messages then folded nothing."""
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            out = bytearray()
+            while True:
+                size_line = self.rfile.readline().strip()
+                if not size_line:
+                    break
+                size = int(size_line.split(b";", 1)[0], 16)
+                if size == 0:
+                    self.rfile.readline()   # trailing CRLF
+                    break
+                out += self.rfile.read(size)
+                self.rfile.readline()       # CRLF after the chunk
+            return bytes(out)
+        return self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+
     def do_POST(self) -> None:  # noqa: N802
-        raw = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+        raw = self._read_body()
         folded = 0
         # The CLI calls /v1/messages?beta=true — match the route, not the URL.
         route = self.path.split("?", 1)[0].rstrip("/")
@@ -161,7 +179,11 @@ class _Handler(BaseHTTPRequestHandler):
                     self.send_header(key, value)
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
-            while chunk := response.read(8192):
+            # read1: whatever has arrived. read(8192) blocked until 8 KB had
+            # accumulated, so a short SSE reply appeared only when the turn
+            # ended.
+            reader = getattr(response, "read1", response.read)
+            while chunk := reader(8192):
                 self.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")

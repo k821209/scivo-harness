@@ -64,8 +64,13 @@ def latest(root: Path) -> str | None:
 
 
 def transcript_path(session_id: str) -> Path | None:
-    """Claude Code's own log for a session, under ~/.claude/projects/<slug>/."""
-    root = Path.home() / ".claude" / "projects"
+    """Claude Code's own log for a session, under <config dir>/projects/<slug>/.
+    The config dir is `$CLAUDE_CONFIG_DIR` when set (a relocated config
+    directory used to make every lookup here miss, so a resume silently
+    came up on the project's default model), else ~/.claude."""
+    import os
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    root = (Path(base).expanduser() if base else Path.home() / ".claude") / "projects"
     if not root.is_dir():
         return None
     for candidate in root.glob(f"*/{session_id}.jsonl"):

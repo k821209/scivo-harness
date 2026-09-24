@@ -25,6 +25,7 @@ MCP_TEMPLATE_KEYS = ("type", "command", "args", "env")
 IGNORE_BLOCK = """
 # scivo: holds this project's API key in clear text
 .mcp.json
+.mcp.json.bak
 
 # scivo: local model endpoints may carry a token
 .scivo/
@@ -180,10 +181,29 @@ def write_mcp_json(root: Path, key: str, force: bool, result: Result,
                 "Pass --force to replace it (the old file is kept as .mcp.json.bak)."
             )
         backup = path.with_suffix(".json.bak")
-        backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        # The backup holds the same key as the original: same mode, from the
+        # first byte, and .gitignore covers it too. write_text at umask left
+        # it world-readable and stageable by `git add -A`.
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(path.read_text(encoding="utf-8"))
         result.warn(f"replaced {path.name}; previous config kept as {backup.name}")
-    path.write_text(json.dumps(mcp_config(key, interpreter, checkout), indent=2) + "\n",
-                    encoding="utf-8")
+    fresh = mcp_config(key, interpreter, checkout)
+    if path.exists():
+        # Replace only the scivo server: a project that registers other MCP
+        # servers in the same file keeps them.
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            servers = existing.setdefault("mcpServers", {})
+            if isinstance(servers, dict):
+                others = {k: v for k, v in servers.items() if k != "scivo"}
+                fresh = {**existing, "mcpServers": {**others, **fresh["mcpServers"]}}
+                if others:
+                    result.did(f"kept {len(others)} other MCP server(s) in {path.name}: "
+                               + ", ".join(sorted(others)))
+        except (OSError, ValueError):
+            pass   # unreadable JSON: it is replaced, and the .bak keeps it
+    path.write_text(json.dumps(fresh, indent=2) + "\n", encoding="utf-8")
     path.chmod(0o600)  # it holds a credential
     result.did(f"wrote {path.name} (interpreter {interpreter or sys.executable})")
     if checkout is not None:
@@ -233,10 +253,19 @@ def ensure_claude_md(root: Path, project_id: str | None, name: str, result: Resu
     result.did("wrote CLAUDE.md")
 
 
-def link_skills(root: Path, result: Result) -> None:
+def link_skills(root: Path, result: Result, interpreter: str | None = None,
+                checkout: Path | None = None) -> None:
+    """Link with the interpreter (and PYTHONPATH) the session will run —
+    sys.executable linked skills from whatever python ran `scivo setup`,
+    which is not what `.mcp.json` names when --python or a checkout was
+    chosen."""
+    env = dict(os.environ)
+    if checkout is not None:
+        env["PYTHONPATH"] = str(checkout / "apps" / "local-mcp")
     probe = subprocess.run(
-        [sys.executable, "-m", "co_scientist_local", "install-skills", "--dir", str(root)],
-        capture_output=True, text=True,
+        [interpreter or sys.executable, "-m", "co_scientist_local", "install-skills",
+         "--dir", str(root)],
+        capture_output=True, text=True, env=env, timeout=120,
     )
     if probe.returncode == 0:
         result.did("linked skills into .claude/skills")

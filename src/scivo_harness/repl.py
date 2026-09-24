@@ -217,7 +217,7 @@ class Repl:
         try:
             while True:
                 await asyncio.sleep(0.4)
-                if time.monotonic() - self._last_output < 2.0 or self._stopping:
+                if time.monotonic() - self._last_output < 2.0 or self._stopping or ui.prompt_open:
                     continue
                 elapsed = int(time.monotonic() - started)
                 shown = f"{elapsed}s" if elapsed < 60 else f"{elapsed // 60}m{elapsed % 60:02d}s"
@@ -804,10 +804,15 @@ class Repl:
         self._last_output = time.monotonic()
         beat = asyncio.create_task(self._heartbeat())
 
+        interrupts: list[asyncio.Task] = []
+
         def stop_now() -> None:
             self._stopping = True
             self._say(ui.yellow("\n  stopping…"))
-            asyncio.create_task(client.interrupt())
+            # Kept, and awaited in the finally below: fire-and-forget surfaced
+            # a failed interrupt (the turn already over) later as "Task
+            # exception was never retrieved" instead of as a line here.
+            interrupts.append(asyncio.create_task(client.interrupt()))
 
         try:
             with KeyWatcher(stop_now) as keys:
@@ -870,6 +875,11 @@ class Repl:
                 self.control.waiting = False
             beat.cancel()
             await asyncio.gather(beat, return_exceptions=True)
+            for task in interrupts:
+                try:
+                    await task
+                except Exception as exc:  # noqa: BLE001
+                    self._say(ui.dim(f"  (interrupt: {type(exc).__name__}: {exc})"))
             self._clear_activity()
             if watcher is not None:
                 watcher.cancel()

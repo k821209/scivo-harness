@@ -11,7 +11,7 @@ from . import ui
 from .compat import check as check_compat, shadowing_binaries
 from .config import ConfigError, find_root, load
 from .failures import explain
-from .preflight import ProjectMismatch, to_markdown
+from .preflight import ProjectMismatch, ServerUnavailable, to_markdown
 from .providers import (
     chosen_name,
     set_default,
@@ -256,7 +256,7 @@ async def _setup(args) -> int:
     shared = environment_note() if not (interpreter or checkout) else None
     mcp_path, backup = write_mcp_json(root, key, args.force, result, interpreter, checkout)
     ensure_gitignore(root, result)
-    link_setup_skills(root, result)
+    link_setup_skills(root, result, interpreter, checkout)
 
     # Verify against a real server before claiming the directory is set up.
     config = load(root)
@@ -342,7 +342,9 @@ async def _update_one(install, check: bool) -> tuple[bool, bool]:
 
     after = inspect_install(install.interpreter, install.dist)
     moved = after.fingerprint != install.fingerprint
-    return True, moved
+    # A dependency that failed to install is a failed update: the tool that
+    # needs it fails at import, which is what the fill exists to prevent.
+    return filled_ok, moved
 
 
 async def _restore_mcp(install, args) -> tuple[bool, bool]:
@@ -387,19 +389,23 @@ async def _update(args) -> int:
 
     failed = False
     moved_any = False
+    left_stale = False   # the MCP deliberately left as a snapshot (no --restore-editable)
     for dist, interpreter in targets:
         install = inspect_install(interpreter, dist)
         # Only in a shared environment. A dedicated venv such as ~/.scivo is
         # meant to hold a snapshot; guarding it — on the strength of a warning
         # that fires whenever a clone sits on disk — froze its MCP at an old
         # version and told the user to make it editable.
-        if (dist == "co-scientist-local" and install.found and not install.editable
-                and warning and not install.dedicated_venv):
+        # The server decides when the warning applies (a dedicated venv beside
+        # a clone is install_note, not a warning); a warning here is the
+        # recorded flip, wherever the interpreter lives.
+        if dist == "co-scientist-local" and install.found and not install.editable and warning:
             # The MCP says it is a snapshot sitting over a source checkout —
             # the silent flip. Reinstalling the snapshot, which is what an
             # "update" of a git install does, would entrench exactly the state
             # the warning asks to undo. It did, once.
             ok, moved = await _restore_mcp(install, args)
+            left_stale = left_stale or (ok and not moved and not args.restore_editable)
         else:
             ok, moved = await _update_one(install, args.check)
         failed = failed or not ok
@@ -433,6 +439,10 @@ async def _update(args) -> int:
     # from re-reading the installs and a fresh server process, not from pip.
     if moved_any or (after_sha, after_version) != (before_sha, before_version):
         print(ui.green("updated. Restart any running scivo session to pick it up."))
+    elif left_stale:
+        # Not "current": a snapshot the warning asked to undo was left alone.
+        print(ui.yellow("the MCP is a snapshot over a source checkout and was left as is — "
+                        "run `scivo update --restore-editable` to point it back at the checkout."))
     else:
         print(ui.yellow("unchanged — everything was already current."))
     return 0
@@ -463,7 +473,7 @@ async def _providers(args) -> int:
         written = set_default(find_root(), args.name)
         print(ui.green(f"this project now uses {args.name}") + ui.dim(f"   ({written})"))
         if args.name != "anthropic":
-            print(ui.dim(f"  check it: scivo doctor   ·   back to Claude: scivo providers use anthropic"))
+            print(ui.dim("  check it: scivo doctor   ·   back to Claude: scivo providers use anthropic"))
         return 0
 
     providers = load_all()
@@ -640,6 +650,7 @@ async def _build_and_run(args, prompt_text: str | None) -> int:
         continue_last=continue_last,
         max_budget_usd=args.budget,
         add_dirs=args.add_dir,
+        subscription=bool(getattr(args, "subscription", False)),
     )
     if session.resumed is None and continue_last:
         session.resumed = resumed_id
@@ -687,6 +698,11 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         return asyncio.run(handlers[args.command](args))
+    except ServerUnavailable as exc:
+        print(ui.red(str(exc)), file=sys.stderr)
+        print(ui.dim("  the MCP server did not start — check `scivo doctor` (interpreter, key, install)"),
+              file=sys.stderr)
+        return 1
     except (ConfigError, ProjectMismatch, ProviderError, SetupError, SessionLookupError) as exc:
         print(ui.red(str(exc)), file=sys.stderr)
         return 2

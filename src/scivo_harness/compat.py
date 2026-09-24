@@ -115,7 +115,6 @@ def shadowing_binaries() -> list[str]:
     the code that was being edited. The environments were both this package —
     which is exactly why nothing looked wrong.
     """
-    import shutil
     import os
 
     seen: list[str] = []

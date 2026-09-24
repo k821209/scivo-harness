@@ -83,6 +83,14 @@ def _inline_local_images(text: str, project_root: Path) -> str:
             path = path.resolve()
         except (OSError, ValueError):
             return match.group(0)
+        # Only files under the project. The reference is model text, and the
+        # upload it triggers goes through no approval — an injected
+        # `![x](../../.ssh/id_rsa.png)` would otherwise ship any image on the
+        # machine to the page.
+        try:
+            path.relative_to(project_root.resolve())
+        except ValueError:
+            return match.group(0)
         if not path.is_file():
             return match.group(0)
         mime = IMAGE_TYPES.get(path.suffix.lower())
@@ -305,14 +313,26 @@ class Control:
 
         html = page_html()
         if stored.get("pub_id") and stored.get("url"):
-            outcome = await self._call("update_publication", pub_id=stored["pub_id"],
-                                       html=html, active=True, require_passcode=True,
-                                       kind="control")
-            if outcome.ok:
+            outcome = None
+            for attempt in range(3):   # a transient failure used to orphan the live page
+                outcome = await self._call("update_publication", pub_id=stored["pub_id"],
+                                           html=html, active=True, require_passcode=True,
+                                           kind="control")
+                if outcome.ok:
+                    break
+                await asyncio.sleep(0.5 * (attempt + 1))
+            if outcome is not None and outcome.ok:
                 link = Link(stored["pub_id"], stored["url"])
                 if stored.get("passcode"):
                     await self._retire_passcodes(link, state_path)
+                await self._clear_previous_sessions(link)
                 return link
+            # Publishing anew: close the old page first, or it stays active
+            # with a stale head the owner may still have open.
+            try:
+                await self._call("update_publication", pub_id=stored["pub_id"], active=False)
+            except Exception:  # noqa: BLE001
+                pass
 
         published = await self._call(
             "publish_page",
@@ -336,6 +356,18 @@ class Control:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(link.to_json(), indent=2) + "\n", encoding="utf-8")
         state_path.chmod(0o600)
+
+    async def _clear_previous_sessions(self, link: Link) -> None:
+        """Drop the transcript chunks, command lists and responses of earlier
+        sessions on this page. Nothing ever deleted them, so a reused page
+        accumulated every past session's `log-<sid>-NNNN` forever. Best
+        effort: an MCP older than 2026-09-17 has no clear_page_data, and the
+        session runs fine without the tidy-up (the page keys on the sid)."""
+        for collection in ("content", "responses"):
+            try:
+                await self._call("clear_page_data", pub_id=link.pub_id, collection=collection)
+            except Exception:  # noqa: BLE001
+                return
 
     async def _retire_passcodes(self, link: Link, state_path: Path) -> None:
         """Clear the codes issued before the dashboard could sign the owner in.
@@ -526,15 +558,30 @@ class Control:
                 last_beat = time.monotonic()
 
     async def _poller(self) -> None:
+        failures = 0
         while True:
             busy = (time.monotonic() - self._last_activity < ACTIVE_WINDOW
                     or any(not a.future.done() for a in self._approvals.values())
                     or any(not q.future.done() for q in self._questions_pending.values()))
             await asyncio.sleep(POLL_ACTIVE if busy else POLL_IDLE)
-            outcome = await self._call("list_responses", pub_id=self.link.pub_id)
+            # Guarded like _writer: one transport error here used to end the
+            # task, and nothing awaited it — the heartbeat kept saying "live"
+            # while messages, approvals and Stop were ignored for the rest of
+            # the session and a pending approval deadlocked every later prompt.
+            try:
+                outcome = await self._call("list_responses", pub_id=self.link.pub_id)
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                self.errors.append(f"poll: {type(exc).__name__}: {exc}")
+                if failures == 3:
+                    self.status("the page cannot reach this session's inbox — messages from "
+                                "the web are not arriving", level="error")
+                await asyncio.sleep(min(5.0, 0.5 * failures))
+                continue
             if not outcome.ok:
                 self.errors.append(f"poll: {outcome.error}")
                 continue
+            failures = 0
             for doc in outcome.items:
                 if not isinstance(doc, dict):
                     continue

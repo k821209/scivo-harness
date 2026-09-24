@@ -60,9 +60,19 @@ class Provider:
     def is_local(self) -> bool:
         return bool(self.base_url)
 
-    def resolve_env(self) -> dict[str, str]:
-        """The environment the CLI subprocess runs under."""
+    def resolve_env(self, *, subscription: bool = False) -> dict[str, str]:
+        """The environment the CLI subprocess runs under.
+
+        `ANTHROPIC_API_KEY` is scrubbed (set empty, which the CLI reads as
+        unset) whenever requests go to another host, and always under
+        `--subscription`. resolve_env only ever ADDED variables, so a key in
+        the parent shell reached the CLI unchanged: with a gateway provider
+        it was sent to that host, and `--subscription` — parsed and never
+        used — silently billed the API tab. A provider that needs the key on
+        purpose sets it in its own `env` table, which is applied last."""
         out: dict[str, str] = {}
+        if self.base_url or subscription:
+            out["ANTHROPIC_API_KEY"] = ""
         if self.base_url:
             out["ANTHROPIC_BASE_URL"] = self.base_url
         token = self.auth_token
@@ -379,7 +389,7 @@ def context_window(provider: Provider, timeout: float = 5.0) -> int | None:
     return None
 
 
-def prepare(provider: Provider, timeout: float = 30.0) -> Endpoint:
+def prepare(provider: Provider, timeout: float = 30.0, *, subscription: bool = False) -> Endpoint:
     """Resolve a provider into environment for Claude Code, fixing what can be fixed.
 
     A local server whose chat template rejects mid-conversation system messages
@@ -388,7 +398,7 @@ def prepare(provider: Provider, timeout: float = 30.0) -> Endpoint:
     silent retries. Now the check runs here, and when the template refuses, the
     shim starts inside this process and the session is pointed at it.
     """
-    env = provider.resolve_env()
+    env = provider.resolve_env(subscription=subscription)
     if not provider.base_url:
         return Endpoint(env)
     reachable(provider)

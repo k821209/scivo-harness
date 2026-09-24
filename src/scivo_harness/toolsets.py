@@ -97,12 +97,31 @@ class ToolPlan:
         )
 
 
+# Most specific first. `paper` last: its needles are the broadest, and with
+# it first `preview_slide` matched `review` and `export_deck_to_pptx` matched
+# `export`, so a `--profile deck` session lost the two tools /paper-deck cannot
+# work without.
+_DOMAIN_ORDER = ("deck", "video", "materials", "analysis", "paper")
+
+
+def _matches(needle: str, name: str, segments: list[str]) -> bool:
+    if "_" in needle:                 # a multi-word needle names a tool family
+        return needle in name
+    return any(seg.startswith(needle) for seg in segments)
+
+
 def _domain_of(name: str) -> str:
     lowered = name.lower()
-    for domain, needles in DOMAINS.items():
-        if any(needle in lowered for needle in needles):
+    segments = lowered.split("_")
+    for domain in _DOMAIN_ORDER:
+        if any(_matches(needle, lowered, segments) for needle in DOMAINS[domain]):
             return domain
     return "core"
+
+
+# Read-only by name, but the value comes back into the transcript: a
+# plaintext account token is not something to hand over without a prompt.
+NEVER_AUTO = ("get_user_secret", "list_user_secrets")
 
 
 def is_read_only(name: str) -> bool:
@@ -122,7 +141,7 @@ def plan(all_tools: list[str], profile: str = "full", read_only: bool = False) -
     return ToolPlan(
         kept=kept,
         dropped=dropped,
-        read_only=[n for n in kept if is_read_only(n)],
+        read_only=[n for n in kept if is_read_only(n) and n not in NEVER_AUTO],
         profile=profile,
         read_only_session=read_only,
     )

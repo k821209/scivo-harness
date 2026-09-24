@@ -15,13 +15,25 @@ from typing import Any
 from claude_agent_sdk import HookMatcher
 
 # `ssh host "nohup ... &"` — the guide's #1 reason the Runs tab is blind.
+# Crosses `;`, `|` and newlines (a heredoc body): the class `[^\n|;]` let
+# `ssh gpu "cd /data; nohup python train.py &"` — the most natural way to
+# write it — straight through, and a bare trailing `&` was never in the
+# alternation at all. `&&`, `|&`, and `2>&1` are not backgrounding.
 RAW_REMOTE_JOB = re.compile(
-    r"\bssh\b[^\n|;]*?\b(?:nohup|setsid|disown|screen\s+-d|tmux\s+new-session\s+-d)\b",
-    re.IGNORECASE,
+    r"\bssh\b.*?(?:\bnohup\b|\bsetsid\b|\bdisown\b|\bscreen\s+-d\w*"
+    r"|\btmux\s+new(?:-session)?\b[^\n]*?\s-d\b|(?<![&|<>])&(?![&|>]))",
+    re.IGNORECASE | re.DOTALL,
 )
 # A remote `pgrep -f`/`pkill -f` matches the ssh command line that carries the
 # pattern, so it kills the session or over-counts. Both happened on this account.
-REMOTE_SELF_MATCH = re.compile(r"\bssh\b[^\n]*\b(pgrep|pkill)\s+(-\w+\s+)*-\w*f\w*\s", re.IGNORECASE)
+# `--full` is the long spelling of the same flag.
+REMOTE_SELF_MATCH = re.compile(
+    r"\bssh\b.*?\b(pgrep|pkill)\s+(?:-{1,2}[\w-]+\s+)*(?:-\w*f\w*|--full)(?=\s|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+# Host tools that write. A read after one of these may return something new,
+# exactly as after a scivo write.
+HOST_WRITES = ("Edit", "Write", "NotebookEdit", "MultiEdit")
 
 # Long-running foreground work that leaves no run record.
 ANALYSIS_SHAPED = re.compile(
@@ -135,20 +147,30 @@ class Guardrails:
         except (TypeError, ValueError):
             arguments = str(payload.get("tool_input", {}))
         key = (name, arguments)
+        if name in HOST_WRITES:
+            self.repeats.clear()
+            return {}
+        if not name.startswith("mcp__"):
+            # Host tools are never denied. The rule is about MCP calls; a
+            # third identical `Read` (read → edit → read → edit → read) or a
+            # `Monitor` with the same until-loop — the very thing the Bash
+            # nudge below recommends — used to be denied, and at five the turn
+            # was interrupted.
+            if name == "Bash":
+                seen = self.repeats[key] = self.repeats.get(key, 0) + 1
+                if seen == BASH_NUDGE:
+                    return _note(
+                        "This Bash command has run identically several times. If it is polling for a "
+                        "log line or a file to appear, use `Monitor` with an until-loop instead — that "
+                        "backs off, times out cleanly, and does not spend a turn per check."
+                    )
+            return {}
         if is_scivo_write(name):
             # A write may change what every read returns: forget the reads
             # counted so far (this call's own count stays, so the same write
             # repeated verbatim is still a loop).
             self.repeats = {key: self.repeats.get(key, 0)}
         seen = self.repeats[key] = self.repeats.get(key, 0) + 1
-        if name == "Bash":
-            if seen == BASH_NUDGE:
-                return _note(
-                    "This Bash command has run identically several times. If it is polling for a "
-                    "log line or a file to appear, use `Monitor` with an until-loop instead — that "
-                    "backs off, times out cleanly, and does not spend a turn per check."
-                )
-            return {}
         if seen < SAME_CALL_LIMIT:
             return {}
         label = name.split("__")[-1]
@@ -200,26 +222,33 @@ class Guardrails:
 
     async def on_memory_write(self, payload: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         tool_input = payload.get("tool_input", {})
-        text = str(tool_input.get("note") or tool_input.get("content") or "")
+        text = str(tool_input.get("note") or tool_input.get("content")
+                   or tool_input.get("skills") or tool_input.get("text") or "")
         hits = [label for pattern, label in COMPUTE_SPECS if pattern.search(text)]
         if not hits:
             return {}
-        return _ask(
-            f"This memory write contains {', '.join(sorted(set(hits)))}. Compute belongs in the "
-            "servers registry (`add_server` / `add_server_env` / `update_server`), which drives "
-            "the Runs tab and the politeness caps; project memory is for soft knowledge only. "
-            "The guide calls this the single most common mistake.\n"
-            "Register the machine instead, and keep in memory only what is not a machine fact. "
-            "Approve this only if the text really is soft knowledge that merely mentions a host."
+        # A deny, not an ask: bypassPermissions is reachable mid-session and
+        # erases an ask, while the ssh denies still hold. The redirect says
+        # what to write instead; a memory note that merely mentions a host can
+        # be rewritten without the machine facts.
+        return _deny(
+            f"Blocked: this memory write contains {', '.join(sorted(set(hits)))}. Compute belongs in "
+            "the servers registry (`add_server` / `add_server_env` / `update_server`), which drives "
+            "the Runs tab and the politeness caps; project memory and the project playbook are for "
+            "soft knowledge only. The guide calls this the single most common mistake.\n"
+            "Register the machine instead, and write the note again with the machine facts left out."
         )
 
 
 def build(rails: Guardrails) -> dict[str, list[HookMatcher]]:
     return {
         "PreToolUse": [
-            HookMatcher(matcher="Bash", hooks=[rails.on_bash]),
+            # Monitor runs shell too — it is what the Bash nudge recommends for
+            # polling — so the same rules read its command.
+            HookMatcher(matcher="Bash|Monitor", hooks=[rails.on_bash]),
             HookMatcher(
-                matcher="mcp__scivo__append_project_memory|mcp__scivo__update_project_memory",
+                matcher="mcp__scivo__append_project_memory|mcp__scivo__update_project_memory"
+                        "|mcp__scivo__update_project_skills",
                 hooks=[rails.on_memory_write],
             ),
             HookMatcher(hooks=[rails.on_any_tool]),   # no matcher: every tool

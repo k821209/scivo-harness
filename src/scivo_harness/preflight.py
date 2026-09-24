@@ -26,6 +26,12 @@ class ProjectMismatch(RuntimeError):
     """`.mcp.json` and `CLAUDE.md` came from two different dashboard projects."""
 
 
+class ServerUnavailable(RuntimeError):
+    """The MCP server did not answer at all — a bad key, an import error, a
+    wrong interpreter. Not a mismatch: the re-download guidance for that
+    case pointed the wrong way here."""
+
+
 @dataclass
 class PaperBrief:
     slug: str
@@ -92,7 +98,12 @@ async def gather(client: ScivoClient, config: ScivoConfig) -> Briefing:
 
     who = await client.call("whoami")
     if not who:
-        raise ProjectMismatch(f"whoami failed — the MCP server did not start: {who.error}")
+        from . import scivo_mcp as _mcp
+        tail = _mcp.last_stderr()
+        raise ServerUnavailable(
+            f"whoami failed — the MCP server did not answer: {who.error}"
+            + ("\n  server stderr:\n    " + "\n    ".join(tail.splitlines()[-8:]) if tail else "")
+        )
     brief.identity = who.first or {}
 
     expected = config.expected_project_id
@@ -159,13 +170,23 @@ async def _paper(client: ScivoClient, record: Any) -> PaperBrief:
         paper.open_comments = value if isinstance(value, int) else _get(value, "open", 0) or 0
     else:
         errors.append(f"count_open_user_comments({slug}): {comments.error}")
+    # Each failure is named: an empty triage, "no requirements captured" or
+    # no findings used to be indistinguishable from a clean paper.
     if triage:
         paper.triage = triage.first if isinstance(triage.first, dict) else {}
+    else:
+        errors.append(f"review_triage_summary({slug}): {triage.error}")
     if reqs:
         value = reqs.first if isinstance(reqs.first, dict) else {}
         paper.requirements_configured = bool(value.get("configured"))
         paper.requirement_violations = value.get("violations") or []
-    paper.findings = findings.items if findings else []
+    else:
+        errors.append(f"check_requirements({slug}): {reqs.error}")
+    if findings:
+        paper.findings = findings.items
+    else:
+        paper.findings = []
+        errors.append(f"list_verification_findings({slug}): {findings.error}")
     paper._errors = errors  # type: ignore[attr-defined]
     return paper
 
@@ -188,6 +209,12 @@ def to_markdown(brief: Briefing) -> str:
     if brief.identity.get("install_warning"):
         out.append(f"**Install warning from the MCP — tell the user before anything else:** "
                    f"{brief.identity['install_warning']}")
+    if brief.identity.get("install_note"):
+        out.append(f"_Install note from the MCP (no action needed): {brief.identity['install_note']}_")
+    if brief.identity.get("key_scope_note"):
+        # Written by the server so a session that finds the key in a file
+        # about to be committed does not reason "just the project key".
+        out.append(f"**API key scope:** {brief.identity['key_scope_note']}")
     if brief.identity.get("update_available"):
         out.append(
             f"**The MCP install is behind the latest build** "

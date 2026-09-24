@@ -124,8 +124,29 @@ async def connect(config: ScivoConfig):
         env=config.child_env(),
         cwd=str(config.root),
     )
-    with open(os.devnull, "w", encoding="utf-8") as devnull:
-        async with stdio_client(params, errlog=devnull) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                yield ScivoClient(session)
+    # The server's stderr is kept (last few KB) instead of dropped: a server
+    # that dies on a bad key or an import error otherwise surfaced only as a
+    # transport error, with the one line that said why thrown away.
+    import tempfile
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as errlog:
+        try:
+            async with stdio_client(params, errlog=errlog) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield ScivoClient(session)
+        finally:
+            try:
+                errlog.seek(0, os.SEEK_END)
+                size = errlog.tell()
+                errlog.seek(max(0, size - 4000))
+                _LAST_STDERR[0] = errlog.read()
+            except (OSError, ValueError):
+                pass
+
+
+_LAST_STDERR: list[str] = [""]
+
+
+def last_stderr() -> str:
+    """The tail of the most recent MCP server's stderr, for error messages."""
+    return _LAST_STDERR[0]

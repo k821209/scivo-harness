@@ -31,13 +31,27 @@ from .session import scivo_tool_label
 # Tools whose effects leave this machine or cannot be undone from here. They are
 # never remembered as "always" — approving one is approving that one.
 OUTWARD = ("youtube_", "publish_page", "update_publication", "add_passcode",
+           # The control page's own transcript and status live in page data; an
+           # "always" here would let the model write what the owner reads as
+           # harness output (a fake approval card, say).
+           "put_page_data", "clear_page_data",
            "submit_remote_job", "kill_remote_job", "launch_local_job")
+
+
+def full_command(tool_name: str, payload: dict[str, Any]) -> str | None:
+    """The whole thing being approved, for Bash. The card used to show 160
+    characters: `cd repo && <plausible build> && curl … | sh` was approved on
+    a line that never reached the tail."""
+    if tool_name == "Bash":
+        return str(payload.get("command", ""))
+    return None
 
 
 def describe(tool_name: str, payload: dict[str, Any]) -> str:
     label = scivo_tool_label(tool_name)
     if tool_name == "Bash":
-        return f"{label}: {str(payload.get('command', ''))[:160]}"
+        cmd = str(payload.get("command", ""))
+        return f"{label}: {cmd[:160]}" + (" …" if len(cmd) > 160 else "")
     if tool_name in {"Write", "Edit", "NotebookEdit"}:
         return f"{label}: {payload.get('file_path', '')}"
     interesting = {k: v for k, v in payload.items()
@@ -120,8 +134,12 @@ class Approvals:
                 print(f"    {index}. {ui.bold(str(option.get('label', '')))}"
                       + (ui.dim(f" — {option['description']}") if option.get("description") else ""))
             hint = "numbers, comma-separated" if multi else "a number"
-            reply = (await asyncio.to_thread(
-                input, ui.cyan(f"  {hint}, your own words, or blank to skip: "))).strip()
+            ui.prompt_open += 1
+            try:
+                reply = (await asyncio.to_thread(
+                    input, ui.cyan(f"  {hint}, your own words, or blank to skip: "))).strip()
+            finally:
+                ui.prompt_open -= 1
             if not reply:
                 continue
             picked = [options[int(n) - 1].get("label") for n in re.findall(r"\d+", reply)
@@ -142,6 +160,7 @@ class Approvals:
         hardware in project memory went through on a reflexive Enter, with no
         sign of what was held or why. Show both, and make only "y" a yes."""
         body = json.dumps(payload, ensure_ascii=False, indent=2)
+        ui.clear_activity()
         print()
         print(ui.red(f"  held  {scivo_tool_label(tool_name)}"))
         for line in reason.splitlines():
@@ -155,7 +174,11 @@ class Approvals:
                                                     f"HELD: {reason}\n\n{body}", True)
             print(ui.dim(f"        {answer} (from the page)"))
         else:
-            answer = (await asyncio.to_thread(input, ui.cyan("  allow anyway? y / [N] "))).strip().lower()
+            ui.prompt_open += 1
+            try:
+                answer = (await asyncio.to_thread(input, ui.cyan("  allow anyway? y / [N] "))).strip().lower()
+            finally:
+                ui.prompt_open -= 1
         if answer in {"y", "yes", "allow"}:
             return PermissionResultAllow(updated_input=payload)
         self.denied.append(tool_name)
@@ -166,19 +189,29 @@ class Approvals:
     async def _ask(self, tool_name: str, payload: dict[str, Any]):
 
         outward = is_outward(tool_name)
+        ui.clear_activity()
         print()
         print(ui.yellow(f"  permission  {describe(tool_name, payload)}"))
+        whole = full_command(tool_name, payload)
+        if whole is not None and (len(whole) > 160 or "\n" in whole):
+            print(ui.dim("              ── the whole command ──"))
+            for line in whole.splitlines()[:40]:
+                print(f"              {line}")
         if outward:
             print(ui.dim("              this one reaches outside this machine"))
 
-        if self.remote is not None and self.remote.active:
-            print(ui.dim("              waiting for your answer on the scivo-control page…"))
-            answer = await self.remote.ask_approval(scivo_tool_label(tool_name),
-                                                    describe(tool_name, payload), outward)
-            print(ui.dim(f"              {answer} (from the page)"))
-        else:
-            options = "[y]es / [n]o" if outward else "[y]es / [a]lways / [n]o"
-            answer = (await asyncio.to_thread(input, ui.cyan(f"  {options}? "))).strip().lower()
+        detail = describe(tool_name, payload) if whole is None else f"{scivo_tool_label(tool_name)}:\n{whole}"
+        ui.prompt_open += 1
+        try:
+            if self.remote is not None and self.remote.active:
+                print(ui.dim("              waiting for your answer on the scivo-control page…"))
+                answer = await self.remote.ask_approval(scivo_tool_label(tool_name), detail, outward)
+                print(ui.dim(f"              {answer} (from the page)"))
+            else:
+                options = "[y]es / [n]o" if outward else "[y]es / [a]lways / [n]o"
+                answer = (await asyncio.to_thread(input, ui.cyan(f"  {options}? "))).strip().lower()
+        finally:
+            ui.prompt_open -= 1
 
         if answer in {"a", "always"}:
             # For a tool that reaches outside this machine "always" is not
@@ -229,9 +262,12 @@ class Explain:
 
     async def __call__(self, tool_name: str, payload: dict[str, Any], context: Any):
         if tool_name == "AskUserQuestion":
-            async with self._one_at_a_time:
-                with paused():
-                    return await self._questions(payload)
+            # Nobody is here to answer. Same outcome as a skipped question in
+            # the interactive path: allowed, no `answers`, the model is told
+            # nobody answered. (This used to reach for the interactive
+            # members this class does not have and raise inside the
+            # callback.)
+            return PermissionResultAllow(updated_input=payload)
         self.denied.append(tool_name)
         label = scivo_tool_label(tool_name)
         hold = getattr(context, "decision_reason", None)

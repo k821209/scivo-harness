@@ -17,6 +17,7 @@ server process rather than trusting pip's output.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,8 +132,19 @@ class Install:
         return (self.version, self.commit_id or "")
 
 
-def _run(argv: list[str], cwd: str | None = None) -> tuple[int, str]:
-    result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
+PEP508_NAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$")
+
+
+def _run(argv: list[str], cwd: str | None = None, *, timeout: float = 120,
+         env: dict[str, str] | None = None) -> tuple[int, str]:
+    """Every subprocess is bounded: `inspect()` runs at every session start,
+    and a `git pull` against an unreachable remote or an interpreter on a
+    stalled mount used to hang the start with no output."""
+    try:
+        result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+                                timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {timeout:.0f}s: {' '.join(argv[:3])} …"
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
@@ -155,10 +167,17 @@ def has_remote(root: Path) -> bool:
 
 
 def repo_root(path: str) -> Path | None:
-    """The git checkout an editable install points into."""
+    """The git checkout an editable install points into — the FIRST `.git`
+    above the source directory, and only if that repository is the package's
+    own (a pyproject, a src/, or the MCP's apps/local-mcp at its root).
+    Walking to any `.git` made `scivo update` run `git pull` in a git-managed
+    home or an enclosing monorepo, which nobody asked for."""
     for candidate in [Path(path), *Path(path).parents]:
         if (candidate / ".git").exists():
-            return candidate
+            owns = ((candidate / "pyproject.toml").is_file()
+                    or (candidate / "apps" / "local-mcp").is_dir()
+                    or (candidate / "src").is_dir())
+            return candidate if owns else None
     return None
 
 
@@ -188,7 +207,7 @@ def apply(install: Install) -> tuple[bool, str]:
     # "already satisfied"; --no-deps so an MCP update cannot silently move the
     # harness's own pins underneath it.
     code, output = _run([install.interpreter, "-m", "pip", "install", "--upgrade",
-                         "--force-reinstall", "--no-deps", requirement])
+                         "--force-reinstall", "--no-deps", requirement], timeout=900)
     return code == 0, output[-1200:]
 
 
@@ -214,6 +233,11 @@ def fill_missing_deps(install: Install) -> tuple[bool, str]:
         return False, f"cannot parse dep list: {output[:200]}"
     if not missing:
         return True, ""
+    # Names only. pip reads a leading dash as an option, and the list came
+    # from package metadata parsed with a regex.
+    bad = [m for m in missing if not PEP508_NAME.match(str(m))]
+    if bad:
+        return False, f"refusing to install oddly named requirement(s): {bad}"
     # Fill *with* deps: `--no-deps` would leave every new package's own
     # transitive requirements missing, and `import pymupdf` succeeds but
     # `import google.cloud.firestore` immediately errors on api_core. The
@@ -221,7 +245,7 @@ def fill_missing_deps(install: Install) -> tuple[bool, str]:
     # co-scientist-local itself (that is what protects existing pins); we
     # only lift the guard for a package pip did not know about before, whose
     # dependency tree is new to this env.
-    code, out = _run([install.interpreter, "-m", "pip", "install", *missing])
+    code, out = _run([install.interpreter, "-m", "pip", "install", *missing], timeout=900)
     if code != 0:
         return False, f"pip install failed for {missing}:\n{out[-400:]}"
     return True, f"filled {', '.join(missing)}"
@@ -254,13 +278,17 @@ def restore_editable(install: Install, checkout: Path) -> tuple[bool, str]:
     if code != 0:
         return False, f"git pull in {checkout} failed:\n{pulled}"
     code, output = _run([install.interpreter, "-m", "pip", "install", "-e",
-                         str(checkout / "apps" / "local-mcp"), "--no-deps"])
+                         str(checkout / "apps" / "local-mcp"), "--no-deps"], timeout=900)
     return code == 0, f"{pulled}\n{output[-600:]}"
 
 
 def link_skills(config: ScivoConfig) -> tuple[bool, str]:
+    # With the session's env: `.mcp.json` may run the MCP from a checkout via
+    # PYTHONPATH, and linking without it took the skills from an installed
+    # snapshot while the session ran the clone.
     code, output = _run([config.command, "-m", "co_scientist_local",
-                         "install-skills", "--dir", str(config.root)])
+                         "install-skills", "--dir", str(config.root)],
+                        env=config.child_env())
     return code == 0, output[-400:]
 
 
@@ -275,11 +303,12 @@ def drop_inapplicable_warning(config: ScivoConfig, identity: dict) -> dict:
     in that case it was on every session of every project set up with
     `scivo setup`, telling people to run `pip install -e` for nothing.
     """
-    if not identity.get("install_warning"):
-        return identity
-    install = inspect(config.command, "co-scientist-local")
-    if install.found and install.dedicated_venv:
-        return {k: v for k, v in identity.items() if k != "install_warning"}
+    # Since MCP 0.1.20260917.post2 the server makes this call itself: a
+    # snapshot in a dedicated venv beside a clone is `install_note`, not
+    # `install_warning`, and a warning in a dedicated venv means the RECORDED
+    # flip — this project last ran an editable install there. Re-deriving
+    # the venv test here threw that precise signal away. The server's word
+    # stands.
     return identity
 
 

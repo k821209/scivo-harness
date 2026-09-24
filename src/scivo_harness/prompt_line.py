@@ -137,9 +137,9 @@ class Line:
         was answering whatever was typed next.
         """
         if self._session is None:
-            if default:
-                print(default, end="", flush=True)  # it is already "typed"
-            return default + await _thread_input(plain)
+            # The prompt, then the typed-ahead text after it — the other order
+            # rendered as `<typed>scivo> `.
+            return default + await _thread_input(plain + default)
         from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit.patch_stdout import patch_stdout
 

@@ -7,13 +7,9 @@ be tested where the SDK is not installed.
 from __future__ import annotations
 
 import asyncio
-import sys
-import types
 
-if "claude_agent_sdk" not in sys.modules:
-    stub = types.ModuleType("claude_agent_sdk")
-    stub.HookMatcher = lambda *a, **k: None  # type: ignore[attr-defined]
-    sys.modules["claude_agent_sdk"] = stub
+import pytest
+
 
 from scivo_harness import guardrails  # noqa: E402
 
@@ -58,3 +54,70 @@ def test_read_prefixes_cover_the_read_only_surface():
                  "mcp__scivo__export_deck_to_pptx", "mcp__scivo__render_slide"):
         assert guardrails.is_scivo_write(name), name
     assert not guardrails.is_scivo_write("Bash")
+
+
+# ── the shell rules, against the shapes that evaded them ─────────────────────
+
+def _bash(g, command):
+    return asyncio.run(g.on_bash({"tool_name": "Bash", "tool_input": {"command": command}}, None, None))
+
+
+@pytest.mark.parametrize("command", [
+    'ssh gpu1 "cd /data; nohup python train.py &"',
+    'ssh gpu1 "python train.py > log 2>&1 &"',
+    'ssh gpu1 "echo x | nohup python train.py"',
+    'ssh gpu1 "tmux new -d -s job python train.py"',
+    'ssh gpu1 "screen -dmS job python train.py"',
+    'ssh gpu1 bash <<EOF\ncd /data\nnohup python train.py &\nEOF',
+    'ssh -t gpu1 "setsid python train.py"',
+])
+def test_raw_remote_jobs_are_denied_however_they_are_written(command):
+    out = _bash(guardrails.Guardrails(), command)
+    assert out and "Blocked" in str(out), command
+
+
+@pytest.mark.parametrize("command", [
+    'ssh gpu1 "ls /data" && echo done',
+    'ssh gpu1 "python check.py > log 2>&1"',
+    'ssh gpu1 "cat a.txt |& head"',
+    'nohup python local.py &',          # local, not over ssh: the local-job tool is a different rule
+])
+def test_ordinary_ssh_and_local_commands_pass(command):
+    out = _bash(guardrails.Guardrails(), command)
+    assert not (out and "raw ssh" in str(out)), (command, out)
+
+
+@pytest.mark.parametrize("command", [
+    'ssh h "pkill -f train.py"', 'ssh h "pgrep --full train.py"', 'ssh h "pkill --full train"',
+    'ssh h "pgrep -c -f train.py"',
+])
+def test_remote_self_matching_pgrep_is_denied(command):
+    out = _bash(guardrails.Guardrails(), command)
+    assert out and "pgrep" in str(out), command
+
+
+def test_a_bracketed_pattern_over_ssh_passes():
+    out = _bash(guardrails.Guardrails(), 'ssh h "ps -eo args | grep \'[t]rain.py\'"')
+    assert not (out and "Blocked" in str(out))
+
+
+# ── the breaker never denies host tools ─────────────────────────────────────
+
+def test_host_reads_and_monitor_are_never_denied_and_host_writes_reset():
+    g = guardrails.Guardrails()
+    for _ in range(6):
+        assert _call(g, "Read", {"file_path": "/x"}) == {}
+        assert _call(g, "Monitor", {"command": "until test -f done; do sleep 2; done"}) == {}
+    a = {"slug": "p"}
+    assert _call(g, "mcp__scivo__get_paper_state", a) == {}
+    assert _call(g, "mcp__scivo__get_paper_state", a) == {}
+    assert _call(g, "Edit", {"file_path": "/x", "old_string": "a", "new_string": "b"}) == {}
+    assert _call(g, "mcp__scivo__get_paper_state", a) == {}      # the edit reset the count
+
+
+def test_hardware_in_memory_is_a_deny_not_an_ask():
+    g = guardrails.Guardrails()
+    out = asyncio.run(g.on_memory_write(
+        {"tool_name": "mcp__scivo__append_project_memory",
+         "tool_input": {"note": "the B200 box at 10.0.0.7 has 96 cores"}}, None, None))
+    assert out and "Blocked" in str(out)

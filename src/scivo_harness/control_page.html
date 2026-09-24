@@ -214,7 +214,8 @@
     if (ev.state === "pending") {
       const row = document.createElement("div"); row.className = "sc-btns";
       const button = (label, decision, cls) => { const b = document.createElement("button"); b.className = "sc-btn " + (cls || ""); b.textContent = label;
-        b.onclick = () => { row.querySelectorAll("button").forEach((x) => (x.disabled = true)); decide(ev.rid, decision); }; return b; };
+        b.onclick = () => { const btns = row.querySelectorAll("button"); btns.forEach((x) => (x.disabled = true));
+          decide(ev.rid, decision).catch((e) => { btns.forEach((x) => (x.disabled = false)); alert("Not sent: " + e.message); }); }; return b; };
       row.append(button("Allow", "allow", "primary"));
       if (!ev.outward) row.append(button("Always for this tool", "always"));
       row.append(button("Deny", "deny", "danger"));
@@ -324,7 +325,18 @@
         if (r.doc === "control") S.interrupt = r.interrupt || 0;
       }
     } catch (_) {}
-    try { const c = await C.get("content", "commands-" + head.sid); S.commands = (c && c.list) || []; } catch (_) { S.commands = []; }
+    // The command list is written after the first head, so a single read
+    // here usually lost the race and the slash menu stayed empty all session.
+    // Subscribe where the client can (dashboard ≥ 2026-09-17); else read once.
+    S.commands = [];
+    try {
+      if (typeof C.subscribeDoc === "function") {
+        if (S.unsubCommands) { try { S.unsubCommands(); } catch (_) {} }
+        S.unsubCommands = C.subscribeDoc("content", "commands-" + head.sid, (c) => { S.commands = (c && c.list) || []; });
+      } else {
+        const c = await C.get("content", "commands-" + head.sid); S.commands = (c && c.list) || [];
+      }
+    } catch (_) { S.commands = []; }
   }
 
   function chunkId(sid, k) { return `log-${sid}-${String(k).padStart(4, "0")}`; }
@@ -344,7 +356,8 @@
       listenChunk(sid, k + 1);
       const size = (S.head && S.head.chunk) || 20, events = doc.events || [];
       const settled = events.length >= size && events.every((e) =>
-        !(e.kind === "assistant" && !e.done) && !(e.kind === "approval" && e.state === "pending"));
+        !(e.kind === "assistant" && !e.done) && !(e.kind === "approval" && e.state === "pending")
+        && !(e.kind === "question" && e.state === "pending"));
       if (settled && chunkSubs.has(k + 2)) { unsubscribe(); chunkSubs.delete(k); }
     });
     chunkSubs.set(k, unsubscribe);
@@ -367,14 +380,19 @@
     const prevCount = S.head && S.head.sid === head.sid ? S.head.events : 0;
     S.head = head;
     let from = Math.floor(Math.max(0, prevCount - 1) / chunk);
-    S.events.forEach((ev) => { if ((ev.kind === "assistant" && !ev.done) || (ev.kind === "approval" && ev.state === "pending")) from = Math.min(from, Math.floor(ev.i / chunk)); });
+    S.events.forEach((ev) => { if ((ev.kind === "assistant" && !ev.done) || (ev.kind === "approval" && ev.state === "pending") || (ev.kind === "question" && ev.state === "pending")) from = Math.min(from, Math.floor(ev.i / chunk)); });
     for (let k = from; k <= to && total > 0; k++) mergeChunk(await C.get("content", chunkId(head.sid, k)));
   }
 
   function refreshDot() {
     const head = S.lastHead;
     if (!head) return;
-    const age = Date.now() - (head.beat || 0);
+    // Age of the LAST CHANGE of the beat, on this clock. Comparing the
+    // harness's wall clock with the browser's read a client that runs behind
+    // as "live" forever after the harness died.
+    S.beatSeen = S.beatSeen || { beat: null, at: 0 };
+    if (S.beatSeen.beat !== head.beat) S.beatSeen = { beat: head.beat, at: Date.now() };
+    const age = Date.now() - S.beatSeen.at;
     const state = head.state === "ended" ? "ended" : age > STALE_MS ? "stale" : "live";
     setDot(state, { live: "connected", stale: "no heartbeat for " + Math.round(age / 1000) + "s", ended: "session ended — run /scivo-control again" }[state]
       + " · " + (head.model || "") + " · " + head.sid + (LIVE ? "" : " · polling"));
@@ -438,7 +456,8 @@
   async function stop() {
     if (!S.sid) return;
     S.interrupt += 1;
-    await C.put("responses", "control", { doc: "control", sid: S.sid, interrupt: S.interrupt });
+    try { await C.put("responses", "control", { doc: "control", sid: S.sid, interrupt: S.interrupt }); }
+    catch (e) { S.interrupt -= 1; alert("Stop not sent: " + e.message); }
   }
 
   function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px"; }
