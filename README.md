@@ -556,3 +556,10 @@ Anthropic requires it to happen.
 build was exercised with one-off scratch scripts (a pty + `pyte` screen for
 the REPL, a mock SSE server, Playwright with a stubbed `window.scivo` for the
 control page); pieces of that get codified here as they are touched.
+
+The control page has a browser drive: `node tests/browser/control_page.spec.mjs`
+(Playwright + a local Chrome, run from a directory with `playwright` installed)
+opens `control_page.html` with a stubbed `window.scivo`, pushes a head and a
+transcript chunk with an approval and a question, clicks through them, sends a
+message, opens the slash menu, fails a write on purpose, presses Stop, ends the
+session, and prints what the page did — `"errors": []` at the end is the pass.
