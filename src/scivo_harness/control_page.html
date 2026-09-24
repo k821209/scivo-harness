@@ -282,7 +282,14 @@
       const answers = {};
       for (const [k, v] of Object.entries(draft)) if (v !== null) answers[k] = v;
       C.put("responses", "questions", { doc: "questions", sid: S.sid,
-        answers: { [ev.rid]: Object.keys(answers).length ? answers : null } });
+        answers: { [ev.rid]: Object.keys(answers).length ? answers : null } })
+        .catch((e) => {
+          // Same as a failed approval: the row must come back, or the harness
+          // waits on an answer nobody can give.
+          rows.forEach((r) => (r.style.opacity = ""));
+          questionDrafts.set(ev.rid, draft);
+          alert("Not sent: " + e.message);
+        });
       questionDrafts.delete(ev.rid);
     }
   }
