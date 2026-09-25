@@ -200,7 +200,11 @@ async def build(
         # A local model behind a shim has no effort parameter; sending one is
         # a 400 from some proxies and silently ignored by others.
         effort=effort if chosen.supports_effort else None,
-        env=endpoint.env,
+        # Claude Code keeps an MCP discovery cache (tool list + schemas) that
+        # can outlive an MCP update: after `git pull` the server had new
+        # parameters and the session still saw the old schema. The CLI reads
+        # this switch from its environment; off means every start discovers.
+        env={"MCP_DISCOVERY_CACHE": "false", **endpoint.env},
         cwd=str(config.root),
         add_dirs=list(add_dirs or []),
         # Makes bypassPermissions *available* without turning it on, so

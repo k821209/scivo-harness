@@ -91,3 +91,12 @@ def test_force_keeps_other_mcp_servers_and_backs_up_with_the_key_mode(tmp_path):
     assert stat.S_IMODE(backup.stat().st_mode) == 0o600
     assert "csk_old" in backup.read_text()
     assert ".mcp.json.bak" in setup.IGNORE_BLOCK
+
+
+def test_discovery_cache_is_off_for_the_cli_but_a_provider_may_override():
+    """The env the SDK child gets: MCP discovery is never served from a
+    cache that outlives an MCP update, unless a provider says otherwise."""
+    import inspect
+    from scivo_harness import session
+    src = inspect.getsource(session.build)
+    assert '"MCP_DISCOVERY_CACHE": "false", **endpoint.env' in src
