@@ -103,6 +103,15 @@ class ToolPlan:
 # work without.
 _DOMAIN_ORDER = ("deck", "video", "materials", "analysis", "paper")
 
+# A tool one domain claims that other profiles cannot work without. The
+# video loop registers keyframes (first/last images) BEFORE generating a
+# chunk, and those keyframes come from `generate_image` — which `image`
+# files under paper, so a `--profile video` session had no way to make
+# the thing its own tab asks the user to judge.
+ALSO: dict[str, tuple[str, ...]] = {
+    "generate_image": ("video", "deck"),
+}
+
 
 def _matches(needle: str, name: str, segments: list[str]) -> bool:
     if "_" in needle:                 # a multi-word needle names a tool family
@@ -134,7 +143,8 @@ def plan(all_tools: list[str], profile: str = "full", read_only: bool = False) -
     wanted = set(PROFILES[profile])
     kept, dropped = [], []
     for name in all_tools:
-        keep = name in ALWAYS or _domain_of(name) in wanted or _domain_of(name) == "core"
+        keep = (name in ALWAYS or _domain_of(name) in wanted or _domain_of(name) == "core"
+                or bool(wanted & set(ALSO.get(name, ()))))
         if keep and read_only and not is_read_only(name):
             keep = False
         (kept if keep else dropped).append(name)

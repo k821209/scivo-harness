@@ -10,6 +10,7 @@ NAMES = [
     "list_analyses", "record_analysis_run", "compare_run_params", "refresh_log_tail",
     "add_material", "list_assets", "add_video", "youtube_check", "get_user_secret",
     "list_user_secrets", "build_tracked_changes", "lint_results_grid",
+    "generate_image", "add_video_chunk", "update_video_chunk", "list_video_chunks",
 ]
 
 
@@ -38,3 +39,13 @@ def test_secrets_are_never_auto_approved():
     assert "mcp__scivo__get_user_secret" not in plan.auto_approved
     assert "mcp__scivo__list_user_secrets" not in plan.auto_approved
     assert "mcp__scivo__list_papers" in plan.auto_approved
+
+
+def test_video_profile_carries_the_chunk_loop_and_the_keyframe_generator():
+    kept = set(toolsets.plan(NAMES, "video").kept)
+    assert {"add_video_chunk", "update_video_chunk", "list_video_chunks", "add_material",
+            "generate_image"} <= kept
+    assert "add_section" not in kept
+    # generate_image is filed under paper; deck and video borrow it, analysis does not
+    assert "generate_image" in toolsets.plan(NAMES, "deck").kept
+    assert "generate_image" not in toolsets.plan(NAMES, "analysis").kept

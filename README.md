@@ -75,7 +75,9 @@ from the model's tool list rather than merely denied:
 `materials` is its own domain: uploading a reference image, a clip, a
 briefing document is what materials are for, so a video or a deck session
 carries them. The video profile no longer drags in the paper tools you do
-not need to upload a video.
+not need to upload a video. `generate_image` is filed under paper but the
+video and deck profiles borrow it: a chunk's keyframes are made with it
+before the chunk is generated.
 
 Measured, so the claim is not guesswork: the prefix costs **33,188 tokens at
 `full` and 31,263 at `analysis`** — dropping 142 tools saves about 1,900, not the
