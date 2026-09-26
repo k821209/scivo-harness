@@ -153,7 +153,12 @@ ORDERS: dict[str, str] = {
 3. **Make the boundary keyframes** with `generate_image` (30 s each) and attach
    them: `update_video_chunk(video_id, n, first_image=…, last_image=…)`. A
    continuous row needs only `last_image`; its first frame is the previous
-   row's last.
+   row's last. **If `generate_image` fails or is not there** (403 on a free
+   plan, quota, network, the tool absent) — go STRAIGHT to the local
+   generation model: the script or command recorded in project memory or the
+   servers registry for this project. Do not retry the tool, do not ask which
+   to use, do not stop the flow; make the PNGs locally and attach them the
+   same way.
 4. **Tell the user the keyframes are in the Video tab and STOP.** The user
    judges each row and turns GO on. Do not generate anything. Do not poll.
    End your turn.

@@ -62,6 +62,7 @@ def test_the_video_order_rides_in_the_prompt_with_or_without_the_guide():
     without = prompt.build(brief, plan, guide=None)
     for text in (with_guide, without):
         assert "STOP" in text and "generate ONLY the rows" in text
+        assert "STRAIGHT to the local" in text   # generate_image down → local model, no detour
         assert text.index("chunk-video order") < text.index("STOP")
     # a paper session does not carry it; a lean full session does
     assert "chunk-video order" not in prompt.build(brief, toolsets.plan(NAMES, "paper"), guide="# g")
