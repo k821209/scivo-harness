@@ -69,3 +69,24 @@ def test_the_video_order_rides_in_the_prompt_with_or_without_the_guide():
     # and the lean video kit has the keyframe generator
     kit = session.local_kit(tuple(NAMES), "video")
     assert {"generate_image", "add_video_chunk", "update_video_chunk"} <= kit
+
+
+def test_a_local_model_gets_the_short_guide_and_a_claude_session_the_full_one():
+    from scivo_harness import prompt
+    from scivo_harness.preflight import Briefing
+    plan = toolsets.plan(NAMES, "paper")
+    lean = prompt.build(Briefing(), plan, guide=None)
+    full = prompt.build(Briefing(), plan, guide="# THE GUIDE")
+    assert "short form" in lean and "add_reference_by_doi" in lean and "THE GUIDE" not in lean
+    assert "THE GUIDE" in full and "short form" not in full
+    assert len(prompt.LOCAL_GUIDE) < 3000   # ~600 tokens: the point of it
+
+
+def test_the_cache_note_reads_per_model_figures_then_the_flat_usage():
+    from types import SimpleNamespace
+    from scivo_harness.repl import cache_note
+    per_model = SimpleNamespace(model_usage={"m": {"cacheReadInputTokens": 24500, "cacheCreationInputTokens": 0}}, usage=None)
+    assert cache_note(per_model) == "cache 24.5k read · 0 new"
+    flat = SimpleNamespace(model_usage=None, usage={"cache_read_input_tokens": 0, "cache_creation_input_tokens": 1200})
+    assert cache_note(flat) == "cache 0 read · 1.2k new"
+    assert cache_note(SimpleNamespace(model_usage=None, usage=None)) == ""

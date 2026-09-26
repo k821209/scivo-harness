@@ -401,6 +401,11 @@ word). The lean one is about 14k. `/model opus` restores everything.
   `{"type": "preset", "preset": "claude_code", "append": …}`; the append half is
   assembled conditionally — a section about papers is noise in a project with
   none.
+- **The status line after each turn shows the cache** — `cache 24.5k read ·
+  0 new` means the guide came from the prompt cache; a large `new` on a turn
+  that changed nothing means the prefix was invalidated (a profile switch,
+  an MCP update). Local models get a short-form guide (`prompt.LOCAL_GUIDE`,
+  ~600 tokens) in place of the 25k-token one.
 - **Prefix order is cache order.** Charter and guide (stable) first, the
   per-session briefing last.
 - **The 28 skills load unmodified.** `setting_sources` + `skills="all"` read the

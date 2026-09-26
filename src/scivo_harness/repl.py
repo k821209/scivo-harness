@@ -156,6 +156,32 @@ def _preview(tool: str, payload: dict[str, Any]) -> str:
     return ""
 
 
+
+def _k(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def cache_note(message: Any) -> str:
+    """The turn's prompt-cache figures — "cache 24.5k read · 1.2k new" — or ""
+    when the endpoint reports none. The guide is ~25k tokens of the prefix;
+    a "read" that size on every turn after the first is the cache working,
+    and a "new" that size on a turn that changed nothing is the prefix being
+    invalidated (a profile switch, an MCP update). Per-model figures win
+    when the CLI sends them; the flat usage dict is the fallback."""
+    read = new = 0
+    per_model = getattr(message, "model_usage", None) or {}
+    if per_model:
+        for usage in per_model.values():
+            read += int(usage.get("cacheReadInputTokens") or 0)
+            new += int(usage.get("cacheCreationInputTokens") or 0)
+    else:
+        usage = getattr(message, "usage", None) or {}
+        read = int(usage.get("cache_read_input_tokens") or 0)
+        new = int(usage.get("cache_creation_input_tokens") or 0)
+    if not read and not new:
+        return ""
+    return f"cache {_k(read)} read · {_k(new)} new"
+
 class Repl:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -389,6 +415,7 @@ class Repl:
 
     def _on_result(self, message: ResultMessage) -> None:
         self.session_id = message.session_id or self.session_id
+        cache = cache_note(message)
         self.turns += message.num_turns
         # Claude Code prices every turn from its own table, including models it
         # does not know: a Qwen turn on a local server came back as $0.334.
@@ -412,7 +439,8 @@ class Repl:
         else:
             # claude.ai subscription: no per-turn dollars, keep the shape.
             price, total = "claude.ai", "on your plan"
-        print(ui.dim(f"\n  ({message.num_turns} turns · {price} · {total})\n"))
+        print(ui.dim(f"\n  ({message.num_turns} turns · {price} · {total}"
+                     + (f" · {cache}" if cache and not local else "") + ")\n"))
         if self.control:
             self.control.result(message.num_turns, turn_cost, self.cost,
                                 error=(message.stop_reason or "error") if message.is_error else None)

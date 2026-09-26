@@ -96,6 +96,46 @@ information. One ping should equal one status read.
 """.strip()
 
 
+# What a local model gets instead of the 25k-token guide: the conventions
+# that decide whether work lands where the user can see it, in the fewest
+# words that still say WHICH tool. Mirrors `project_guide()`; when the two
+# disagree the guide is right and this is what needs fixing.
+LOCAL_GUIDE = """
+# Project guide, short form (the full guide is not loaded for this model)
+
+## Where things live — write to the right place
+- **Manuscript text**: `get_manuscript` / `get_section` / `update_section`.
+  Cite with `{{doi:10.xxxx/...}}` after `add_reference_by_doi(slug, doi)`;
+  it fetches the metadata from CrossRef, so never type a title or year
+  yourself. A DOI CrossRef rejects is a hallucinated citation — drop it.
+- **A figure or table** goes in with `add_figure` / `add_table`, always with
+  `source_analysis=` naming the analysis that produced it.
+- **Every analysis run** leaves a record: `submit_remote_job` for a remote
+  machine, `launch_local_job` locally, or `create_analysis` +
+  `record_analysis_run(host=, command=, env_name=, log_path=)` for a command
+  already run. No paper in the project → `slug="_project"`. A raw
+  `ssh ... nohup` is blocked.
+- **Machines** (host, GPU, env, ports) go in the servers registry
+  (`add_server`, `add_server_env`) — never in project memory.
+- **Durable notes** the next session must know: `append_project_memory`.
+  A choice that will not be revisited: `record_decision`.
+- **To-dos**: `add_todo` / `update_todo`. **Bugs in these tools**:
+  `report_feedback` — "개발자한테 보내줘" means exactly that call.
+
+## Working with the user
+- The user leaves comments in the dashboard. `list_paper_comments(slug)`
+  (or `list_video_comments`) is your to-do list; after fixing, close each
+  with `resolve_paper_comment(slug, id, status="accepted", response=...)`.
+- Before a long or expensive step (a render, a remote job, a bulk rewrite),
+  say what you are about to do and stop for the user's go-ahead. Do not
+  poll for it; end your turn.
+- Show an image with `![](/absolute/path.png)`; tables as markdown tables.
+- Write non-English prose natively — never English then translated.
+- Do not invent numbers, DOIs, file paths or tool results. If a tool
+  errored, say so with the error text.
+""".strip()
+
+
 # The order of operations for a profile, as a numbered list. The guide says
 # the same in prose, but a local model gets no guide (the lean prompt drops
 # it) and a weak model follows a numbered list where it skims a paragraph:
@@ -173,6 +213,9 @@ def build(
     note = _tool_note(plan)
     if note:
         parts.append(note)
+
+    if guide is None:
+        parts.append(LOCAL_GUIDE)
 
     order = _order_note(plan, guide)
     if order:
