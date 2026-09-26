@@ -96,6 +96,49 @@ information. One ping should equal one status read.
 """.strip()
 
 
+# The order of operations for a profile, as a numbered list. The guide says
+# the same in prose, but a local model gets no guide (the lean prompt drops
+# it) and a weak model follows a numbered list where it skims a paragraph:
+# one generated every chunk without waiting for GO. Short, imperative, and
+# the waiting step is a step — not a caveat at the end.
+ORDERS: dict[str, str] = {
+    "video": """
+## The chunk-video order — follow it step by step, in this order
+
+1. **Create the video post**: `add_video(title=…, aspect_ratio=…)` with no
+   file. One video for the whole scene.
+2. **Write every chunk's prompt** and register the rows:
+   `add_video_chunk(video_id, n, prompt=…, continuous=…)` — no file, no images
+   yet. Row 1 is `continuous=False`.
+3. **Make the boundary keyframes** with `generate_image` (30 s each) and attach
+   them: `update_video_chunk(video_id, n, first_image=…, last_image=…)`. A
+   continuous row needs only `last_image`; its first frame is the previous
+   row's last.
+4. **Tell the user the keyframes are in the Video tab and STOP.** The user
+   judges each row and turns GO on. Do not generate anything. Do not poll.
+   End your turn.
+5. **When the user says go** (or asks you to check), read
+   `list_video_chunks(video_id)` and generate ONLY the rows whose `render` is
+   true. Register each file with `add_video_chunk(video_id, n, prompt=<same
+   prompt>, local_path=…, metrics=…)`. A row with GO off refuses the file.
+6. **Read the row's notes** — `list_video_comments(video_id, chunk=n)` — fix,
+   regenerate, `resolve_video_comment(..., response="what changed")`.
+7. **Join only when asked**: `join_video_chunks(video_id)`. The joined file
+   goes on the SAME video. Never make a second video for it; never
+   `delete_video` the chunked one.
+""".strip(),
+}
+
+
+def _order_note(plan: ToolPlan, guide: str | None) -> str:
+    """The profile's order; every order when a lean full session has no guide."""
+    if plan.profile in ORDERS:
+        return ORDERS[plan.profile]
+    if plan.profile == "full" and guide is None:
+        return "\n\n".join(ORDERS.values())
+    return ""
+
+
 def _tool_note(plan: ToolPlan) -> str:
     if not plan.dropped:
         return ""
@@ -130,6 +173,10 @@ def build(
     note = _tool_note(plan)
     if note:
         parts.append(note)
+
+    order = _order_note(plan, guide)
+    if order:
+        parts.append(order)
 
     if guide:
         parts.append(

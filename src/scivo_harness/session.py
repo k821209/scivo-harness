@@ -90,10 +90,14 @@ def local_kit(scivo_tools: tuple[str, ...], profile: str) -> set[str]:
     sizes: dict[str, list[str]] = {}
     for name in scivo_tools:
         sizes.setdefault(toolsets._domain_of(name), []).append(name)
-    for domain in toolsets.PROFILES.get(profile, ()):  # the profile's own domains
+    wanted = toolsets.PROFILES.get(profile, ())
+    for domain in wanted:  # the profile's own domains
         members = sizes.get(domain, [])
         if len(members) <= LOCAL_DOMAIN_LIMIT:
             keep.update(members)
+    # What the profile borrows from another domain (generate_image for the
+    # keyframes) — a lean video session without it cannot do step 3.
+    keep.update(n for n in scivo_tools if set(toolsets.ALSO.get(n, ())) & set(wanted))
     return keep
 
 

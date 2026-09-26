@@ -49,3 +49,23 @@ def test_video_profile_carries_the_chunk_loop_and_the_keyframe_generator():
     # generate_image is filed under paper; deck and video borrow it, analysis does not
     assert "generate_image" in toolsets.plan(NAMES, "deck").kept
     assert "generate_image" not in toolsets.plan(NAMES, "analysis").kept
+
+
+def test_the_video_order_rides_in_the_prompt_with_or_without_the_guide():
+    """A local model gets no guide, and the one that had it skimmed the
+    paragraph: the chunk order is a numbered list in the prompt itself."""
+    from scivo_harness import prompt, session
+    from scivo_harness.preflight import Briefing
+    plan = toolsets.plan(NAMES, "video")
+    brief = Briefing()
+    with_guide = prompt.build(brief, plan, guide="# guide")
+    without = prompt.build(brief, plan, guide=None)
+    for text in (with_guide, without):
+        assert "STOP" in text and "generate ONLY the rows" in text
+        assert text.index("chunk-video order") < text.index("STOP")
+    # a paper session does not carry it; a lean full session does
+    assert "chunk-video order" not in prompt.build(brief, toolsets.plan(NAMES, "paper"), guide="# g")
+    assert "chunk-video order" in prompt.build(brief, toolsets.plan(NAMES, "full"), guide=None)
+    # and the lean video kit has the keyframe generator
+    kit = session.local_kit(tuple(NAMES), "video")
+    assert {"generate_image", "add_video_chunk", "update_video_chunk"} <= kit
