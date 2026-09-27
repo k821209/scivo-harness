@@ -85,7 +85,8 @@ class Approvals:
     async def __call__(self, tool_name: str, payload: dict[str, Any], context: Any):
         if tool_name == "AskUserQuestion":
             async with self._one_at_a_time:
-                with paused():
+                on_page = self.remote is not None and self.remote.active
+                with paused() if not on_page else contextlib.nullcontext():
                     return await self._questions(payload)
         # A guardrail hold arrives with the hook's reason. It is a question
         # about THIS call's content, so an earlier "always" for the tool does
@@ -120,7 +121,20 @@ class Approvals:
         """
         questions = payload.get("questions") or []
         if self.remote is not None and self.remote.active:
-            self.remote.status("a question is waiting in the terminal", level="warn")
+            # The page renders the question card and collects the answers
+            # (control.ask_question). This used to post "a question is waiting
+            # in the terminal" and then ask in the terminal anyway — the page
+            # existed but was never called, so the person at the page had to
+            # walk to the terminal.
+            ui.clear_activity()
+            print()
+            print(ui.dim("  question — waiting for your answer on the scivo-control page…"))
+            page = await self.remote.ask_question(payload)
+            if not page:
+                print(ui.dim("  (skipped on the page — the model is told nobody answered)\n"))
+                return PermissionResultAllow(updated_input=payload)
+            print(ui.dim("  answered on the page\n"))
+            return PermissionResultAllow(updated_input={**payload, "answers": page})
         answers: dict[str, Any] = {}
         for item in questions:
             if not isinstance(item, dict):

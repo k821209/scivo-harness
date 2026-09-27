@@ -100,3 +100,27 @@ def test_discovery_cache_is_off_for_the_cli_but_a_provider_may_override():
     from scivo_harness import session
     src = inspect.getsource(session.build)
     assert '"MCP_DISCOVERY_CACHE": "false", **endpoint.env' in src
+
+
+def test_a_question_goes_to_the_control_page_when_it_is_up():
+    """The page had an ask_question since 1a1c547 but the approver never
+    called it: it posted "a question is waiting in the terminal" and asked
+    in the terminal anyway."""
+    import asyncio
+    from scivo_harness.permissions import Approvals
+
+    class Page:
+        active = True
+        def __init__(self): self.asked = []; self.statuses = []
+        def status(self, text, level="info"): self.statuses.append(text)
+        async def ask_question(self, payload):
+            self.asked.append(payload)
+            return {"Which paper?": "cuscuta"}
+
+    a = Approvals(); a.remote = Page()
+    payload = {"questions": [{"question": "Which paper?", "header": "paper",
+                              "options": [{"label": "cuscuta", "description": ""}]}]}
+    out = asyncio.run(a("AskUserQuestion", payload, None))
+    assert a.remote.asked == [payload]
+    assert out.updated_input["answers"] == {"Which paper?": "cuscuta"}
+    assert not any("waiting in the terminal" in s for s in a.remote.statuses)
