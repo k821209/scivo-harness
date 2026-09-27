@@ -164,7 +164,11 @@ ORDERS: dict[str, str] = {
    End your turn.
 5. **When the user says go** (or asks you to check), read
    `list_video_chunks(video_id)` and generate ONLY the rows whose `render` is
-   true. Register each file with `add_video_chunk(video_id, n, prompt=<same
+   true. **Before generating row n, fetch its start image**:
+   `get_video_chunk_image(video_id, n, which="start", dest_dir=…)` → use the
+   returned `path` as the first frame. That is the file the user confirmed in
+   the tab. Never pick a local PNG by name (b3.png, b3_v2.png — they drift).
+   Register each file with `add_video_chunk(video_id, n, prompt=<same
    prompt>, local_path=…, metrics=…)`. A row with GO off refuses the file.
 6. **Read the row's notes** — `list_video_comments(video_id, chunk=n)` — fix,
    regenerate, `resolve_video_comment(..., response="what changed")`.
