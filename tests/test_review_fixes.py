@@ -145,3 +145,12 @@ def test_a_distribution_that_is_not_installed_is_not_an_error():
     from scivo_harness.update import inspect
     install = inspect(sys.executable, "no-such-distribution-xyz")
     assert install.found is False and install.error is None
+
+
+def test_the_shim_times_each_model_call_and_the_note_reads_them():
+    from scivo_harness import shim
+    assert shim.prefill_note([]) == ""
+    assert shim.prefill_note([(0.42, 3.0)]) == "1 call · first byte 0.4s"
+    assert shim.prefill_note([(0.4, 3.0), (1.1, 5.0), (0.5, 2.0)]) == "3 calls · first byte 0.4–1.1s"
+    shim.STATS["http://x"] = [(0.3, 1.0)]
+    assert shim.take_stats("http://x") == [(0.3, 1.0)] and shim.take_stats("http://x") == []

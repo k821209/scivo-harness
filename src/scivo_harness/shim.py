@@ -31,6 +31,14 @@ from typing import Any, Callable
 MARKER = "[operator note] "
 HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "upgrade", "content-length"}
 
+# Per-request timings of the model calls that went through a shim, keyed by
+# the shim's own URL: (seconds to the first byte of the reply, total seconds).
+# The first byte of a streamed reply comes after the prefill, so its latency
+# is the one number that says whether the server reused the prompt prefix —
+# well under a second when it did, the whole prompt's worth when it did not.
+# The session reads and clears this after each turn.
+STATS: dict[str, list[tuple[float, float]]] = {}
+
 
 def _as_text(content: Any) -> str:
     if isinstance(content, str):
@@ -109,6 +117,7 @@ def fold_system_messages(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
 class _Handler(BaseHTTPRequestHandler):
     upstream = "http://localhost:8190"
     verbose = False
+    stats_key = ""
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
@@ -150,14 +159,17 @@ class _Handler(BaseHTTPRequestHandler):
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}
         request = urllib.request.Request(
             self.upstream.rstrip("/") + self.path, data=raw, headers=headers, method="POST")
-        self._relay(request)
+        self._relay(request, timed=route.endswith("/v1/messages"))
 
     def do_GET(self) -> None:  # noqa: N802
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}
         self._relay(urllib.request.Request(
             self.upstream.rstrip("/") + self.path, headers=headers, method="GET"))
 
-    def _relay(self, request: urllib.request.Request) -> None:
+    def _relay(self, request: urllib.request.Request, timed: bool = False) -> None:
+        import time
+        started = time.monotonic()
+        first: float | None = None
         try:
             response = urllib.request.urlopen(request, timeout=900)
         except urllib.error.HTTPError as exc:
@@ -184,9 +196,13 @@ class _Handler(BaseHTTPRequestHandler):
             # ended.
             reader = getattr(response, "read1", response.read)
             while chunk := reader(8192):
+                if first is None:
+                    first = time.monotonic() - started
                 self.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")
+        if timed and self.stats_key and first is not None:
+            STATS.setdefault(self.stats_key, []).append((first, time.monotonic() - started))
 
 
 class _QuietServer(ThreadingHTTPServer):
@@ -217,14 +233,35 @@ def start_background(upstream: str) -> tuple[str, "Callable[[], None]"]:
 
     handler = type("BoundShimHandler", (_Handler,), {"upstream": upstream, "verbose": False})
     server = _QuietServer(("127.0.0.1", 0), handler)
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    handler.stats_key = url
     thread = threading.Thread(target=server.serve_forever, name="scivo-shim", daemon=True)
     thread.start()
 
     def stop() -> None:
         server.shutdown()
         server.server_close()
+        STATS.pop(url, None)
 
-    return f"http://127.0.0.1:{server.server_address[1]}", stop
+    return url, stop
+
+
+def take_stats(url: str) -> list[tuple[float, float]]:
+    """The timings recorded since the last call, for the shim at `url`."""
+    return STATS.pop(url, [])
+
+
+def prefill_note(stats: list[tuple[float, float]]) -> str:
+    """"7 calls · first byte 0.4–1.1s" — the per-turn line for a local model.
+    A first byte that takes as long as the whole prompt would to read means
+    the server did not reuse the prefix (prompt cache off, or the prefix
+    changed); under a second on every call means it did."""
+    if not stats:
+        return ""
+    firsts = sorted(f for f, _ in stats)
+    lo, hi = firsts[0], firsts[-1]
+    span = f"{lo:.1f}s" if hi - lo < 0.15 else f"{lo:.1f}–{hi:.1f}s"
+    return f"{len(stats)} call{'s' if len(stats) != 1 else ''} · first byte {span}"
 
 
 def serve(upstream: str, port: int, verbose: bool = False) -> None:

@@ -434,6 +434,13 @@ class Repl:
             print(ui.red(f"\n  ! {message.stop_reason or 'error'}: {message.result or ''}"))
         if local:
             price, total = "local model", "local model"
+            # What a local turn costs is time, and nearly all of it is the
+            # prefill; the shim (when one is in the path) timed each call.
+            from . import shim as _shim
+            env = getattr(getattr(self.session, "endpoint", None), "env", None) or {}
+            note = _shim.prefill_note(_shim.take_stats(env.get("ANTHROPIC_BASE_URL", "")))
+            if note:
+                total = note
         elif billed:
             price, total = f"${turn_cost:.3f}", f"${self.cost:.3f} session"
         else:

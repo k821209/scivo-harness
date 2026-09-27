@@ -391,10 +391,16 @@ editing a paper, its todos and memory, and running jobs on registered servers.
 `--profile video`, `deck` or `analysis` loads that domain's tools on top, which
 is how a local session gets `add_video` or the deck tools; the paper domain is
 115 tools and stays pruned, its everyday half already being in the core.
-A local server re-reads the whole
-prompt on every request, with no caching and no deferred tool loading, and the
-full session is about 100k tokens (a 27B model sat for minutes before its first
-word). The lean one is about 14k. `/model opus` restores everything.
+A local server has no deferred
+tool loading, and whether it re-reads the whole prompt on every request depends
+on its prompt cache: llama-server reuses a slot's prefix when the prompt starts
+the same way (prompt caching is on by default; `--cache-reuse 256` also
+salvages a partially changed one), vLLM needs `--enable-prefix-caching`. The
+full session is about 100k tokens (a 27B model sat for minutes before its
+first word); the lean one is about 14k. When the shim is in the path, the
+turn line says `7 calls · first byte 0.4–1.1s`: a first byte under a second
+on every call means the prefix was reused; one that takes as long as reading
+the prompt means it was not. `/model opus` restores everything.
 
 ## Design notes
 
