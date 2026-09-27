@@ -136,3 +136,12 @@ def test_update_video_adds_the_vh_toolkit_as_a_target_only_when_asked():
     assert parser.parse_args(["update"]).video is False
     src = _inspect.getsource(cli._update)
     assert 'targets.append((VH_DIST, config.command))' in src and cli.VH_DIST == "video-harness"
+
+
+def test_a_distribution_that_is_not_installed_is_not_an_error():
+    """`scivo update --video` on a machine without vh printed
+    PackageNotFoundError in red and called the update failed."""
+    import sys
+    from scivo_harness.update import inspect
+    install = inspect(sys.executable, "no-such-distribution-xyz")
+    assert install.found is False and install.error is None

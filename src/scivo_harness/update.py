@@ -66,7 +66,12 @@ from pathlib import Path
 out = {"found": False}
 out["dedicated_venv"] = sys.prefix != sys.base_prefix and not (Path(sys.prefix) / "conda-meta").is_dir()
 try:
-    dist = md.distribution(sys.argv[1])
+    try:
+        dist = md.distribution(sys.argv[1])
+    except md.PackageNotFoundError:
+        # Not installed is an answer, not an error: `scivo update --video`
+        # on a machine without vh reported a failed update for it.
+        print(json.dumps(out)); sys.exit(0)
     out["found"] = True
     out["version"] = dist.version
     raw = dist.read_text("direct_url.json")
