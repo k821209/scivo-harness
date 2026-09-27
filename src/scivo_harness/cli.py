@@ -130,6 +130,9 @@ def _parser() -> argparse.ArgumentParser:
                              "on this machine could run the MCP")
     update.add_argument("--restore-editable", action="store_true",
                         help="if the MCP is a snapshot over a source checkout, point it back at the checkout")
+    update.add_argument("--video", action="store_true",
+                        help="also update the vh video toolkit (video-harness) under the MCP's "
+                             "interpreter — only machines that make videos have it")
     shim = sub.add_parser(
         "shim", help="standalone message-reordering proxy for a local model server (sessions start one themselves)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -294,6 +297,11 @@ async def _setup(args) -> int:
     return 0
 
 
+VH_DIST = "video-harness"
+VH_INSTALL_HINT = ("install: git clone https://github.com/k821209/co-scientist-video-harness.git "
+                   "~/co-scientist-video-harness && <mcp python> -m pip install -e ~/co-scientist-video-harness")
+
+
 async def _update_one(install, check: bool) -> tuple[bool, bool]:
     """Returns (ok, moved). Prints its own progress."""
     label = install.dist
@@ -302,6 +310,8 @@ async def _update_one(install, check: bool) -> tuple[bool, bool]:
         return False, False
     if not install.found:
         print(f"  {label:20} {ui.dim('not installed here')}")
+        if install.dist == VH_DIST:
+            print(ui.dim(f"  {'':20} {VH_INSTALL_HINT}"))
         return True, False
 
     kind = "editable" if install.editable else (install.url or "unrecorded source")
@@ -379,6 +389,10 @@ async def _update(args) -> int:
     targets = [("co-scientist-local", config.command)]
     if not args.no_self:
         targets.append(("scivo-harness", sys.executable))
+    # vh is a separate package that most accounts never install; it is
+    # updated only when asked (--video), the same interpreter as the MCP.
+    if getattr(args, "video", False):
+        targets.append((VH_DIST, config.command))
 
     print(f"project     {config.root}")
     before_sha, before_version = await _sha(config)

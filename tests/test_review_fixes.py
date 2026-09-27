@@ -124,3 +124,15 @@ def test_a_question_goes_to_the_control_page_when_it_is_up():
     assert a.remote.asked == [payload]
     assert out.updated_input["answers"] == {"Which paper?": "cuscuta"}
     assert not any("waiting in the terminal" in s for s in a.remote.statuses)
+
+
+def test_update_video_adds_the_vh_toolkit_as_a_target_only_when_asked():
+    """vh (video-harness) is a separate package most accounts never install:
+    `scivo update` leaves it alone unless --video is given."""
+    import inspect as _inspect
+    from scivo_harness import cli
+    parser = cli._parser()
+    assert parser.parse_args(["update", "--video"]).video is True
+    assert parser.parse_args(["update"]).video is False
+    src = _inspect.getsource(cli._update)
+    assert 'targets.append((VH_DIST, config.command))' in src and cli.VH_DIST == "video-harness"
