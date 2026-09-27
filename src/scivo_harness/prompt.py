@@ -180,12 +180,11 @@ ORDERS: dict[str, str] = {
 
 
 def _order_note(plan: ToolPlan, guide: str | None) -> str:
-    """The profile's order; every order when a lean full session has no guide."""
-    if plan.profile in ORDERS:
-        return ORDERS[plan.profile]
-    if plan.profile == "full" and guide is None:
-        return "\n\n".join(ORDERS.values())
-    return ""
+    """The profile's own order only. A full session does not carry the video
+    order: most full sessions never touch a video, and seven steps of chunk
+    procedure in every prompt is paid for on every turn (user, 2026-09-27).
+    Video work is what `--profile video` is for."""
+    return ORDERS.get(plan.profile, "")
 
 
 def _tool_note(plan: ToolPlan) -> str:

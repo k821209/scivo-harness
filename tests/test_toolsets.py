@@ -67,7 +67,9 @@ def test_the_video_order_rides_in_the_prompt_with_or_without_the_guide():
         assert text.index("chunk-video order") < text.index("STOP")
     # a paper session does not carry it; a lean full session does
     assert "chunk-video order" not in prompt.build(brief, toolsets.plan(NAMES, "paper"), guide="# g")
-    assert "chunk-video order" in prompt.build(brief, toolsets.plan(NAMES, "full"), guide=None)
+    # a full session does not pay for the video order, guide or no guide
+    assert "chunk-video order" not in prompt.build(brief, toolsets.plan(NAMES, "full"), guide=None)
+    assert "chunk-video order" not in prompt.build(brief, toolsets.plan(NAMES, "full"), guide="# g")
     # and the lean video kit has the keyframe generator
     kit = session.local_kit(tuple(NAMES), "video")
     assert {"generate_image", "add_video_chunk", "update_video_chunk"} <= kit
