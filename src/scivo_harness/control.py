@@ -221,6 +221,7 @@ class Control:
     _approvals: dict[str, _Approval] = field(default_factory=dict)
     _questions_pending: dict[str, _Question] = field(default_factory=dict)
     _inbox_seen: int = 0
+    _inbox_ids: set = field(default_factory=set)
     _interrupt_seen: int = 0
     _started: int = 0
     # Set by the REPL: True while a turn is running, so a message arriving now
@@ -247,6 +248,7 @@ class Control:
         self._dirty.clear()
         self._assistant = None
         self._inbox_seen = 0
+        self._inbox_ids = set()
         self._interrupt_seen = 0
         self.interrupt_requested.clear()
         await self._write_head(state="live")
@@ -557,6 +559,66 @@ class Control:
                     self.errors.append(f"head: {type(exc).__name__}: {exc}")
                 last_beat = time.monotonic()
 
+    async def _take_web_message(self, text: str) -> None:
+        self._last_activity = time.monotonic()
+        # Echo it here rather than when the session gets round to it: a
+        # message sent while a turn is running sat as "sending…" on the page
+        # for as long as the turn took, which reads as a lost message.
+        self.user(text, "web")
+        if self.waiting:
+            self.status("queued — the session is busy with the previous turn")
+        await self.messages.put(text)
+
+    async def _intake(self, items: list) -> None:
+        """Route what the page wrote: web messages, approvals, answers, Stop."""
+        # One document per web message (page ≥ 2026-09-28), taken in clock
+        # order and deduplicated by id, so two tabs never race a counter.
+        fresh = sorted(
+            (d for d in items if isinstance(d, dict) and d.get("doc") == "inbox"
+             and d.get("id") and d.get("reviewer") == OWNER and d.get("sid") == self.sid
+             and d["id"] not in self._inbox_ids and str(d.get("text", "")).strip()),
+            key=lambda d: (d.get("seq") or 0, d["id"]))
+        for d in fresh:
+            self._inbox_ids.add(d["id"])
+            await self._take_web_message(str(d["text"]))
+        for doc in items:
+            if not isinstance(doc, dict):
+                continue
+            # The label is stamped by the server from the passcode, not
+            # taken from the page, so this is the one check that cannot be
+            # spoofed from page code.
+            if doc.get("reviewer") != OWNER or doc.get("sid") != self.sid:
+                continue
+            kind = doc.get("doc")
+            if kind == "inbox" and not doc.get("id"):
+                # The pre-2026-09-28 page: one numbered list per tab.
+                for message in sorted(doc.get("msgs") or [], key=lambda m: m.get("seq", 0)):
+                    seq = int(message.get("seq", 0))
+                    if seq > self._inbox_seen and str(message.get("text", "")).strip():
+                        self._inbox_seen = seq
+                        await self._take_web_message(str(message["text"]))
+            elif kind == "approvals":
+                for rid, decision in (doc.get("decisions") or {}).items():
+                    pending = self._approvals.get(rid)
+                    if pending and not pending.future.done() and decision in {"allow", "always", "deny"}:
+                        pending.future.set_result(decision)
+            elif kind == "questions":
+                for rid, answered in (doc.get("answers") or {}).items():
+                    pending = self._questions_pending.get(rid)
+                    if not (pending and not pending.future.done()):
+                        continue
+                    # The page sends {question_text: label_or_text} directly,
+                    # or `None` on skip. Trust the shape; the tool validates.
+                    if answered in (None, {}):
+                        pending.future.set_result(None)
+                    elif isinstance(answered, dict):
+                        pending.future.set_result(answered)
+            elif kind == "control":
+                seq = int(doc.get("interrupt") or 0)
+                if seq > self._interrupt_seen:
+                    self._interrupt_seen = seq
+                    self.interrupt_requested.set()
+
     async def _poller(self) -> None:
         failures = 0
         while True:
@@ -582,48 +644,4 @@ class Control:
                 self.errors.append(f"poll: {outcome.error}")
                 continue
             failures = 0
-            for doc in outcome.items:
-                if not isinstance(doc, dict):
-                    continue
-                # The label is stamped by the server from the passcode, not
-                # taken from the page, so this is the one check that cannot be
-                # spoofed from page code.
-                if doc.get("reviewer") != OWNER or doc.get("sid") != self.sid:
-                    continue
-                kind = doc.get("doc")
-                if kind == "inbox":
-                    for message in sorted(doc.get("msgs") or [], key=lambda m: m.get("seq", 0)):
-                        seq = int(message.get("seq", 0))
-                        if seq > self._inbox_seen and str(message.get("text", "")).strip():
-                            self._inbox_seen = seq
-                            self._last_activity = time.monotonic()
-                            text = str(message["text"])
-                            # Echo it here rather than when the session gets
-                            # round to it: a message sent while a turn is
-                            # running sat as "sending…" on the page for as long
-                            # as the turn took, which reads as a lost message.
-                            self.user(text, "web")
-                            if self.waiting:
-                                self.status("queued — the session is busy with the previous turn")
-                            await self.messages.put(text)
-                elif kind == "approvals":
-                    for rid, decision in (doc.get("decisions") or {}).items():
-                        pending = self._approvals.get(rid)
-                        if pending and not pending.future.done() and decision in {"allow", "always", "deny"}:
-                            pending.future.set_result(decision)
-                elif kind == "questions":
-                    for rid, answered in (doc.get("answers") or {}).items():
-                        pending = self._questions_pending.get(rid)
-                        if not (pending and not pending.future.done()):
-                            continue
-                        # The page sends {question_text: label_or_text} directly,
-                        # or `None` on skip. Trust the shape; the tool validates.
-                        if answered in (None, {}):
-                            pending.future.set_result(None)
-                        elif isinstance(answered, dict):
-                            pending.future.set_result(answered)
-                elif kind == "control":
-                    seq = int(doc.get("interrupt") or 0)
-                    if seq > self._interrupt_seen:
-                        self._interrupt_seen = seq
-                        self.interrupt_requested.set()
+            await self._intake(outcome.items)

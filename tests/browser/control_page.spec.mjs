@@ -78,7 +78,7 @@ out.decidedText = await p.locator(".sc-decided").allTextContents();
 await p.fill("#sc-input", "ship it");
 await p.click("#sc-send");
 await p.waitForTimeout(200);
-out.inbox = await p.evaluate(() => window.__db.responses?.inbox?.msgs?.map((m) => m.text));
+out.inbox = await p.evaluate(() => Object.entries(window.__db.responses || {}).filter(([k]) => k.startsWith("inbox-")).map(([, d]) => d.text));
 out.pendingRows = await p.locator(".sc-pending").count();
 await p.evaluate((ev) => window.__push("content", "log-s1-0000", { sid: "s1", k: 0, events: [...ev, { i: 4, kind: "user", via: "web", text: "ship it" }] }), settled);
 await p.waitForTimeout(300);

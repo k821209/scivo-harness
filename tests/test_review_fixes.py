@@ -154,3 +154,27 @@ def test_the_shim_times_each_model_call_and_the_note_reads_them():
     assert shim.prefill_note([(0.4, 3.0), (1.1, 5.0), (0.5, 2.0)]) == "3 calls · first byte 0.4–1.1s"
     shim.STATS["http://x"] = [(0.3, 1.0)]
     assert shim.take_stats("http://x") == [(0.3, 1.0)] and shim.take_stats("http://x") == []
+
+
+def test_web_messages_are_one_doc_each_taken_in_clock_order_and_never_twice():
+    """msja, 2026-09-28: two tabs numbered from their own counters into ONE
+    inbox document, replacing it whole; the tab that was behind sent numbers
+    the session had passed — ignored, "sending…" forever."""
+    import asyncio
+    from scivo_harness.control import Control, OWNER
+    c = Control(config=None, project_name="p", project_id="pid", model="m", sid="s1")
+    c.user = lambda text, via: None
+    c.status = lambda text, level="info": None
+    docs = [
+        {"doc": "inbox", "id": "b", "seq": 200, "text": "second", "reviewer": OWNER, "sid": "s1"},
+        {"doc": "inbox", "id": "a", "seq": 100, "text": "first", "reviewer": OWNER, "sid": "s1"},
+        {"doc": "inbox", "id": "x", "seq": 150, "text": "other tab, other session", "reviewer": OWNER, "sid": "s0"},
+        {"doc": "inbox", "id": "y", "seq": 160, "text": "not the owner", "reviewer": "someone", "sid": "s1"},
+        {"doc": "inbox", "msgs": [{"seq": 1, "text": "legacy list"}], "reviewer": OWNER, "sid": "s1"},
+    ]
+    asyncio.run(c._intake(docs))
+    asyncio.run(c._intake(docs))   # the poller sees the same docs every round
+    got = []
+    while not c.messages.empty():
+        got.append(c.messages.get_nowait())
+    assert got == ["first", "second", "legacy list"]

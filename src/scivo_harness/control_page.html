@@ -325,10 +325,9 @@
     S.sid = head.sid; S.events = []; S.nodes.clear(); S.json.clear();
     log.innerHTML = "";
     S.seq = 0; S.msgs = []; S.interrupt = 0;
-    try {  // resume numbering if this tab reloads mid-session
+    try {  // resume the interrupt counter if this tab reloads mid-session
       for (const r of await C.list("responses")) {
         if (r.sid !== head.sid) continue;
-        if (r.doc === "inbox") { S.msgs = r.msgs || []; S.seq = S.msgs.reduce((m, x) => Math.max(m, x.seq || 0), 0); }
         if (r.doc === "control") S.interrupt = r.interrupt || 0;
       }
     } catch (_) {}
@@ -446,15 +445,21 @@
     const text = input.value.replace(/\s+$/, "");
     if (!text.trim() || !S.sid) return;
     input.value = ""; autosize(); hideMenu();
-    S.seq += 1;
-    S.msgs = [...S.msgs, { seq: S.seq, text, t: Date.now() }].slice(-30);
+    // One document per message, named by a random id. The inbox used to be
+    // ONE document holding this tab's numbered list, replaced whole on every
+    // send; a second tab (the dock and a phone, or a reload beside the old
+    // tab) numbered from its own counter, so the tab that was behind sent
+    // numbers the session had already passed — ignored, "sending…" forever —
+    // and each write wiped the other tab's messages from the document
+    // (msja, 2026-09-28). Now nothing is shared between tabs but the clock.
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
     // Shown at once; replaced by the session's own echo when it takes the message.
     const pending = document.createElement("div");
     pending.className = "sc-user sc-pending"; pending.dataset.text = text;
     const via = document.createElement("span"); via.className = "sc-via"; via.textContent = "you · web · sending…";
     pending.append(via, document.createTextNode(text));
     log.append(pending); log.scrollTop = log.scrollHeight;
-    try { await C.put("responses", "inbox", { doc: "inbox", sid: S.sid, msgs: S.msgs }); }
+    try { await C.put("responses", "inbox-" + id, { doc: "inbox", sid: S.sid, id, seq: Date.now(), text }); }
     catch (e) { pending.remove(); input.value = text; alert("Not sent: " + e.message); }
   }
   async function decide(rid, decision) {
