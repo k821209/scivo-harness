@@ -25,7 +25,7 @@ from typing import Any
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from . import ui
-from .interrupts import paused
+from .interrupts import echoing, paused
 from .session import scivo_tool_label
 
 # Tools whose effects leave this machine or cannot be undone from here. They are
@@ -150,8 +150,14 @@ class Approvals:
             hint = "numbers, comma-separated" if multi else "a number"
             ui.prompt_open += 1
             try:
-                reply = (await asyncio.to_thread(
-                    input, ui.cyan(f"  {hint}, your own words, or blank to skip: "))).strip()
+                # Echo is off for the whole session (cli wraps it in
+                # quiet_echo; the prompt line turns it on only while it
+                # reads), and paused() restores the terminal as the watcher
+                # found it — echo off. A one-letter y/N went unnoticed; an
+                # answer typed here was invisible (2026-09-29).
+                with echoing():
+                    reply = (await asyncio.to_thread(
+                        input, ui.cyan(f"  {hint}, your own words, or blank to skip: "))).strip()
             finally:
                 ui.prompt_open -= 1
             if not reply:
@@ -190,7 +196,8 @@ class Approvals:
         else:
             ui.prompt_open += 1
             try:
-                answer = (await asyncio.to_thread(input, ui.cyan("  allow anyway? y / [N] "))).strip().lower()
+                with echoing():
+                    answer = (await asyncio.to_thread(input, ui.cyan("  allow anyway? y / [N] "))).strip().lower()
             finally:
                 ui.prompt_open -= 1
         if answer in {"y", "yes", "allow"}:
@@ -223,7 +230,8 @@ class Approvals:
                 print(ui.dim(f"              {answer} (from the page)"))
             else:
                 options = "[y]es / [n]o" if outward else "[y]es / [a]lways / [n]o"
-                answer = (await asyncio.to_thread(input, ui.cyan(f"  {options}? "))).strip().lower()
+                with echoing():
+                    answer = (await asyncio.to_thread(input, ui.cyan(f"  {options}? "))).strip().lower()
         finally:
             ui.prompt_open -= 1
 

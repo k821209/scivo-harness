@@ -178,3 +178,21 @@ def test_web_messages_are_one_doc_each_taken_in_clock_order_and_never_twice():
     while not c.messages.empty():
         got.append(c.messages.get_nowait())
     assert got == ["first", "second", "legacy list"]
+
+
+def test_a_terminal_question_reads_its_answer_with_echo_on(monkeypatch):
+    """The session runs with echo off and paused() restores that; the free
+    text of a question was typed blind (2026-09-29)."""
+    import asyncio, builtins, contextlib
+    from scivo_harness import permissions
+    seen = []
+    @contextlib.contextmanager
+    def fake_echoing():
+        seen.append("on"); yield; seen.append("off")
+    monkeypatch.setattr(permissions, "echoing", fake_echoing)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": (seen.append("read"), "my own words")[1])
+    a = permissions.Approvals(); a.remote = None
+    payload = {"questions": [{"question": "Which?", "header": "h", "options": [{"label": "A", "description": ""}]}]}
+    out = asyncio.run(a("AskUserQuestion", payload, None))
+    assert seen == ["on", "read", "off"]
+    assert out.updated_input["answers"] == {"Which?": "my own words"}
