@@ -586,8 +586,15 @@ class Control:
         """Route what the page wrote: web messages, approvals, answers, Stop."""
         # One document per web message (page ≥ 2026-09-28), taken in clock
         # order and deduplicated by id, so two tabs never race a counter.
+        # `list_responses` stamps every row with `id` = its document id, so a
+        # legacy one-list inbox arrives as id="inbox" and looked like a new-
+        # style message with no text — dropped, and the page sat on
+        # "sending…" (수요조사, 2026-09-30: a tab still running the old page).
+        # The shape, not the id, tells the two apart: the old page writes
+        # `msgs`, the new one `text`/`images`.
         fresh = sorted(
             (d for d in items if isinstance(d, dict) and d.get("doc") == "inbox"
+             and "msgs" not in d
              and d.get("id") and d.get("reviewer") == OWNER and d.get("sid") == self.sid
              and d["id"] not in self._inbox_ids
              and (str(d.get("text", "")).strip() or d.get("images"))),
@@ -604,7 +611,7 @@ class Control:
             if doc.get("reviewer") != OWNER or doc.get("sid") != self.sid:
                 continue
             kind = doc.get("doc")
-            if kind == "inbox" and not doc.get("id"):
+            if kind == "inbox" and isinstance(doc.get("msgs"), list):
                 # The pre-2026-09-28 page: one numbered list per tab.
                 for message in sorted(doc.get("msgs") or [], key=lambda m: m.get("seq", 0)):
                     seq = int(message.get("seq", 0))

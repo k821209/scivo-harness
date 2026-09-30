@@ -170,7 +170,8 @@ def test_web_messages_are_one_doc_each_taken_in_clock_order_and_never_twice():
         {"doc": "inbox", "id": "a", "seq": 100, "text": "first", "reviewer": OWNER, "sid": "s1"},
         {"doc": "inbox", "id": "x", "seq": 150, "text": "other tab, other session", "reviewer": OWNER, "sid": "s0"},
         {"doc": "inbox", "id": "y", "seq": 160, "text": "not the owner", "reviewer": "someone", "sid": "s1"},
-        {"doc": "inbox", "msgs": [{"seq": 1, "text": "legacy list"}], "reviewer": OWNER, "sid": "s1"},
+        # as list_responses returns it: stamped with the DOCUMENT id, "inbox"
+        {"id": "inbox", "doc": "inbox", "msgs": [{"seq": "1", "text": "legacy list"}], "reviewer": OWNER, "sid": "s1"},
     ]
     asyncio.run(c._intake(docs))
     asyncio.run(c._intake(docs))   # the poller sees the same docs every round
