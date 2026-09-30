@@ -404,10 +404,13 @@ class Control:
         self._last_activity = time.monotonic()
         self._wake.set()
 
-    def user(self, text: str, via: str) -> None:
+    def user(self, text: str, via: str, images: list[str] | None = None) -> None:
         if self.active:
             self.end_assistant()
-            self._append({"kind": "user", "text": text, "via": via})
+            event: dict[str, Any] = {"kind": "user", "text": text, "via": via}
+            if images:
+                event["images"] = images     # data URLs, already small
+            self._append(event)
 
     def delta(self, text: str) -> None:
         if not self.active or not text:
@@ -559,15 +562,25 @@ class Control:
                     self.errors.append(f"head: {type(exc).__name__}: {exc}")
                 last_beat = time.monotonic()
 
-    async def _take_web_message(self, text: str) -> None:
+    async def _take_web_message(self, text: str, images: list[str] | None = None) -> None:
         self._last_activity = time.monotonic()
         # Echo it here rather than when the session gets round to it: a
         # message sent while a turn is running sat as "sending…" on the page
         # for as long as the turn took, which reads as a lost message.
-        self.user(text, "web")
+        urls = [u for u in (images or []) if isinstance(u, str) and u.startswith("data:image/")]
+        self.user(text, "web", urls or None)
         if self.waiting:
             self.status("queued — the session is busy with the previous turn")
-        await self.messages.put(text)
+        if not urls:
+            await self.messages.put(text)
+            return
+        from . import attachments
+        paths: list[Path] = []
+        for i, u in enumerate(urls):
+            decoded = attachments.decode_data_url(u)
+            if decoded:
+                paths.append(attachments.save_inbound(self.config.root, decoded[0], decoded[1], f"web{i}"))
+        await self.messages.put({"text": text, "images": paths})
 
     async def _intake(self, items: list) -> None:
         """Route what the page wrote: web messages, approvals, answers, Stop."""
@@ -576,11 +589,12 @@ class Control:
         fresh = sorted(
             (d for d in items if isinstance(d, dict) and d.get("doc") == "inbox"
              and d.get("id") and d.get("reviewer") == OWNER and d.get("sid") == self.sid
-             and d["id"] not in self._inbox_ids and str(d.get("text", "")).strip()),
+             and d["id"] not in self._inbox_ids
+             and (str(d.get("text", "")).strip() or d.get("images"))),
             key=lambda d: (d.get("seq") or 0, d["id"]))
         for d in fresh:
             self._inbox_ids.add(d["id"])
-            await self._take_web_message(str(d["text"]))
+            await self._take_web_message(str(d.get("text") or ""), d.get("images"))
         for doc in items:
             if not isinstance(doc, dict):
                 continue

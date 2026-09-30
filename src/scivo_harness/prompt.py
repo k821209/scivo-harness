@@ -62,6 +62,13 @@ information. One ping should equal one status read.
   asked. If an option is self-evident, pass `description: ""` — the empty
   string is fine, but the field must be there.
 
+## Images the user sends you
+
+A pasted or attached image arrives as an image block in the user's message,
+with its saved path named at the end (`[attached image: …/.scivo/inbox/…]`).
+You have already seen it — do not ask for it again; `Read` that path only
+if you need it after a compaction.
+
 ## Showing things, not just talking about them
 
 - **Show a local image by writing `![](/absolute/path.png)`** in your reply.

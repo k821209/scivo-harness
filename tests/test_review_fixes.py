@@ -163,7 +163,7 @@ def test_web_messages_are_one_doc_each_taken_in_clock_order_and_never_twice():
     import asyncio
     from scivo_harness.control import Control, OWNER
     c = Control(config=None, project_name="p", project_id="pid", model="m", sid="s1")
-    c.user = lambda text, via: None
+    c.user = lambda text, via, images=None: None
     c.status = lambda text, level="info": None
     docs = [
         {"doc": "inbox", "id": "b", "seq": 200, "text": "second", "reviewer": OWNER, "sid": "s1"},
@@ -218,3 +218,32 @@ def test_local_skill_edits_are_stashed_so_the_checkout_can_pull(tmp_path):
     assert update.shelve_skill_edits(repo) == ""
     (repo / "other.txt").write_text("changed\n")
     assert update.shelve_skill_edits(repo) == "" and (repo / "other.txt").read_text() == "changed\n"
+
+
+def test_images_ride_into_the_model_message_and_a_web_image_is_saved(tmp_path):
+    import asyncio, base64
+    from scivo_harness import attachments
+    from scivo_harness.control import Control, OWNER
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+    # decode / save / message
+    url = "data:image/png;base64," + base64.b64encode(png).decode()
+    data, mime = attachments.decode_data_url(url)
+    assert data == png and mime == "image/png"
+    path = attachments.save_inbound(tmp_path, data, mime, "t")
+    assert path.parent == tmp_path / ".scivo" / "inbox" and path.suffix == ".png"
+    msg = attachments.user_message("what is this", [path])
+    blocks = msg["message"]["content"]
+    assert blocks[0]["type"] == "image" and blocks[0]["source"]["media_type"] == "image/png"
+    assert blocks[-1]["type"] == "text" and str(path) in blocks[-1]["text"] and "what is this" in blocks[-1]["text"]
+    # a bare image path attaches; a sentence does not
+    assert attachments.image_path_in(f"  {path}  ") == path.resolve()
+    assert attachments.image_path_in("look at the picture") is None
+    # a web inbox doc with images: saved under the project, queued as a dict
+    class Cfg: root = tmp_path
+    c = Control(config=Cfg(), project_name="p", project_id="pid", model="m", sid="s1")
+    c.user = lambda text, via, images=None: None
+    c.status = lambda text, level="info": None
+    asyncio.run(c._intake([{"doc": "inbox", "id": "w1", "seq": 1, "text": "", "images": [url],
+                            "reviewer": OWNER, "sid": "s1"}]))
+    got = c.messages.get_nowait()
+    assert isinstance(got, dict) and got["images"][0].is_file() and got["text"] == ""

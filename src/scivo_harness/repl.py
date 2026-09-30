@@ -32,6 +32,7 @@ from .control import Control
 from .preflight import to_markdown
 from .failures import explain
 from .interrupts import KeyWatcher
+from . import attachments as _attachments
 from .prompt_line import Line
 from .permissions import is_outward
 from .session import Session, scivo_tool_label
@@ -58,6 +59,8 @@ LOCAL_COMMANDS = {
     "/dangerously-skip-permissions": "stop asking for anything (`off` to ask again); guardrails still apply",
     "/tools": "which scivo tools this profile loaded",
     "/context": "how much of the context window is in use, and what fills it",
+    "/paste": "attach the image on the clipboard to your next message",
+    "/img": "attach an image file to your next message: /img <path>  (a bare image path does too)",
     "/compact": "summarise the conversation so far and carry on with a shorter one",
     "/clear": "start a fresh conversation — the way out when the old one no longer fits",
     "/scivo-control": "drive this session from the scivo web page (`off` to stop)",
@@ -184,6 +187,7 @@ def cache_note(message: Any) -> str:
 
 class Repl:
     def __init__(self, session: Session) -> None:
+        self.attachments: list = []   # images queued for the next message (/paste, /img, web)
         self.session = session
         self.cost = 0.0
         self.turns = 0
@@ -454,6 +458,24 @@ class Repl:
 
     # -------------------------------------------------------- local commands
 
+    def _attach(self, command: str, argument: str) -> None:
+        """`/paste`, `/img <path>`, or a bare image path: queue an image for
+        the next message. Nothing is sent yet — type the message next."""
+        root = self.session.config.root
+        if command == "/paste":
+            got = _attachments.read_clipboard_image()
+            if not got:
+                self._say(ui.red(f"  no image on the clipboard ({_attachments.clipboard_tool_hint()})"))
+                return
+            path = _attachments.save_inbound(root, got[0], got[1], "clip")
+        else:
+            path = _attachments.image_path_in(argument)
+            if path is None:
+                self._say(ui.red(f"  not an image file: {argument or '(no path given)'}"))
+                return
+        self.attachments.append(path)
+        self._say(ui.dim(f"  attached {path.name} ({len(self.attachments)} pending) — now type the message"))
+
     def _local(self, line: str) -> bool:
         """True if the line was handled here and must not reach the model."""
         command = line.split()[0]
@@ -611,7 +633,13 @@ class Repl:
             if web in done:  # both at once: keep the web message for next time
                 await self.control.messages.put(web.result())
             return terminal.result(), "terminal"
-        text = web.result()
+        got = web.result()
+        if isinstance(got, dict):          # a web message with images attached
+            self.attachments.extend(got.get("images") or [])
+            text = got.get("text") or ""
+            print(f"{prompt}{text}  {ui.dim('[web · ' + str(len(got.get('images') or [])) + ' image(s)]')}")
+            return text or "(see the attached image)", "web"
+        text = got
         print(f"{prompt}{text}  {ui.dim('[web]')}")
         return text, "web"
 
@@ -847,7 +875,11 @@ class Repl:
 
     async def _turn(self, client: ClaudeSDKClient, line: str) -> None:
         self.session.rails.new_turn()
-        await client.query(line)
+        if self.attachments:
+            images, self.attachments = list(self.attachments), []
+            await client.query(_attachments.one(_attachments.user_message(line, images)))
+        else:
+            await client.query(line)
         watcher = None
         if self.control and self.control.active:
             self.control.interrupt_requested.clear()
@@ -1012,6 +1044,9 @@ class Repl:
                         continue
 
                     command, _, argument = line.partition(" ")
+                    if command in {"/paste", "/img"} or (via != "web" and _attachments.image_path_in(line)):
+                        self._attach(command, argument.strip() if command in {"/paste", "/img"} else line)
+                        continue
                     if command == "/scivo-control":
                         await self._control(argument.strip())
                         continue
