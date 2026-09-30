@@ -91,6 +91,13 @@ await p.waitForTimeout(150);
 out.menuVisible = await p.evaluate(() => !document.getElementById("sc-menu").hidden);
 out.menuFirst = await p.locator("#sc-menu b").first().textContent();
 await p.fill("#sc-input", "");
+// a command typed in full and Enter: sent, not autocompleted
+await p.fill("#sc-input", "/context");
+await p.waitForTimeout(100);
+await p.keyboard.press("Enter");
+await p.waitForTimeout(200);
+out.fullCommandSent = await p.evaluate(() => Object.entries(window.__db.responses || {}).filter(([k]) => k.startsWith("inbox-")).map(([, d]) => d.text).includes("/context"));
+out.inputAfterCommand = await p.evaluate(() => document.getElementById("sc-input").value);
 
 // 8. a failed approval write re-enables the buttons and says so
 await p.evaluate((ev) => window.__push("content", "log-s1-0000", { sid: "s1", k: 0, events: [...ev, { i: 5, kind: "approval", rid: "r2", tool: "Write", detail: "Write: /x", outward: true, state: "pending" }] }), settled);

@@ -557,7 +557,9 @@
       const row = document.createElement("div"); if (i === S.menuIndex) row.className = "on";
       const b = document.createElement("b"); b.textContent = c.name;
       const s = document.createElement("span"); s.textContent = c.help || "";
-      row.append(b, s); row.onmousedown = (e) => { e.preventDefault(); pick(c); };
+      // pointerdown, not mousedown: a tap on a phone reaches mousedown late
+      // or not at all once the textarea has lost focus.
+      row.append(b, s); row.onpointerdown = (e) => { e.preventDefault(); pick(c); };
       menu.append(row);
     });
     menu.hidden = false;
@@ -571,6 +573,13 @@
       const list = matches();
       if (e.key === "ArrowDown") { e.preventDefault(); S.menuIndex = (S.menuIndex + 1) % list.length; return showMenu(); }
       if (e.key === "ArrowUp") { e.preventDefault(); S.menuIndex = (S.menuIndex - 1 + list.length) % list.length; return showMenu(); }
+      // Enter on a command typed out in full SENDS it. It used to autocomplete
+      // — "/status⏎" left "/status " sitting in the box, and the second Enter
+      // nobody expected read as the slash commands not working (2026-09-30).
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing
+          && input.value.trim().toLowerCase() === list[S.menuIndex].name.toLowerCase()) {
+        e.preventDefault(); hideMenu(); return send();
+      }
       if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); return pick(list[S.menuIndex]); }
       // Without this the document handler below sees the same Escape once the
       // menu is closed, and closing the menu would also stop the turn.
