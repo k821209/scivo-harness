@@ -196,3 +196,25 @@ def test_a_terminal_question_reads_its_answer_with_echo_on(monkeypatch):
     out = asyncio.run(a("AskUserQuestion", payload, None))
     assert seen == ["on", "read", "off"]
     assert out.updated_input["answers"] == {"Which?": "my own words"}
+
+
+def test_local_skill_edits_are_stashed_so_the_checkout_can_pull(tmp_path):
+    """Skills are symlinked from the checkout into projects, so an agent's
+    "project copy" edit blocks every later git pull (2026-09-30)."""
+    import subprocess
+    from scivo_harness import update
+    repo = tmp_path / "clone"; skills = repo / update.SKILLS_DIR / "paper-writing"
+    skills.mkdir(parents=True)
+    g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, check=True)
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (skills / "SKILL.md").write_text("upstream\n"); (repo / "other.txt").write_text("x\n")
+    g("add", "-A"); g("commit", "-q", "-m", "base")
+    (skills / "SKILL.md").write_text("local rule\n")
+    note = update.shelve_skill_edits(repo)
+    assert "paper-writing" in note and "stash" in note
+    assert (skills / "SKILL.md").read_text() == "upstream\n"
+    assert "scivo update" in g("stash", "list").stdout
+    # nothing to stash → empty note; an edit outside skills is not touched
+    assert update.shelve_skill_edits(repo) == ""
+    (repo / "other.txt").write_text("changed\n")
+    assert update.shelve_skill_edits(repo) == "" and (repo / "other.txt").read_text() == "changed\n"

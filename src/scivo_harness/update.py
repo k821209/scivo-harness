@@ -336,10 +336,40 @@ def pull_checkout(checkout: Path) -> tuple[bool, str]:
     run.
     """
     before = _run(["git", "rev-parse", "--short", "HEAD"], cwd=str(checkout))[1]
+    stashed = shelve_skill_edits(checkout)
     code, output = _run(["git", "pull", "--ff-only"], cwd=str(checkout))
     if code != 0:
-        return False, f"git pull in {checkout} failed:\n{output}"
+        return False, f"git pull in {checkout} failed:\n{output}" + (f"\n{stashed}" if stashed else "")
     after = _run(["git", "rev-parse", "--short", "HEAD"], cwd=str(checkout))[1]
+    note = f"\n{stashed}" if stashed else ""
     if before == after:
-        return True, f"{checkout} already current ({after})"
-    return True, f"pulled {before} → {after}"
+        return True, f"{checkout} already current ({after}){note}"
+    return True, f"pulled {before} → {after}{note}"
+
+
+SKILLS_DIR = "apps/local-mcp/co_scientist_local/skills/"
+
+
+def shelve_skill_edits(checkout: Path) -> str:
+    """Stash local edits under the package's skills directory before a pull.
+
+    Skills are symlinked from the checkout into every project, so an agent
+    that "edits the project's copy of /paper-writing" edits the checkout —
+    and the next `git pull` refuses to overwrite it, for every project on the
+    machine (2026-09-30: a gene-miner session had added a rule locally, and
+    the upstream release carrying the same rule could not land). Those edits
+    are kept in a named stash, not dropped; edits outside the skills
+    directory are left alone and the pull fails as before, since they are
+    not ours to move."""
+    code, status = _run(["git", "status", "--porcelain", "--", SKILLS_DIR], cwd=str(checkout))
+    if code != 0 or not status.strip():
+        return ""
+    files = [line[3:] for line in status.splitlines() if line.strip()]
+    code, out = _run(["git", "stash", "push", "--include-untracked", "-m",
+                      "scivo update: local skill edits", "--", SKILLS_DIR], cwd=str(checkout))
+    if code != 0:
+        return f"could not stash local skill edits ({out[-200:]})"
+    return ("stashed local edits to " + ", ".join(Path(f).parent.name for f in files)
+            + " — skills belong to the package; put project-specific rules in the "
+            "project's CLAUDE.md or memory. `git stash list` / `git stash pop` in "
+            f"{checkout} to see or restore them")
