@@ -248,3 +248,12 @@ def test_images_ride_into_the_model_message_and_a_web_image_is_saved(tmp_path):
                             "reviewer": OWNER, "sid": "s1"}]))
     got = c.messages.get_nowait()
     assert isinstance(got, dict) and got["images"][0].is_file() and got["text"] == ""
+
+
+def test_relaunch_argv_keeps_flags_drops_session_choice_adds_resume_and_control():
+    from scivo_harness.cli import _relaunch_argv, _parser
+    argv = ["--profile", "video", "-c", "--model", "opus", "chat"]
+    out = _relaunch_argv(argv, "abc123", True)
+    assert out == ["--profile", "video", "--model", "opus", "--resume", "abc123", "--control"]
+    assert _relaunch_argv(["--resume", "old", "--control"], None, False) == ["-c"]
+    assert _parser().parse_args(out).control is True

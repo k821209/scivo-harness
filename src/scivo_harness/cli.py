@@ -87,6 +87,8 @@ def _parser() -> argparse.ArgumentParser:
                         help="resume a session: its number in `scivo sessions`, or the start of its id")
     parser.add_argument("-c", "--continue", dest="continue_last", action="store_true",
                         help="resume the most recent session in this project")
+    parser.add_argument("--control", action="store_true",
+                        help="turn the scivo-control web page on as the session starts")
 
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("chat", help="interactive session (default)")
@@ -683,8 +685,54 @@ async def _build_and_run(args, prompt_text: str | None) -> int:
 
     from .repl import Repl
 
-    await Repl(session).run()
+    repl = Repl(session, auto_control=bool(getattr(args, "control", False)))
+    await repl.run()
+    if repl.relaunch:
+        return _update_and_relaunch(args, repl.relaunch)
     return 0
+
+
+def _relaunch_argv(argv: list[str], resume: str | None, control: bool) -> list[str]:
+    """The flags this run was started with, minus any session choice, plus the
+    session to come back into and --control when the page was on."""
+    out: list[str] = []
+    skip = 0
+    for i, a in enumerate(argv):
+        if skip:
+            skip -= 1
+            continue
+        if a in ("-c", "--continue", "--control", "chat"):
+            continue
+        if a == "--resume":
+            skip = 1
+            continue
+        if a.startswith("--resume="):
+            continue
+        out.append(a)
+    out += ["--resume", resume] if resume else ["-c"]
+    if control:
+        out.append("--control")
+    return out
+
+
+def _update_and_relaunch(args, plan: dict) -> int:
+    """`/update`: run the update in the foreground, then replace this process
+    with a resume of the same session. exec, not a subprocess, so the new
+    package code is what runs — a Python process keeps the modules it
+    imported, and the point of updating is to stop running them."""
+    import os
+    import subprocess
+
+    cmd = [sys.executable, "-m", "scivo_harness", "update"] + (["--video"] if plan.get("video") else [])
+    print(ui.dim("  " + " ".join(cmd[2:])))
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        print(ui.red("  update failed — not relaunching; fix it and run `scivo -c` yourself"))
+        return rc
+    argv = _relaunch_argv(sys.argv[1:], plan.get("resume"), bool(plan.get("control")))
+    print(ui.dim("  scivo " + " ".join(argv)))
+    os.execv(sys.executable, [sys.executable, "-m", "scivo_harness", *argv])
+    return 0   # not reached
 
 
 def main(argv: list[str] | None = None) -> int:

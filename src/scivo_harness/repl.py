@@ -63,6 +63,7 @@ LOCAL_COMMANDS = {
     "/img": "attach an image file to your next message: /img <path>  (a bare image path does too)",
     "/compact": "summarise the conversation so far and carry on with a shorter one",
     "/clear": "start a fresh conversation — the way out when the old one no longer fits",
+    "/update": "leave, run `scivo update` (`/update video` includes vh), and come back into this session with the page on",
     "/scivo-control": "drive this session from the scivo web page (`off` to stop)",
     "/help": "this list",
 }
@@ -186,8 +187,12 @@ def cache_note(message: Any) -> str:
     return f"cache {_k(read)} read · {_k(new)} new"
 
 class Repl:
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, auto_control: bool = False) -> None:
         self.attachments: list = []   # images queued for the next message (/paste, /img, web)
+        # Set by /update: the CLI then runs the update and re-executes scivo
+        # into this same session, with the control page on if it was on.
+        self.relaunch: dict | None = None
+        self.auto_control = auto_control
         self.session = session
         self.cost = 0.0
         self.turns = 0
@@ -482,6 +487,16 @@ class Repl:
         if command not in LOCAL_COMMANDS:
             return False
         if command in {"/exit", "/quit"}:
+            raise EOFError
+        if command == "/update":
+            # Leaving, updating and coming back was four commands typed by
+            # hand — /exit, scivo update, scivo -c, /scivo-control — and the
+            # last one was forgotten as often as not (user, 2026-09-30).
+            self.relaunch = {"resume": self.session_id,
+                             "control": bool(self.control and self.control.active),
+                             "video": "video" in line.split()[1:]}
+            print(ui.dim("\n  leaving to update; this session resumes when it is done"
+                         + (" — with the control page back on" if self.relaunch["control"] else "") + "\n"))
             raise EOFError
         if command == "/help":
             print()
@@ -1031,6 +1046,8 @@ class Repl:
         self.client = ClaudeSDKClient(options=self.session.options)
         await self.client.connect()
         await self._start_pump()
+        if self.auto_control:
+            await self._control("")
         try:
             if True:
                 while True:
