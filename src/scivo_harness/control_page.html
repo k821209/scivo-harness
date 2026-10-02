@@ -85,6 +85,12 @@
   .sc-btn.danger { color: var(--err); }
   .sc-btn:disabled { opacity: .5; cursor: default; }
   .sc-decided { font-size: 13px; margin-top: 6px; font-weight: 600; }
+  /* The option that was picked stays visibly picked while the rest of the
+     card is still being answered and until the harness reflects the answer:
+     with every button greyed the same, the pick was invisible (2026-10-02). */
+  .sc-btn.chosen { background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); opacity: 1 !important; }
+  .sc-question.answered .sc-btn:not(.chosen) { opacity: .35; }
   .sc-foot { border-top: 1px solid var(--line); padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); position: relative; }
   .sc-row { display: flex; gap: 8px; align-items: flex-end; }
   .sc-input { flex: 1; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
@@ -252,18 +258,18 @@
           const b = document.createElement("button"); b.className = "sc-btn primary";
           b.textContent = o.label + (o.description ? "  — " + o.description : "");
           b.style.whiteSpace = "normal"; b.style.textAlign = "left";
-          b.onclick = () => submitQuestionAnswer(ev, qi, o.label);
+          b.onclick = () => { markChosen(box, b, o.label); submitQuestionAnswer(ev, qi, o.label, box); };
           row.append(b);
         });
         const input = document.createElement("input"); input.type = "text";
         input.className = "sc-question-text"; input.placeholder = "or type your own answer, then Enter";
         input.style.marginTop = "6px"; input.style.width = "100%";
         input.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" && input.value.trim()) { e.preventDefault(); submitQuestionAnswer(ev, qi, input.value.trim()); }
+          if (e.key === "Enter" && input.value.trim()) { e.preventDefault(); markChosen(box, null, input.value.trim()); submitQuestionAnswer(ev, qi, input.value.trim(), box); }
         });
         const skip = document.createElement("button"); skip.className = "sc-btn danger";
         skip.textContent = "skip this question";
-        skip.onclick = () => submitQuestionAnswer(ev, qi, null);
+        skip.onclick = () => { markChosen(box, skip, "skipped"); submitQuestionAnswer(ev, qi, null, box); };
         box.append(row, input, skip);
       } else if (ev.answers && ev.answers[q.question] !== undefined) {
         const s2 = document.createElement("div"); s2.className = "sc-decided";
@@ -278,14 +284,22 @@
   // has an answer (or was skipped), the whole set is submitted so the harness
   // can hand the model one answers object.
   const questionDrafts = new Map();  // rid -> { [question_text]: label_or_text_or_null }
-  function submitQuestionAnswer(ev, qi, value) {
+  function markChosen(box, button, label) {
+    box.classList.add("answered");
+    box.querySelectorAll("button, input").forEach((el) => { el.disabled = true; });
+    if (button) { button.classList.add("chosen"); button.textContent = "✓ " + button.textContent.replace(/^✓ /, ""); }
+    const line = document.createElement("div"); line.className = "sc-decided";
+    line.textContent = "✓ " + label + (button ? "" : " (your own words)");
+    box.append(line);
+  }
+  function submitQuestionAnswer(ev, qi, value, box) {
     const q = ev.questions[qi];
     if (!questionDrafts.has(ev.rid)) questionDrafts.set(ev.rid, {});
     const draft = questionDrafts.get(ev.rid);
     draft[q.question] = value;
-    // Grey out this question row's buttons and input.
-    const rows = Array.from(document.querySelectorAll(".sc-question"));
-    if (rows[qi]) rows[qi].style.opacity = "0.5";
+    // Only this card's rows: querying the whole log picked rows of an
+    // earlier question card when two were on the page.
+    const rows = box ? [box] : [];
     // When every question is answered or skipped, push.
     if (ev.questions.every((qq) => draft[qq.question] !== undefined)) {
       const answers = {};
@@ -295,7 +309,7 @@
         .catch((e) => {
           // Same as a failed approval: the row must come back, or the harness
           // waits on an answer nobody can give.
-          rows.forEach((r) => (r.style.opacity = ""));
+          rows.forEach((r) => { r.classList.remove("answered"); r.querySelectorAll("button, input").forEach((el) => { el.disabled = false; el.classList.remove("chosen"); }); r.querySelectorAll(".sc-decided").forEach((d) => d.remove()); });
           questionDrafts.set(ev.rid, draft);
           alert("Not sent: " + e.message);
         });
