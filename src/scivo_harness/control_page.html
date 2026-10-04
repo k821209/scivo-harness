@@ -328,7 +328,14 @@
         if (echo) echo.remove();
       }
       const fresh = nodeFor(ev), old = S.nodes.get(key);
-      if (old) old.replaceWith(fresh); else log.append(fresh);
+      if (old) old.replaceWith(fresh);
+      else {
+        // In event order: an earlier chunk loaded on request lands above
+        // what is already drawn, not under it.
+        let next = null;
+        for (const [k, n] of S.nodes) if (k > key && (!next || k < next[0])) next = [k, n];
+        if (next) log.insertBefore(fresh, next[1]); else log.append(fresh);
+      }
       S.nodes.set(key, fresh); S.json.set(key, json);
     }
     if (stick) log.scrollTop = log.scrollHeight;
@@ -345,8 +352,8 @@
   async function resetFor(head) {
     for (const un of chunkSubs.values()) { try { un(); } catch (_) {} }
     chunkSubs.clear();
-    S.sid = head.sid; S.events = []; S.nodes.clear(); S.json.clear();
-    log.innerHTML = "";
+    S.sid = head.sid; S.events = []; S.nodes.clear(); S.json.clear(); S.oldest = undefined;
+    log.innerHTML = ""; log.prepend(earlier); earlier.hidden = true;
     S.seq = 0; S.msgs = []; S.interrupt = 0;
     try {  // resume the interrupt counter if this tab reloads mid-session
       for (const r of await C.list("responses")) {
@@ -370,10 +377,38 @@
 
   function chunkId(sid, k) { return `log-${sid}-${String(k).padStart(4, "0")}`; }
 
-  function mergeChunk(doc) {
+  function mergeChunk(doc, draw = true) {
     for (const ev of (doc && doc.events) || []) S.events[ev.i] = ev;
-    render(S.events.filter(Boolean));
+    if (draw) render(S.events.filter(Boolean));
   }
+
+  // Only the newest chunks are read on open. A long session (785 events,
+  // 42 chunks) was fetched and rendered in full — forty listeners and
+  // hundreds of markdown renders before the first message showed, on a
+  // phone (2026-10-04). Settled chunks never change, so the earlier ones
+  // are fetched once, on request, in batches.
+  const RECENT_CHUNKS = 2, EARLIER_BATCH = 5;
+  const earlier = document.createElement("button");
+  earlier.type = "button"; earlier.className = "sc-btn"; earlier.id = "sc-earlier"; earlier.hidden = true;
+  earlier.style.alignSelf = "center"; earlier.style.fontSize = "12px";
+  earlier.textContent = "earlier messages";
+  log.prepend(earlier);
+  async function loadEarlier() {
+    if (!S.sid || !(S.oldest > 0)) return;
+    earlier.disabled = true; earlier.textContent = "loading…";
+    const from = Math.max(0, S.oldest - EARLIER_BATCH);
+    const before = log.scrollHeight;
+    try {
+      const docs = await Promise.all(Array.from({ length: S.oldest - from }, (_, j) => C.get("content", chunkId(S.sid, from + j))));
+      docs.forEach((d) => mergeChunk(d, false));
+      render(S.events.filter(Boolean));
+      S.oldest = from;
+      log.scrollTop += log.scrollHeight - before;     // keep the eye where it was
+    } catch (e) { setDot("stale", e.message); }
+    earlier.disabled = false; earlier.textContent = "earlier messages";
+    earlier.hidden = S.oldest === 0;
+  }
+  earlier.onclick = loadEarlier;
 
   function listenChunk(sid, k) {
     if (chunkSubs.has(k)) return;
@@ -402,7 +437,10 @@
     const to = Math.floor(Math.max(0, total - 1) / chunk);
     if (LIVE) {
       S.head = head;
-      for (let k = 0; k <= to + 1; k++) listenChunk(head.sid, k);
+      const start = Math.max(0, to - RECENT_CHUNKS + 1);
+      if (S.oldest === undefined || S.oldest > start) S.oldest = start;
+      for (let k = Math.min(S.oldest, start); k <= to + 1; k++) listenChunk(head.sid, k);
+      earlier.hidden = !(S.oldest > 0);
       return;
     }
     if (S.head && S.head.rev === head.rev && S.head.sid === head.sid) return;
