@@ -82,6 +82,7 @@ def test_a_local_model_gets_the_short_guide_and_a_claude_session_the_full_one():
     lean = prompt.build(Briefing(), plan, guide=None)
     full = prompt.build(Briefing(), plan, guide="# THE GUIDE")
     assert "short form" in lean and "add_reference_by_doi" in lean and "THE GUIDE" not in lean
+    assert "empty result is an answer" in lean
     assert "THE GUIDE" in full and "short form" not in full
     assert len(prompt.LOCAL_GUIDE) < 3000   # ~600 tokens: the point of it
 

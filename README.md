@@ -403,6 +403,14 @@ turn line says `7 calls · first byte 0.4–1.1s`: a first byte under a second
 on every call means the prefix was reused; one that takes as long as reading
 the prompt means it was not. `/model opus` restores everything.
 
+## Known limitations of a local model
+
+- **Empty results get retried.** A Qwen session that gets `[]` from a lookup
+  tends to call it again with the query rephrased, several times, until the
+  repeat-call breaker stops it; Claude reads the empty result as "not there".
+  The short-form guide now says an empty result is an answer; the breaker is
+  the backstop. (2026-10-07)
+
 ## Design notes
 
 - **Start from the host's prompt, not from scratch.** The system prompt is

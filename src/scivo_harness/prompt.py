@@ -140,6 +140,10 @@ LOCAL_GUIDE = """
 - Write non-English prose natively — never English then translated.
 - Do not invent numbers, DOIs, file paths or tool results. If a tool
   errored, say so with the error text.
+- **An empty result is an answer.** `[]`, `null`, "no rows", "not found"
+  mean the thing is not there. Do not call the same tool again with the
+  words rearranged — a second empty answer carries no new information and
+  the harness blocks the repeat anyway. Say what was not found and go on.
 """.strip()
 
 
