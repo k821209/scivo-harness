@@ -553,6 +553,62 @@ git URL whose version did not change reads as "already satisfied". So it runs
 version, the `git_sha` from a fresh server process, and the commit pip recorded.
 pip's own output is not evidence that anything moved.
 
+## A second backend (Codex) — parked, measured
+
+Not started. Written down because it will probably be wanted, and because the
+numbers are easy to get wrong from the outside (2026-10-09).
+
+**What this harness borrows today.** The Claude Agent SDK bundles the `claude`
+binary, spawns it and drives it, so everything Claude Code is comes along: the
+agent loop, the built-in tools, permissions, hooks, the MCP client, skills,
+subagents, session storage, compaction. This harness adds the Scivo MCP server,
+per-profile toolsets and orders, hook-based guardrails, the approval callback,
+attachments, setup/update, and the web chat at `/scivo-control`.
+
+**The OpenAI equivalent exists and is the same move.** `@openai/codex-sdk`
+(TypeScript) and a Python SDK in `openai/codex` spawn the codex CLI and exchange
+JSONL events over stdin/stdout; threads persist in `~/.codex/sessions` and resume.
+So Codex's harness is lent out the way Claude Code's is.
+
+**But the layers do not line up one-to-one:**
+
+| what this harness uses | Claude | OpenAI |
+|---|---|---|
+| the whole harness | Agent SDK | Codex SDK |
+| per-call approve/deny | `can_use_tool` | app-server JSON-RPC (`execCommandApproval`, `applyPatchApproval`) |
+| policy hooks | `hooks` | none — sandbox mode + approval policy instead |
+| skills | `skills="all"` | none — `AGENTS.md` only |
+
+The Codex SDK's first-class options are `workingDirectory`, `env`, `baseUrl`,
+`outputSchema`, `skipGitRepoCheck` and `config`/`configOverrides` (raw TOML).
+Sandbox, approval policy, model and MCP servers all arrive as config, and there
+is no per-tool-call callback and no hook protocol. Keeping the approval
+experience this harness has means speaking app-server directly, not the SDK.
+
+**Why it is not a `--provider` flag.** That axis is Anthropic-protocol only: a
+local model works because it answers the Anthropic Messages API at
+`ANTHROPIC_BASE_URL`, and even then `shim.py` exists for chat templates that
+reject mid-conversation system messages. Codex is a different protocol, so it is
+a second backend, not another endpoint.
+
+**Measured coupling.** 75 lines across 7 of 24 modules touch SDK types:
+`repl.py` 40 (of 1,106), `permissions.py` 16, `session.py` 7, `guardrails.py` 5,
+`cli.py` 3, `sessions.py` 2, `failures.py` 2. The other 18 modules — the control
+page, update, preflight, setup, shim, prompt/orders, interrupts, toolsets, the
+MCP server, attachments — do not import the SDK and would be reused as they are.
+
+**The cheap preparation, if this is ever picked up.** The cost is not the port,
+it is the extraction: `repl.py` holds the loop, the rendering and the SDK's
+message types together. Define an internal event model (text, thinking,
+tool_use, tool_result, result, usage) and move rendering onto it; a Codex
+adapter then becomes additive instead of a rewrite, and `repl.py` gets easier to
+read whether or not the adapter is ever written.
+
+**Worth knowing before deciding.** A Codex user does not need this harness to
+use Scivo: the MCP server is vendor-neutral and the Codex path shipped in
+September 2026 (`mcp__scivo__*` tools, `AGENTS.md` for context). Branching the
+harness buys them the control page, the orders and the approval UI — not access.
+
 ## Not done yet
 
 - Streaming is block-level on the fallback path; partial deltas are used when
