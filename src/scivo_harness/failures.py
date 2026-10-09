@@ -32,15 +32,25 @@ def explain(error: Exception) -> str | None:
     text = str(error).lower()
 
     if any(marker in text for marker in AUTH_MARKERS):
+        # Name the binary that exists on THIS machine rather than a command
+        # that may not resolve: `claude` when it is on PATH, the SDK's bundled
+        # copy otherwise. The old text said `scivo login` for everyone, which
+        # was safe but told a user with Claude Code installed to learn a second
+        # name for the same thing (user, 2026-10-09).
+        # The two spellings are not interchangeable: `claude auth login` vs
+        # `scivo login`. Pick by what resolves here.
+        login = "claude auth login" if shutil.which("claude") else "scivo login"
         return (
             "Not signed in.\n\n"
-            "  scivo login              (a Claude subscription)\n"
-            "  scivo login --console    (Anthropic Console, API billing)\n\n"
+            f"  {login}              (a Claude subscription)\n"
+            f"  {login} --console    (Anthropic Console, API billing)\n\n"
             "scivo does not handle sign-in: it supplies no credentials of its own and "
             "stores none. Signing in happens in Claude Code itself, which is where "
             "Anthropic requires it to happen.\n"
             "Already signed in? An ANTHROPIC_API_KEY in your environment takes "
             "precedence over that login — check with `scivo doctor`.\n"
+            "No `claude` on PATH? `scivo login` runs the copy bundled in the Agent "
+            "SDK; `scivo doctor` prints the path it resolves.\n"
             "Using a local model instead? `scivo --provider <name>`."
         )
 

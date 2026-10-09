@@ -502,16 +502,17 @@ scivo never handles credentials. It stores none and sets none, and Claude Code
 resolves them the way it does when run by hand. Pick one:
 
 ```bash
-scivo login               # a Claude subscription (Pro, Max, Team) — opens Claude's own sign-in
-scivo login --console     # an Anthropic Console account, billed by API usage
+claude auth login               # a Claude subscription (Pro, Max, Team)
+claude auth login --console     # an Anthropic Console account, billed by API usage
 export ANTHROPIC_API_KEY=sk-ant-…   # or an API key in the environment
 ```
 
-`scivo login` runs Claude Code's own `auth login`, which is where Anthropic
-requires sign-in to happen. The command exists because an install of scivo
-alone has Claude Code bundled inside the Agent SDK and no `claude` on PATH, so
-"run `claude auth login`" was an instruction a new user could not follow.
-`scivo logout` signs out. `scivo doctor` shows whether you are signed in. An
+Sign-in happens in Claude Code, which is where Anthropic requires it to
+happen, and scivo reads whatever Claude Code stored. If `claude` is not on
+your PATH — an install of scivo alone has Claude Code bundled inside the Agent
+SDK and nothing on PATH — `scivo login` is the same command run against that
+bundled binary, and `scivo doctor` prints the path it resolves. `claude auth
+logout` (or `scivo logout`) signs out. `scivo doctor` shows whether you are signed in. An
 `ANTHROPIC_API_KEY` in the environment wins over a stored login (Claude Code's
 default; a key present is read as explicit consent to be billed there), and
 `doctor` says so when both are set. Pass `scivo --subscription` for a single

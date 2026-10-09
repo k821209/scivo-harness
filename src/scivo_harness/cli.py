@@ -568,8 +568,10 @@ def _login_state() -> str:
         state = json.loads(result.stdout)
     except Exception as exc:  # noqa: BLE001
         return f"unknown ({type(exc).__name__})"
+    import shutil
     text = (f"signed in ({state.get('authMethod')})" if state.get("loggedIn")
-            else "not signed in — scivo login")
+            else ("not signed in — claude auth login" if shutil.which("claude")
+                  else "not signed in — scivo login"))
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         # auth status reports the stored login even when an API key in the
         # environment is what will actually be used.
