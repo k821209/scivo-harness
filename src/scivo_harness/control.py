@@ -212,6 +212,36 @@ def page_html() -> str:
     return resources.files("scivo_harness").joinpath("control_page.html").read_text(encoding="utf-8")
 
 
+def merge_web_messages(items: list) -> Any:
+    """Fold everything the page sent while a turn was running into one message.
+
+    The queue hands out one message per prompt, so a second line typed while
+    the session was busy waited for the turn AFTER the one it was queued for —
+    and the second line is usually the correction to the first ("아니지 …")
+    (user, 2026-10-10). Sent together, they read as what they are: one thought,
+    revised.
+
+    Text joins with a blank line between sends; images accumulate. A single
+    item is returned unchanged, so the common path is untouched.
+    """
+    if len(items) <= 1:
+        return items[0] if items else ""
+    texts: list[str] = []
+    images: list = []
+    for item in items:
+        if isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+            images.extend(item.get("images") or [])
+        else:
+            text = str(item or "").strip()
+        if text:
+            texts.append(text)
+    joined = "\n\n".join(texts)
+    if images:
+        return {"text": joined, "images": images}
+    return joined
+
+
 def _rejects_since_seq(error: Any) -> bool:
     """Did this failure come from the server not knowing the argument?"""
     text = str(error or "").lower()

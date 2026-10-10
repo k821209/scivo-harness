@@ -403,6 +403,15 @@ turn line says `7 calls · first byte 0.4–1.1s`: a first byte under a second
 on every call means the prefix was reused; one that takes as long as reading
 the prompt means it was not. `/model opus` restores everything.
 
+## Messages sent while a turn is running
+
+The page accepts them and marks them "queued — the session is busy with the
+previous turn". Everything queued goes in TOGETHER on the next prompt, joined
+by a blank line, with any images accumulated. One message per turn was the old
+behaviour, which meant a second line waited for the turn after the one it was
+queued for — and the second line is usually the correction to the first
+("아니지 …"), so it arrived a turn too late to be one (user, 2026-10-10).
+
 ## Images in the web view
 
 An image pasted or produced in a session is inlined into the transcript as

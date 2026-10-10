@@ -28,7 +28,7 @@ from claude_agent_sdk import (
 
 from . import guardrails, ui
 from .pump import MessagePump, PumpClosed
-from .control import Control
+from .control import Control, merge_web_messages
 from .preflight import to_markdown
 from .failures import explain
 from .interrupts import KeyWatcher
@@ -649,6 +649,20 @@ class Repl:
                 await self.control.messages.put(web.result())
             return terminal.result(), "terminal"
         got = web.result()
+        # Anything else already queued goes in with it: the page may have
+        # taken several lines while the previous turn ran, and the later ones
+        # are usually the correction to the first. Only what is waiting RIGHT
+        # NOW — this never blocks for more.
+        queued = [got]
+        while True:
+            try:
+                queued.append(self.control.messages.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        if len(queued) > 1:
+            got = merge_web_messages(queued)
+            print(ui.dim(f"  [{len(queued)} web messages sent while the last turn ran, "
+                         "taken together]"))
         if isinstance(got, dict):          # a web message with images attached
             self.attachments.extend(got.get("images") or [])
             text = got.get("text") or ""

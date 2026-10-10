@@ -182,3 +182,41 @@ def test_an_svg_is_passed_through_untouched():
     svg = b"<svg xmlns='http://www.w3.org/2000/svg'><circle r='9'/></svg>"
     out, mime, note = _control._shrink_for_web(svg, "image/svg+xml", ".svg")
     assert (out, mime, note) == (svg, "image/svg+xml", None)
+
+
+# ── messages sent while a turn is running ────────────────────────────────────
+# The queue hands out one message per prompt, so a line typed while the session
+# was busy waited for the turn AFTER the one it was queued for. The second line
+# is usually the correction to the first (user, 2026-10-10):
+#   "한계일수도 있어 … 배경이 움직이는 영상은 아니엇거든."   queued
+#   "아니지 배경은 움직이는데, 위치가 바뀌는건 아니엇음."      queued
+
+from scivo_harness.control import merge_web_messages   # noqa: E402
+
+
+def test_two_queued_lines_arrive_as_one_message():
+    first = "한계일수도 있어 아까 줬던 프롬프트들은 배경이 움직이는 영상은 아니엇거든."
+    second = "아니지 배경은 움직이는데, 위치가 바뀌는건 아니엇음."
+    got = merge_web_messages([first, second])
+    assert got == f"{first}\n\n{second}"
+
+
+def test_one_message_is_handed_back_untouched():
+    assert merge_web_messages(["only this"]) == "only this"
+    one = {"text": "with a picture", "images": ["/tmp/a.png"]}
+    assert merge_web_messages([one]) is one
+    assert merge_web_messages([]) == ""
+
+
+def test_images_accumulate_across_the_merged_messages():
+    got = merge_web_messages([
+        {"text": "look at this", "images": ["/tmp/a.png"]},
+        "and compare it to the earlier one",
+        {"text": "", "images": ["/tmp/b.png"]},
+    ])
+    assert got["images"] == ["/tmp/a.png", "/tmp/b.png"]
+    assert got["text"] == "look at this\n\nand compare it to the earlier one"
+
+
+def test_an_empty_line_does_not_leave_a_gap():
+    assert merge_web_messages(["first", "   ", "second"]) == "first\n\nsecond"
