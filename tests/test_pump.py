@@ -76,3 +76,29 @@ def test_a_display_failure_does_not_kill_the_reader():
         assert calls == ["a", "b"] and pump.alive
         await pump.stop()
     asyncio.run(main())
+
+
+# ── polling asks only for what is new ────────────────────────────────────────
+
+from scivo_harness import control as _control   # noqa: E402
+
+
+def test_an_older_mcp_is_detected_from_its_own_error():
+    """Every scivo tool refuses arguments it does not know, so a server
+    predating `since_seq` fails the whole poll. The fallback has to recognise
+    that one failure and no other."""
+    rejects = _control._rejects_since_seq
+    for error in (
+        "Input validation error: since_seq: Unexpected keyword argument",
+        "ValidationError: extra fields not permitted (since_seq)",
+        "unknown argument 'since_seq'",
+    ):
+        assert rejects(error), error
+    for error in (
+        "connection reset by peer",
+        "publication not found",
+        "",
+        None,
+        "timed out waiting for since_seq results",   # mentions it, not a rejection
+    ):
+        assert not rejects(error), error

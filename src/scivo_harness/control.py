@@ -167,6 +167,14 @@ def page_html() -> str:
     return resources.files("scivo_harness").joinpath("control_page.html").read_text(encoding="utf-8")
 
 
+def _rejects_since_seq(error: Any) -> bool:
+    """Did this failure come from the server not knowing the argument?"""
+    text = str(error or "").lower()
+    return "since_seq" in text and any(
+        marker in text for marker in
+        ("unexpected", "unknown", "extra", "not permitted", "validation", "invalid"))
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -222,6 +230,18 @@ class Control:
     _questions_pending: dict[str, _Question] = field(default_factory=dict)
     _inbox_seen: int = 0
     _inbox_ids: set = field(default_factory=set)
+    # The highest `seq` already taken in. Sent with every poll so the server
+    # returns the documents it rewrites in place plus only NEW messages: this
+    # poll used to fetch every message of the session, twice a second, to
+    # discover nothing — 99 documents a tick on a long-running session, and
+    # 98% of the project's Firestore bill (user, 2026-10-10). The conversation
+    # is not in those documents; they are a delivery queue and this side
+    # already holds what it has taken in.
+    _inbox_watermark: int = 0
+    # Every scivo tool refuses arguments it does not know, so an MCP older
+    # than `since_seq` would fail EVERY poll and the inbox would go silent.
+    # Detected once, from the first failure, and never sent again.
+    _since_seq_supported: bool = True
     _interrupt_seen: int = 0
     _started: int = 0
     # Set by the REPL: True while a turn is running, so a message arriving now
@@ -249,6 +269,8 @@ class Control:
         self._assistant = None
         self._inbox_seen = 0
         self._inbox_ids = set()
+        self._inbox_watermark = 0
+        self._since_seq_supported = True
         self._interrupt_seen = 0
         self.interrupt_requested.clear()
         await self._write_head(state="live")
@@ -602,6 +624,15 @@ class Control:
         for d in fresh:
             self._inbox_ids.add(d["id"])
             await self._take_web_message(str(d.get("text") or ""), d.get("images"))
+        # Raised from every inbox doc this tick, taken in or not — a message
+        # skipped for being another session's, or empty, must not be fetched
+        # again for the rest of the session.
+        for d in items:
+            if isinstance(d, dict) and d.get("doc") == "inbox":
+                try:
+                    self._inbox_watermark = max(self._inbox_watermark, int(d.get("seq") or 0))
+                except (TypeError, ValueError):
+                    pass
         for doc in items:
             if not isinstance(doc, dict):
                 continue
@@ -652,7 +683,20 @@ class Control:
             # while messages, approvals and Stop were ignored for the rest of
             # the session and a pending approval deadlocked every later prompt.
             try:
-                outcome = await self._call("list_responses", pub_id=self.link.pub_id)
+                if self._since_seq_supported:
+                    outcome = await self._call("list_responses", pub_id=self.link.pub_id,
+                                               since_seq=self._inbox_watermark)
+                    if not outcome.ok and _rejects_since_seq(outcome.error):
+                        # An older MCP: fall back for the rest of the session
+                        # rather than let the inbox go silent. Polling is then
+                        # as expensive as it was before, and still correct.
+                        self._since_seq_supported = False
+                        self.errors.append(
+                            "list_responses has no since_seq (MCP predates 2026-10-10) — "
+                            "polling falls back to reading the whole inbox")
+                        outcome = await self._call("list_responses", pub_id=self.link.pub_id)
+                else:
+                    outcome = await self._call("list_responses", pub_id=self.link.pub_id)
             except Exception as exc:  # noqa: BLE001
                 failures += 1
                 self.errors.append(f"poll: {type(exc).__name__}: {exc}")
