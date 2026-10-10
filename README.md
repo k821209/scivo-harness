@@ -405,6 +405,16 @@ the prompt means it was not. `/model opus` restores everything.
 
 ## Known limitations of a local model
 
+- **A failing command gets retried forever.** A Qwen session spent ten hours on
+  `ssh node2 'docker cp …'` every 7.8 seconds — 949 SSH connections into
+  another machine on the LAN in three hours, each failing with the same
+  message — and nothing stopped it: Bash is never denied by the repeat rule,
+  and that rule's counters are cleared every turn, so a loop that retries once
+  per turn never reaches the limit. Identical failures are now counted across
+  turns in a 15-minute window, and the fourth attempt is denied with the error
+  text. A failure that CHANGES is progress and resets nothing; a success clears
+  the count; an interrupt is not a failure. (2026-10-10)
+
 - **Empty results get retried.** A Qwen session that gets `[]` from a lookup
   tends to call it again with the query rephrased, several times, until the
   repeat-call breaker stops it; Claude reads the empty result as "not there".

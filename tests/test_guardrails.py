@@ -121,3 +121,107 @@ def test_hardware_in_memory_is_a_deny_not_an_ask():
         {"tool_name": "mcp__scivo__append_project_memory",
          "tool_input": {"note": "the B200 box at 10.0.0.7 has 96 cores"}}, None, None))
     assert out and "Blocked" in str(out)
+
+
+# ── a command that keeps failing the same way ────────────────────────────────
+# A local model spent ten hours on `ssh node2 'docker cp …'` every 7.8 s, each
+# run failing with the same message, and nothing stopped it: Bash is never
+# denied and the per-turn counters are cleared between turns (user,
+# 2026-10-10). These tests are that incident, and the cases the rule must not
+# break.
+
+
+def _bash_call(cmd: str) -> dict:
+    return {"tool_name": "Bash", "tool_input": {"command": cmd}}
+
+
+LOOP = ("ssh node2 'docker cp comfyui-h3:/opt/ComfyUI/input/krea_bus_girl_v3.png "
+        "/tmp/probe_bus_v3.png'")
+SAME_ERR = ("Exit code 1 cp: '/tmp/probe_bus_v3.png'와(과) '/tmp/probe_bus_v3.png'은(는) "
+            "동일한 파일입니다")
+
+
+async def _pre(rails, payload):
+    return await rails.on_any_tool(payload, None, None)
+
+
+async def _fail(rails, payload, error):
+    return await rails.on_tool_failure({**payload, "error": error}, None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_fails_the_same_way_is_stopped_on_the_fourth_try():
+    rails = guardrails.Guardrails()
+    for _ in range(3):
+        assert await _pre(rails, _bash_call(LOOP)) == {}       # allowed to try
+        await _fail(rails, _bash_call(LOOP), SAME_ERR)
+        rails.new_turn()                                   # one retry per turn
+    out = await _pre(rails, _bash_call(LOOP))
+    decision = out["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert "failed 3 times with the same error" in decision["permissionDecisionReason"]
+    assert "동일한 파일" in decision["permissionDecisionReason"]
+    assert rails.looping == "Bash"
+
+
+@pytest.mark.asyncio
+async def test_a_failure_that_changes_is_progress_not_a_loop():
+    rails = guardrails.Guardrails()
+    for err in ("No such file", "Permission denied", "Connection refused", "Host unreachable"):
+        await _fail(rails, _bash_call(LOOP), err)
+        rails.new_turn()
+    assert await _pre(rails, _bash_call(LOOP)) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_success_clears_the_strikes():
+    rails = guardrails.Guardrails()
+    for _ in range(3):
+        await _fail(rails, _bash_call(LOOP), SAME_ERR)
+    await rails.on_tool_success({**_bash_call(LOOP), "tool_response": "ok"}, None, None)
+    assert await _pre(rails, _bash_call(LOOP)) == {}
+
+
+@pytest.mark.asyncio
+async def test_the_user_interrupting_is_not_a_failure():
+    rails = guardrails.Guardrails()
+    for _ in range(5):
+        await rails.on_tool_failure(
+            {**_bash_call(LOOP), "error": "interrupted", "is_interrupt": True}, None, None)
+    assert await _pre(rails, _bash_call(LOOP)) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_different_command_is_counted_on_its_own():
+    rails = guardrails.Guardrails()
+    for _ in range(3):
+        await _fail(rails, _bash_call(LOOP), SAME_ERR)
+    other = _bash_call("ssh node2 'docker exec comfyui-h3 curl -s http://127.0.0.1:8189/object_info'")
+    assert await _pre(rails, other) == {}
+
+
+@pytest.mark.asyncio
+async def test_old_failures_are_forgotten():
+    rails = guardrails.Guardrails()
+    key = ("Bash", guardrails._arguments(_bash_call(LOOP)))
+    for _ in range(3):
+        await _fail(rails, _bash_call(LOOP), SAME_ERR)
+    # Push the record past the window: a retry an hour later starts fresh.
+    rails.failures[key][2] -= guardrails.FAILURE_WINDOW + 1
+    assert await _pre(rails, _bash_call(LOOP)) == {}
+
+
+@pytest.mark.asyncio
+async def test_watching_a_job_still_works_until_it_fails_identically():
+    """`tail_remote_log` is exempt from the repeat rule on purpose — but an
+    unreachable host failing the same way is not a job to watch."""
+    rails = guardrails.Guardrails()
+    poll = {"tool_name": "mcp__scivo__tail_remote_log",
+            "tool_input": {"alias": "node2", "log_path": "run.log"}}
+    for _ in range(10):
+        assert await _pre(rails, poll) == {}               # changing output
+    for _ in range(3):
+        await _fail(rails, poll, "ssh: connect to host node2 port 22: No route to host")
+    out = await _pre(rails, poll)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "tail_remote_log" in out["hookSpecificOutput"]["permissionDecisionReason"]

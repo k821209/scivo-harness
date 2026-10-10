@@ -8,8 +8,9 @@ fires at that moment instead.
 
 from __future__ import annotations
 
-import re
 import json
+import re
+import time
 from typing import Any
 
 from claude_agent_sdk import HookMatcher
@@ -73,6 +74,15 @@ def _ask(reason: str) -> dict[str, Any]:
     }
 
 
+def _arguments(payload: Any) -> str:
+    """The call's arguments, serialised the same way everywhere, so the
+    pre-check and the post-hooks agree on what 'the same call' means."""
+    try:
+        return json.dumps(payload.get("tool_input", {}), sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(payload.get("tool_input", {}))
+
+
 def _note(context: str) -> dict[str, Any]:
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context}}
 
@@ -82,6 +92,17 @@ def _note(context: str) -> dict[str, Any]:
 SAME_CALL_LIMIT = 3
 SAME_CALL_STOP = 5
 BASH_NUDGE = 5     # after five identical Bash calls, suggest Monitor once
+
+# A command that FAILS the same way again has nothing to watch: that is the
+# shape the per-turn counters above cannot see, because they are cleared every
+# turn and because Bash is never denied. A local model spent ten hours on
+# `ssh node2 'docker cp …'` every 7.8 seconds — 949 SSH connections into
+# another machine on the LAN in three hours, each failing with the same
+# message — and nothing stopped it (user, 2026-10-10). Failures are therefore
+# counted across turns, in a time window, and a success clears the count.
+FAILED_REPEAT_LIMIT = 3     # identical command, identical failure
+FAILURE_WINDOW = 900.0      # seconds; older failures are forgotten
+_ERROR_SIGNATURE_CHARS = 120
 
 # Watching something change is not a loop: these are asked again on purpose,
 # with the same arguments, until the thing they watch has moved.
@@ -119,11 +140,59 @@ class Guardrails:
         self.blocked: list[str] = []
         self.repeats: dict[tuple[str, str], int] = {}
         self.looping: str | None = None
+        # (tool, arguments) -> [count, error signature, last time]. Survives
+        # new_turn on purpose: a loop that retries once per turn is exactly
+        # what the per-turn counters miss.
+        self.failures: dict[tuple[str, str], list] = {}
 
     def new_turn(self) -> None:
         """Repetition is counted per turn: asking again next turn is fine."""
         self.repeats.clear()
         self.looping = None
+
+    # ── repeated identical failures ──────────────────────────────────────────
+
+    def _failure_strikes(self, key: tuple[str, str], now: float) -> int:
+        rec = self.failures.get(key)
+        if not rec or now - rec[2] > FAILURE_WINDOW:
+            return 0
+        return int(rec[0])
+
+    def record_failure(self, name: str, arguments: str, error: str,
+                       now: float | None = None) -> int:
+        """Count one failure of `name`+`arguments`. Returns the new strike
+        count, which only rises while the error stays the same — a command
+        failing a NEW way is making progress, not looping."""
+        now = time.monotonic() if now is None else now
+        sig = " ".join(str(error or "").split())[:_ERROR_SIGNATURE_CHARS]
+        key = (name, arguments)
+        rec = self.failures.get(key)
+        if rec and now - rec[2] <= FAILURE_WINDOW and rec[1] == sig:
+            rec[0] += 1
+            rec[2] = now
+        else:
+            rec = [1, sig, now]
+            self.failures[key] = rec
+        return int(rec[0])
+
+    def record_success(self, name: str, arguments: str) -> None:
+        """A command that worked is not looping; forget its strikes."""
+        self.failures.pop((name, arguments), None)
+
+    async def on_tool_failure(self, payload: Any, tool_use_id: str | None,
+                              context: Any) -> dict[str, Any]:
+        """PostToolUseFailure: remember what failed and how."""
+        if payload.get("is_interrupt"):
+            return {}          # the user stopped it; that is not a loop
+        name = str(payload.get("tool_name", ""))
+        self.record_failure(name, _arguments(payload), str(payload.get("error", "")))
+        return {}
+
+    async def on_tool_success(self, payload: Any, tool_use_id: str | None,
+                              context: Any) -> dict[str, Any]:
+        """PostToolUse: a result arrived, so this call is not stuck."""
+        self.record_success(str(payload.get("tool_name", "")), _arguments(payload))
+        return {}
 
     async def on_any_tool(self, payload: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         """Break a tool-call loop.
@@ -140,13 +209,24 @@ class Guardrails:
         that, and stays out of the way.
         """
         name = str(payload.get("tool_name", ""))
+        arguments = _arguments(payload)
+        key = (name, arguments)
+        # Checked before the polling exemption: `tail_remote_log` is asked
+        # again on purpose while a job runs, but not after it has failed the
+        # same way three times — that is an unreachable host, not a job to
+        # watch.
+        strikes = self._failure_strikes(key, time.monotonic())
+        if strikes >= FAILED_REPEAT_LIMIT:
+            label = name.split("__")[-1] if name.startswith("mcp__") else name
+            self.looping = label
+            return _deny(
+                f"Blocked: this exact `{label}` call has already failed {strikes} times with the "
+                f"same error — {self.failures[key][1]}\n"
+                "Repeating it cannot change the outcome. Read the error, fix the command or the "
+                "thing it depends on, or tell the user what is wrong and stop."
+            )
         if any(marker in name for marker in POLLING):
             return {}
-        try:
-            arguments = json.dumps(payload.get("tool_input", {}), sort_keys=True, ensure_ascii=False)
-        except (TypeError, ValueError):
-            arguments = str(payload.get("tool_input", {}))
-        key = (name, arguments)
         if name in HOST_WRITES:
             self.repeats.clear()
             return {}
@@ -252,5 +332,10 @@ def build(rails: Guardrails) -> dict[str, list[HookMatcher]]:
                 hooks=[rails.on_memory_write],
             ),
             HookMatcher(hooks=[rails.on_any_tool]),   # no matcher: every tool
-        ]
+        ],
+        # A failing command is only visible after it runs, and the loop this
+        # catches repeats once per turn — so the count has to live outside the
+        # per-turn counters above, fed by what actually happened.
+        "PostToolUseFailure": [HookMatcher(hooks=[rails.on_tool_failure])],
+        "PostToolUse": [HookMatcher(hooks=[rails.on_tool_success])],
     }
