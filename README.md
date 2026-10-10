@@ -403,6 +403,24 @@ turn line says `7 calls · first byte 0.4–1.1s`: a first byte under a second
 on every call means the prefix was reused; one that takes as long as reading
 the prompt means it was not. `/model opus` restores everything.
 
+## Images in the web view
+
+An image pasted or produced in a session is inlined into the transcript as
+base64, so it has to be small enough to sit inside a Firestore document (1 MB)
+with room for the third that base64 adds. Pillow, if installed, downscales to
+fit: it steps 1400 → 1100 → 900 → 700 px until the result is under 500 KB.
+
+The output format follows the image, not the filename. A photograph is JPEG
+even when it is named `.png` — re-encoding one as PNG keeps it at 1.4 MB where
+JPEG is 295 KB, which is why photos saved as PNG used to come back as
+"[… KB — not inlined for the web view]" while the same picture as JPEG
+appeared (user, 2026-10-10). PNG is kept only for an image that actually
+carries transparency, and if even that cannot be made to fit, the picture is
+flattened onto white rather than dropped.
+
+Without Pillow nothing is resized and a large image is not inlined, with a
+note saying so once.
+
 ## Known limitations of a local model
 
 - **A failing command gets retried forever.** A Qwen session spent ten hours on

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from scivo_harness.pump import MessagePump, PumpClosed
 
 
@@ -102,3 +104,81 @@ def test_an_older_mcp_is_detected_from_its_own_error():
         "timed out waiting for since_seq results",   # mentions it, not a rejection
     ):
         assert not rejects(error), error
+
+
+# ── images in the web view ───────────────────────────────────────────────────
+# "웹에서 이미지가 뜰때가 있고 안뜰때가 잇음" — a photograph saved as PNG came
+# back as "[… 1638 KB — not inlined for the web view]" while the same picture
+# as JPEG appeared (user, 2026-10-10). The format was chosen from the
+# filename, so a photo named .png was re-encoded as PNG and stayed huge.
+
+pytest.importorskip("PIL", reason="Pillow is optional; the shrink path needs it")
+
+
+def _noise_photo(w=2000, h=1400):
+    """Gradients plus grain: what a camera or a generated portrait looks like
+    to an encoder, and what PNG is worst at."""
+    import random
+    from PIL import Image
+    random.seed(11)
+    img = Image.new("RGB", (w, h))
+    px = img.load()
+    for y in range(0, h, 2):
+        for x in range(0, w, 2):
+            base = (int(120 + 100 * (x / w)), int(90 + 120 * (y / h)), int(140 - 60 * (x / w)))
+            c = tuple(max(0, min(255, v + random.randint(-18, 18))) for v in base)
+            for dy in (0, 1):
+                for dx in (0, 1):
+                    if x + dx < w and y + dy < h:
+                        px[x + dx, y + dy] = c
+    return img
+
+
+def _encode(img, fmt):
+    import io
+    buf = io.BytesIO()
+    img.save(buf, fmt, **({"optimize": True} if fmt == "PNG" else {"quality": 92}))
+    return buf.getvalue()
+
+
+def test_a_photograph_fits_whatever_its_filename_says():
+    data = _encode(_noise_photo(), "PNG")
+    assert len(data) > _control.MAX_IMG_BYTES          # the case that failed
+    out, mime, note = _control._shrink_for_web(data, "image/png", ".png")
+    assert len(out) <= _control.MAX_IMG_BYTES
+    assert mime == "image/jpeg"                        # not PNG, despite the suffix
+    assert note is None
+
+
+def test_transparency_is_kept_when_the_image_fits():
+    from PIL import Image
+    logo = Image.new("RGBA", (1800, 1200), (0, 0, 0, 0))
+    for x in range(200, 1600):
+        for y in range(300, 900):
+            logo.putpixel((x, y), (20, 90, 200, 255))
+    out, mime, _ = _control._shrink_for_web(_encode(logo, "PNG"), "image/png", ".png")
+    assert mime == "image/png"
+    assert len(out) <= _control.MAX_IMG_BYTES
+
+
+def test_transparency_is_given_up_rather_than_the_picture():
+    """A half-transparent photograph cannot fit as PNG at any step on the ladder.
+    Flattened onto white it fits — and a picture that shows beats one that
+    does not."""
+    photo = _noise_photo().convert("RGBA")
+    photo.putalpha(200)
+    out, mime, _ = _control._shrink_for_web(_encode(photo, "PNG"), "image/png", ".png")
+    assert len(out) <= _control.MAX_IMG_BYTES
+    assert mime == "image/jpeg"
+
+
+def test_the_cap_leaves_room_for_base64_inside_a_firestore_document():
+    """An inlined image is base64 in a transcript chunk document, and
+    Firestore caps a document at 1 MB. 800 KB of image was 1.07 MB of base64."""
+    assert _control.MAX_IMG_BYTES * 4 / 3 < 1_000_000
+
+
+def test_an_svg_is_passed_through_untouched():
+    svg = b"<svg xmlns='http://www.w3.org/2000/svg'><circle r='9'/></svg>"
+    out, mime, note = _control._shrink_for_web(svg, "image/svg+xml", ".svg")
+    assert (out, mime, note) == (svg, "image/svg+xml", None)

@@ -48,8 +48,15 @@ CHUNK = 20                 # events per log doc; keeps a doc well under Firestor
 MAX_TEXT = 150_000         # one event's text, same reason
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
-MAX_IMG_DIMENSION = 1400     # downscale before inlining, if PIL is around
-MAX_IMG_BYTES = 800_000      # per image, after downscale
+# Steps tried in order until one fits the cap. A single 1400 px pass was the
+# whole ladder, so anything that did not fit after it was dropped.
+SHRINK_LADDER = ((1400, 85), (1100, 80), (900, 75), (700, 70))
+MAX_IMG_DIMENSION = SHRINK_LADDER[0][0]
+# Per image, after downscale. Base64 inflates by a third and the result is
+# written inside a transcript chunk document, which Firestore caps at 1 MB —
+# so this has to leave room for that expansion and for the other events in the
+# same document. 800 KB did not: 800 KB of image is 1.07 MB of base64.
+MAX_IMG_BYTES = 500_000
 MAX_INLINE_BYTES = 1_500_000 # per assistant message
 _PIL_MISSING_NOTED = False
 _MD_IMG = None             # compiled lazily, once
@@ -120,6 +127,17 @@ def _shrink_for_web(data: bytes, mime: str, suffix: str) -> tuple[bytes, str, st
     "not inlined" note. Pillow is not required, but if it is around we resize
     to a web-friendly width and re-encode; without it, big images stay big
     and skip inlining, with a note saying how to enable it.
+
+    Two things decide whether it fits, and both used to be wrong for the same
+    picture — a photograph saved as PNG (user, 2026-10-10, 1,638 KB shown as
+    "not inlined"):
+
+    - **The output format follows the image, not the filename.** Re-encoding a
+      photograph as PNG because its name ends in `.png` kept it at 1.4 MB;
+      the same picture as JPEG is 295 KB. PNG is kept only when the image
+      actually carries transparency, which is the thing JPEG cannot do.
+    - **One pass is not an answer.** If 1400 px still does not fit, step down
+      and try again instead of giving up.
     """
     global _PIL_MISSING_NOTED
     if mime == "image/svg+xml":
@@ -135,23 +153,50 @@ def _shrink_for_web(data: bytes, mime: str, suffix: str) -> tuple[bytes, str, st
     try:
         img = Image.open(_io.BytesIO(data))
         img.load()
-        w, h = img.size
-        if max(w, h) > MAX_IMG_DIMENSION:
-            scale = MAX_IMG_DIMENSION / max(w, h)
-            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-        buf = _io.BytesIO()
-        keeps_alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
-        if suffix == ".png" or keeps_alpha or mime == "image/gif":
-            img.save(buf, "PNG", optimize=True)
-            new_mime = "image/png"
-        else:
-            img.convert("RGB").save(buf, "JPEG", quality=85, optimize=True, progressive=True)
-            new_mime = "image/jpeg"
-        smaller = buf.getvalue()
+        # Transparency is the only reason to pay PNG's size for a photograph.
+        keeps_alpha = (img.mode in ("RGBA", "LA")
+                       or (img.mode == "P" and "transparency" in img.info))
+        best: bytes | None = None
+        best_mime = mime
+
+        def encode(dimension: int, quality: int, alpha: bool) -> tuple[bytes, str]:
+            frame = img
+            w, h = img.size
+            if max(w, h) > dimension:
+                scale = dimension / max(w, h)
+                frame = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                                   Image.LANCZOS)
+            buf = _io.BytesIO()
+            if alpha:
+                frame.save(buf, "PNG", optimize=True)
+                return buf.getvalue(), "image/png"
+            flat = frame
+            if frame.mode in ("RGBA", "LA", "P"):
+                # Transparency onto white: a chat bubble has a light background
+                # and a picture that shows beats one that does not.
+                flat = Image.new("RGB", frame.size, (255, 255, 255))
+                rgba = frame.convert("RGBA")
+                flat.paste(rgba, mask=rgba.split()[-1])
+            flat.convert("RGB").save(buf, "JPEG", quality=quality,
+                                     optimize=True, progressive=True)
+            return buf.getvalue(), "image/jpeg"
+
+        # Transparency first when the image has it; then, only if nothing fit,
+        # the same ladder flattened onto white.
+        passes = (True, False) if keeps_alpha else (False,)
+        for alpha in passes:
+            for dimension, quality in SHRINK_LADDER:
+                candidate, out_mime = encode(dimension, quality, alpha)
+                if best is None or len(candidate) < len(best):
+                    best, best_mime = candidate, out_mime
+                if len(candidate) <= MAX_IMG_BYTES:
+                    return candidate, out_mime, None
     except Exception:  # noqa: BLE001 - a corrupt or exotic image should not break the turn
         return data, mime, None
-    if len(smaller) < len(data):
-        return smaller, new_mime, None
+    # Nothing fit. Hand back whichever is smaller; the caller decides what to
+    # say about it.
+    if best is not None and len(best) < len(data):
+        return best, best_mime, None
     return data, mime, None
 
 
