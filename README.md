@@ -403,6 +403,20 @@ turn line says `7 calls · first byte 0.4–1.1s`: a first byte under a second
 on every call means the prefix was reused; one that takes as long as reading
 the prompt means it was not. `/model opus` restores everything.
 
+## What the remote-job guard reads
+
+It blocks `ssh … nohup/setsid/&` because a job launched that way leaves no run
+record. It reads the command the shell will RUN, not the file contents the
+command writes: a heredoc body is stripped first, so
+`cat > notes.rs <<'EOF' … ssh … EOF` passes even when the file discusses remote
+work. Any project whose prose mentions ssh used to trip on this, and the way
+round it was the Write tool, which improves provenance not at all (2026-10-10).
+
+One exception, because it is the opposite case: a heredoc fed to ssh
+(`ssh host bash <<EOF … EOF`) IS the remote command, so its body is still read.
+Quoted arguments are never stripped either — `ssh gpu "nohup train &"` keeps
+the part worth catching inside the quotes.
+
 ## Messages sent while a turn is running
 
 The page accepts them and marks them "queued — the session is busy with the

@@ -25,6 +25,45 @@ RAW_REMOTE_JOB = re.compile(
     r"|\btmux\s+new(?:-session)?\b[^\n]*?\s-d\b|(?<![&|<>])&(?![&|>]))",
     re.IGNORECASE | re.DOTALL,
 )
+# A heredoc body is DATA the command writes, not a command it runs. Scanning it
+# blocked `cat > notes.rs <<'EOF' … ssh … EOF` — a local file write whose Korean
+# comment happened to mention ssh — and the way round it was to write the same
+# file with the Write tool, which improves provenance not at all (feedback
+# 504eb4a8d21e). Any project whose prose discusses remote work steps on this.
+# Quoted strings are NOT stripped: `ssh gpu "nohup train &"` keeps the part
+# worth catching inside the quotes.
+_HEREDOC = re.compile(
+    r"""<<-?\s*(['"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)\1   # <<EOF / <<'EOF' / <<-EOF
+        (?P<body>.*?)                                     # everything up to …
+        ^[ \t]*(?P=tag)[ \t]*$                            # … the closing tag on its own line
+    """,
+    re.DOTALL | re.MULTILINE | re.VERBOSE,
+)
+
+
+# Where one command ends and the next begins, so the head of the heredoc's own
+# command can be read.
+_SEPARATOR = re.compile(r"(?:\n|;|\|\||&&|\|)")
+
+
+def executable_text(command: str) -> str:
+    """The command with heredoc bodies removed, for the pattern checks.
+
+    A body is removed only when it is DATA. `ssh host bash <<EOF … EOF` feeds
+    its body to a remote shell, so there the body IS the command and stripping
+    it would hide the very thing the guard exists for — which is what the first
+    attempt at this did, caught by the suite.
+    """
+    def keep_or_drop(match: re.Match) -> str:
+        head = command[:match.start()]
+        last = _SEPARATOR.split(head)[-1] if head else ""
+        if re.search(r"\bssh\b", last):
+            return match.group(0)          # the body is the remote command
+        return "<<" + match.group("tag") + "\n" + match.group("tag")
+
+    return _HEREDOC.sub(keep_or_drop, command)
+
+
 # A remote `pgrep -f`/`pkill -f` matches the ssh command line that carries the
 # pattern, so it kills the session or over-counts. Both happened on this account.
 # `--full` is the long spelling of the same flag.
@@ -266,6 +305,8 @@ class Guardrails:
 
     async def on_bash(self, payload: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         command = str(payload.get("tool_input", {}).get("command", ""))
+        # What the shell will RUN, without the file contents it writes.
+        command = executable_text(command)
 
         if RAW_REMOTE_JOB.search(command):
             self.blocked.append("raw remote job")

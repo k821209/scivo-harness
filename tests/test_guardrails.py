@@ -225,3 +225,83 @@ async def test_watching_a_job_still_works_until_it_fails_identically():
     out = await _pre(rails, poll)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "tail_remote_log" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+# ── a heredoc body is data, not a command ────────────────────────────────────
+# `cat > notes.rs <<'EOF' … ssh … EOF` was blocked as a raw remote job because
+# a Korean comment in the file mentioned ssh. The way round it was the Write
+# tool, which improves provenance not at all (feedback 504eb4a8d21e).
+
+
+REPORTED = """cat > /tmp/probe.txt <<'EOF'
+이 문서는 ssh 로 접속한 환경을 설명한다.
+EOF"""
+
+
+def test_the_reported_local_file_write_passes():
+    assert _bash(guardrails.Guardrails(), REPORTED) == {}
+
+
+def test_a_heredoc_that_names_remote_backgrounding_still_passes():
+    cmd = ("cat > src/ime.rs <<'EOF'\n"
+           "//! 조합 중인 음절을 보여줄 수 없고, ssh 로 들어간 세션에는 IME 가 없다.\n"
+           "//! nohup 으로 띄운 작업도 마찬가지다.\n"
+           "EOF\n"
+           "cargo test")
+    assert _bash(guardrails.Guardrails(), cmd) == {}
+
+
+def test_a_real_remote_job_is_still_blocked_beside_a_heredoc():
+    """Stripping the body must not disarm the check for the command itself."""
+    cmd = ("cat > run.sh <<'EOF'\n"
+           "echo hello\n"
+           "EOF\n"
+           "ssh gpu1 \"nohup python train.py &\"")
+    out = _bash(guardrails.Guardrails(), cmd)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "no run record" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_quoted_arguments_are_still_read():
+    """The dangerous part of `ssh host "nohup …"` lives inside the quotes, so
+    quotes are deliberately not stripped the way heredoc bodies are."""
+    out = _bash(guardrails.Guardrails(), 'ssh gpu1 "cd /data; nohup python train.py &"')
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_remote_pgrep_inside_a_heredoc_is_not_a_remote_pgrep():
+    cmd = ("cat > README.md <<'EOF'\n"
+           "Do not run `ssh host \"pkill -f train.py\"` — it kills your own session.\n"
+           "EOF")
+    assert _bash(guardrails.Guardrails(), cmd) == {}
+
+
+def test_every_heredoc_form_is_handled():
+    for opener, closer in (("<<'EOF'", "EOF"), ('<<"EOF"', "EOF"),
+                           ("<<EOF", "EOF"), ("<<-EOF", "\tEOF"), ("<<PY", "PY")):
+        cmd = f"cat > f.txt {opener}\nssh host nohup thing &\n{closer}"
+        assert _bash(guardrails.Guardrails(), cmd) == {}, opener
+
+
+def test_an_unterminated_heredoc_is_left_alone():
+    """No closing tag means no body to strip; the text is scanned as before,
+    which errs toward blocking rather than toward missing a remote job."""
+    out = _bash(guardrails.Guardrails(), "cat > f.txt <<'EOF'\nssh gpu nohup train &")
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_heredoc_fed_to_ssh_is_the_remote_command_and_is_still_read():
+    """`ssh host bash <<EOF … EOF` runs its body on the other machine. The
+    first version of the heredoc fix stripped it and hid a real remote job."""
+    cmd = "ssh gpu1 bash <<EOF\ncd /data\nnohup python train.py &\nEOF"
+    out = _bash(guardrails.Guardrails(), cmd)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_local_heredoc_before_an_ssh_heredoc_is_judged_separately():
+    cmd = ("cat > notes.md <<'EOF'\n"
+           "ssh 로 접속한 세션 이야기.\n"
+           "EOF\n"
+           "ssh gpu1 bash <<EOF\nnohup python train.py &\nEOF")
+    out = _bash(guardrails.Guardrails(), cmd)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
