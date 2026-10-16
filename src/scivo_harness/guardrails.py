@@ -81,9 +81,46 @@ ANALYSIS_SHAPED = re.compile(
     re.IGNORECASE,
 )
 
+# An Enzyme Commission number is four dot-separated numbers — EC 3.2.1.35 —
+# so a bare dotted-quad regex calls it an IP address and denies the write. It
+# did: a venom-enzyme census could not record its own Table 2, and the block
+# said "this memory write contains an IP address" about a note that mentioned
+# no machine at all, which sent the author looking for an IP that was never
+# there. The way around it was to break the notation (3-2-1-35), i.e. to make
+# the memory less accurate to satisfy a guard that had nothing to guard
+# (reported 2026-10-15).
+_DOTTED_QUAD = re.compile(r"(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\w.])")
+# "EC 3.2.1.35", "EC:3.2.1.35", "(EC 3.2.1.35)" — the marker sits just before.
+_EC_MARKED = re.compile(r"\bEC[\s:]*$", re.I)
+# EC classes run 1-7, so a first segment in that range inside a note that is
+# talking about enzymes is an EC number, not an address. This catches the
+# second and later numbers in a list, where only the first carries the marker.
+_ENZYME_CONTEXT = re.compile(r"\bEC[\s:]*\d|\benzymes?\b|\bEC numbers?\b|효소", re.I)
+
+
+def _mentions_ip(text: str) -> bool:
+    """True when `text` holds something that is really an address.
+
+    A miss costs a machine fact landing in project memory, which the author
+    can move. A false positive costs a refused write with a diagnosis that
+    sends them hunting for something that is not in their note — so when the
+    evidence says enzyme, this yields.
+    """
+    for match in _DOTTED_QUAD.finditer(text):
+        octets = [int(group) for group in match.groups()]
+        if any(octet > 255 for octet in octets):
+            continue                                    # not an address at all
+        if _EC_MARKED.search(text[:match.start()]):
+            continue
+        if octets[0] <= 7 and _ENZYME_CONTEXT.search(text):
+            continue
+        return True
+    return False
+
+
 # Hardware belongs in the servers registry, never in project memory.
 COMPUTE_SPECS = [
-    (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), "an IP address"),
+    (_mentions_ip, "an IP address"),
     (re.compile(r"\b(H100|A100|B200|GB10|RTX\s*\d{3,4}|L40S?|V100)\b", re.I), "a GPU model"),
     (re.compile(r"\b\d+\s*(?:cores?|코어|cpus?)\b", re.I), "a core count"),
     (re.compile(r"\b\d+\s*(?:GB|TB)\s*(?:RAM|메모리|memory)\b", re.I), "a memory size"),
@@ -345,7 +382,8 @@ class Guardrails:
         tool_input = payload.get("tool_input", {})
         text = str(tool_input.get("note") or tool_input.get("content")
                    or tool_input.get("skills") or tool_input.get("text") or "")
-        hits = [label for pattern, label in COMPUTE_SPECS if pattern.search(text)]
+        hits = [label for probe, label in COMPUTE_SPECS
+                if (probe(text) if callable(probe) else probe.search(text))]
         if not hits:
             return {}
         # A deny, not an ask: bypassPermissions is reachable mid-session and

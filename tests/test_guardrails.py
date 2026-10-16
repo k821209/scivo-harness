@@ -305,3 +305,57 @@ def test_a_local_heredoc_before_an_ssh_heredoc_is_judged_separately():
            "ssh gpu1 bash <<EOF\nnohup python train.py &\nEOF")
     out = _bash(guardrails.Guardrails(), cmd)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# ── EC numbers are not IP addresses ──────────────────────────────────────────
+# `EC 3.2.1.35` is four dot-separated numbers, so the dotted-quad regex denied
+# a note about hyaluronidase as if it carried a machine address, and told the
+# author to register a server that does not exist (reported 2026-10-15). The
+# guard still has to hold for real hardware, which is the second half of this.
+
+EC_NOTES = [
+    "히알루로니다제(EC 3.2.1.35)는 모든 분류군에서 0으로 집계됨",
+    "EC 3.2.1.35, 3.1.1.4, 1.4.3.2 for the venom enzyme census",
+    "Table 2 groups the Tox-Prot entries by EC number: 3.4.24.21 dominates",
+    "phospholipase A2 (EC:3.1.1.4) is the most frequent venom enzyme",
+]
+
+IP_NOTES = [
+    "the B200 box at 10.0.0.7 has 96 cores",
+    "run it on 192.168.0.9",
+    "the render host is 203.0.113.7:22",
+    "copy from 172.16.4.1 when the enzyme assay finishes",
+]
+
+
+def _memory_write(note: str) -> dict:
+    return asyncio.run(guardrails.Guardrails().on_memory_write(
+        {"tool_name": "mcp__scivo__append_project_memory",
+         "tool_input": {"note": note}}, None, None))
+
+
+def test_ec_numbers_are_not_blocked_as_addresses():
+    for note in EC_NOTES:
+        assert _memory_write(note) == {}, note
+
+
+def test_real_addresses_are_still_blocked():
+    for note in IP_NOTES:
+        out = _memory_write(note)
+        assert out and "Blocked" in str(out), note
+        assert "an IP address" in str(out), note
+
+
+def test_a_dotted_quad_that_cannot_be_an_address_is_ignored():
+    # 350 is not an octet, so there is nothing to redirect to the registry.
+    assert _memory_write("the assay read 3.2.1.350 on the plate") == {}
+    # A version string carrying a letter prefix is not a quad either.
+    assert _memory_write("built with blastn v2.5.0.1") == {}
+
+
+def test_the_other_compute_specs_still_fire():
+    for note, label in [("the node has an H100", "a GPU model"),
+                        ("48 cores free", "a core count"),
+                        ("512 GB RAM installed", "a memory size"),
+                        ("ssh kang@node2 to check", "an ssh target")]:
+        assert label in str(_memory_write(note)), note
