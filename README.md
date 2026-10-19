@@ -13,7 +13,8 @@ scivo run "..."            # one prompt, non-interactive
 scivo providers            # configured model endpoints
 scivo update               # update scivo + the MCP, re-link skills
 scivo update --video       # …and the vh video toolkit, on a machine that has it
-/update                    # from inside a session: leave, update, come back into it (page on if it was)
+/update                    # from inside a session: leave, update, come back into it
+                           #   (same session, control page, permission mode and model as you left it)
 scivo sessions             # this project's sessions, newest first, with their titles
 scivo resume [N | id]      # continue one: its number above, or the start of its id
 scivo -c                   # continue the most recent session

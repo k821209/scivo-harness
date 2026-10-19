@@ -694,26 +694,44 @@ async def _build_and_run(args, prompt_text: str | None) -> int:
     return 0
 
 
-def _relaunch_argv(argv: list[str], resume: str | None, control: bool) -> list[str]:
+def _relaunch_argv(argv: list[str], resume: str | None, control: bool,
+                   permission_mode: str | None = None,
+                   model: str | None = None) -> list[str]:
     """The flags this run was started with, minus any session choice, plus the
-    session to come back into and --control when the page was on."""
+    session to come back into and the state it was in.
+
+    `permission_mode` and `model` are the LIVE values, which is not the same as
+    the ones in argv: `/dangerously-skip-permissions` and `/model` switch them
+    mid-session and neither writes argv, so an update used to hand the session
+    back in whatever mode it was started in — most of the way through an
+    unattended run, silently asking again (user, 2026-10-19).
+    """
+    # Only drop a flag we are about to supply: with no live value, what the
+    # run was started with is still the right answer (an existing test caught
+    # this — `--model opus` in argv and no switch means opus, not the default).
+    replaced = {flag for flag, value in (("--permission-mode", permission_mode),
+                                         ("--model", model)) if value}
     out: list[str] = []
     skip = 0
-    for i, a in enumerate(argv):
+    for a in argv:
         if skip:
             skip -= 1
             continue
         if a in ("-c", "--continue", "--control", "chat"):
             continue
-        if a == "--resume":
+        if a == "--resume" or a in replaced:
             skip = 1
             continue
-        if a.startswith("--resume="):
+        if a.startswith("--resume=") or any(a.startswith(f"{flag}=") for flag in replaced):
             continue
         out.append(a)
     out += ["--resume", resume] if resume else ["-c"]
     if control:
         out.append("--control")
+    if permission_mode:
+        out += ["--permission-mode", permission_mode]
+    if model:
+        out += ["--model", model]
     return out
 
 
@@ -731,7 +749,9 @@ def _update_and_relaunch(args, plan: dict) -> int:
     if rc != 0:
         print(ui.red("  update failed — not relaunching; fix it and run `scivo -c` yourself"))
         return rc
-    argv = _relaunch_argv(sys.argv[1:], plan.get("resume"), bool(plan.get("control")))
+    argv = _relaunch_argv(sys.argv[1:], plan.get("resume"), bool(plan.get("control")),
+                          permission_mode=plan.get("permission_mode"),
+                          model=plan.get("model"))
     print(ui.dim("  scivo " + " ".join(argv)))
     os.execv(sys.executable, [sys.executable, "-m", "scivo_harness", *argv])
     return 0   # not reached

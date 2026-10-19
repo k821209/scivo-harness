@@ -492,11 +492,26 @@ class Repl:
             # Leaving, updating and coming back was four commands typed by
             # hand — /exit, scivo update, scivo -c, /scivo-control — and the
             # last one was forgotten as often as not (user, 2026-09-30).
+            # The mode and model are carried too, because they are part of
+            # "this session" as much as the page is: both can be switched
+            # mid-session (`/dangerously-skip-permissions`, `/model`), and
+            # neither lives in argv, so an update silently handed the session
+            # back in whatever mode it was STARTED in (user, 2026-10-19). The
+            # model only travels for Claude models — `/model <provider>` starts
+            # a new conversation, so there is no session to resume into.
             self.relaunch = {"resume": self.session_id,
                              "control": bool(self.control and self.control.active),
-                             "video": "video" in line.split()[1:]}
+                             "video": "video" in line.split()[1:],
+                             "permission_mode": self.mode,
+                             "model": (None if self.session.provider.is_local
+                                       else self.session.model)}
+            coming_back = [
+                "with the control page back on" if self.relaunch["control"] else "",
+                f"in {self.mode}" if self.mode != "default" else "",
+            ]
+            said = " and ".join(part for part in coming_back if part)
             print(ui.dim("\n  leaving to update; this session resumes when it is done"
-                         + (" — with the control page back on" if self.relaunch["control"] else "") + "\n"))
+                         + (f" — {said}" if said else "") + "\n"))
             raise EOFError
         if command == "/help":
             print()
@@ -1054,6 +1069,15 @@ class Repl:
                             else " — `--profile video | deck | analysis` loads that domain too")))
         if self.session.endpoint is not None and self.session.endpoint.note:
             print(ui.dim(f"  · {self.session.endpoint.note}"))
+        if self.mode == "bypassPermissions":
+            # Loud, because `/update` now carries this mode across a restart:
+            # a session that asks for nothing must never be a state you come
+            # back into without being told.
+            print(ui.red("  permissions: bypassPermissions")
+                  + ui.dim(" — nothing will ask, including uploads, publishing "
+                           "and remote jobs. `/dangerously-skip-permissions off`"))
+        elif self.mode != "default":
+            print(ui.dim(f"  permissions: {self.mode}"))
         print()
         self._print_recap()
 
