@@ -62,12 +62,20 @@ _PIL_MISSING_NOTED = False
 _MD_IMG = None             # compiled lazily, once
 
 
-def _inline_local_images(text: str, project_root: Path) -> str:
+def _inline_local_images(text: str, project_root: Path,
+                         extra_roots: tuple[str, ...] = ()) -> str:
     """Rewrite `![alt](local/path.png)` to a data URI so the page can show it.
 
     The page runs on an https origin and cannot fetch file:// paths, so
     without this a screenshot the model referenced was just a broken image
     icon. Cap per image and per message so a big render cannot break the doc.
+
+    `extra_roots` is the session's `--add-dir` list. A render pipeline writes
+    outside the project — a ComfyUI output directory, a scratch dir — and
+    those paths were refused, so the one image somebody actually wanted to see
+    was the one that stayed a broken reference. The containment rule itself
+    stays: these are directories the USER named on the command line, not paths
+    taken from model text.
     """
     global _MD_IMG
     if _MD_IMG is None:
@@ -77,6 +85,12 @@ def _inline_local_images(text: str, project_root: Path) -> str:
         return text
     import base64
     added = 0
+    roots = []
+    for candidate in (project_root, *extra_roots):
+        try:
+            roots.append(Path(candidate).expanduser().resolve())
+        except (OSError, ValueError):
+            continue
 
     def sub(match):
         nonlocal added
@@ -90,13 +104,11 @@ def _inline_local_images(text: str, project_root: Path) -> str:
             path = path.resolve()
         except (OSError, ValueError):
             return match.group(0)
-        # Only files under the project. The reference is model text, and the
-        # upload it triggers goes through no approval — an injected
-        # `![x](../../.ssh/id_rsa.png)` would otherwise ship any image on the
-        # machine to the page.
-        try:
-            path.relative_to(project_root.resolve())
-        except ValueError:
+        # Only files under the project or a directory the user added. The
+        # reference is model text, and the upload it triggers goes through no
+        # approval — an injected `![x](../../.ssh/id_rsa.png)` would otherwise
+        # ship any image on the machine to the page.
+        if not any(_within(path, root) for root in roots):
             return match.group(0)
         if not path.is_file():
             return match.group(0)
@@ -118,6 +130,14 @@ def _inline_local_images(text: str, project_root: Path) -> str:
         return f"![{caption}](data:{mime};base64,{base64.b64encode(data).decode('ascii')})"
 
     return _MD_IMG.sub(sub, text)
+
+
+def _within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _shrink_for_web(data: bytes, mime: str, suffix: str) -> tuple[bytes, str, str | None]:
@@ -285,6 +305,9 @@ class Control:
     project_name: str
     project_id: str
     model: str
+    # The session's `--add-dir` directories: image references under them inline
+    # as well as ones under the project.
+    extra_roots: tuple[str, ...] = ()
 
     link: Link | None = None
     sid: str = ""
@@ -522,7 +545,8 @@ class Control:
     def end_assistant(self) -> None:
         if self._assistant is not None:
             event = self.events[self._assistant]
-            event["text"] = _inline_local_images(event["text"], self.config.root)
+            event["text"] = _inline_local_images(event["text"], self.config.root,
+                                                 self.extra_roots)
             event["done"] = True
             self._touch(self._assistant)
             self._assistant = None

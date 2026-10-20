@@ -574,7 +574,9 @@ class Repl:
 
         briefing = self.session.briefing
         self.control = Control(self.session.config, briefing.project_name,
-                               briefing.project_id, self.session.model)
+                               briefing.project_id, self.session.model,
+                               extra_roots=tuple(
+                                   getattr(self.session.options, "add_dirs", None) or ()))
         print(ui.dim("\n  publishing the control page…"))
         try:
             await self.control.start()

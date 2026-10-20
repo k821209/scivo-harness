@@ -257,3 +257,60 @@ def test_relaunch_argv_keeps_flags_drops_session_choice_adds_resume_and_control(
     assert out == ["--profile", "video", "--model", "opus", "--resume", "abc123", "--control"]
     assert _relaunch_argv(["--resume", "old", "--control"], None, False) == ["-c"]
     assert _parser().parse_args(out).control is True
+
+
+# ── an image the user asked to see, written outside the project ───────────────
+# The inliner refused any path outside the project root, which is the right
+# rule for a reference that comes from MODEL text — `![x](../../.ssh/id_rsa.png)`
+# would otherwise ship any image on the machine to the page. But a render
+# pipeline writes to its own output directory, so the one image somebody wanted
+# to look at was the one that stayed a broken reference. `--add-dir` is the
+# user saying on the command line that a directory is part of this session.
+
+def test_an_image_under_an_added_dir_inlines(tmp_path):
+    from scivo_harness.control import _inline_local_images
+    project = tmp_path / "project"
+    renders = tmp_path / "renders"
+    project.mkdir()
+    renders.mkdir()
+    shot = renders / "avatar.png"
+    shot.write_bytes(_png_bytes())
+    text = f"here it is\n\n![avatar]({shot})\n"
+    # Any image mime: _shrink_for_web re-encodes to whatever is smaller, so
+    # the codec is not the assertion — that it inlined at all is.
+    assert "data:image/" in _inline_local_images(text, project, (str(renders),))
+    # Without the user naming it, the same reference is left alone.
+    assert _inline_local_images(text, project) == text
+
+
+def test_a_path_outside_every_root_is_still_refused(tmp_path):
+    from scivo_harness.control import _inline_local_images
+    project = tmp_path / "project"
+    (project / "sub").mkdir(parents=True)
+    secret = tmp_path / "id_rsa.png"
+    secret.write_bytes(_png_bytes())
+    text = f"![x]({secret})"
+    assert _inline_local_images(text, project, (str(project / "sub"),)) == text
+
+
+def test_the_project_root_needs_no_declaring(tmp_path):
+    from scivo_harness.control import _inline_local_images
+    project = tmp_path / "project"
+    project.mkdir()
+    shot = project / "figure.png"
+    shot.write_bytes(_png_bytes())
+    assert "data:image/" in _inline_local_images(f"![f]({shot})", project)
+
+
+def _png_bytes() -> bytes:
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
+            + chunk(b"IEND", b""))
