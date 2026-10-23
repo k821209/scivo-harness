@@ -314,3 +314,69 @@ def _png_bytes() -> bytes:
             + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
             + chunk(b"IEND", b""))
+
+
+# ── the same answer must not arrive twice ────────────────────────────────────
+# A CLI-driven chat panel printed every reply twice. Measured cause, from the
+# CLI's own output: `--output-format stream-json --verbose` carries the answer
+# in the `assistant` event AND again in the terminal `result` event, so a UI
+# that appends every text-bearing event shows it twice (`--output-format json`
+# carries it once, in `result` alone). The harness reads the SDK rather than
+# that CLI and already guards the same shape — a text block that the deltas
+# already printed is dropped — but nothing pinned it. feedback bdd2d6dc8798.
+
+class _Recorder:
+    def __init__(self):
+        self.published: list[str] = []
+        self.ended = 0
+
+    def delta(self, text):
+        self.published.append(text)
+
+    def end_assistant(self):
+        self.ended += 1
+
+    def tool(self, *_a, **_k):
+        pass
+
+
+def _repl_seam(streamed: str, control):
+    """A stand-in for the Repl, holding only what _on_assistant touches."""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        _streamed=streamed, control=control, tool_calls=0, _tool_started={},
+        _mark_output=lambda: None,
+    )
+
+
+def _assistant(text: str):
+    """Built from the classes REPL bound, not from a fresh import.
+
+    conftest's SDK stub mints a new class on every attribute access, so
+    `claude_agent_sdk.TextBlock` is not the `TextBlock` inside repl.py and an
+    isinstance check between them is False — which made the first version of
+    these tests pass by rendering nothing at all.
+    """
+    from scivo_harness.repl import AssistantMessage, TextBlock
+    block = TextBlock()
+    block.text = text
+    msg = AssistantMessage()
+    msg.content = [block]
+    return msg
+
+
+def test_a_block_already_streamed_is_not_published_again():
+    from scivo_harness.repl import Repl
+    control = _Recorder()
+    seam = _repl_seam("PINGPONG", control)
+    Repl._on_assistant(seam, _assistant("PINGPONG"))
+    assert control.published == []          # the deltas already carried it
+    assert control.ended == 1
+
+
+def test_a_block_that_never_streamed_is_published_once():
+    from scivo_harness.repl import Repl
+    control = _Recorder()
+    seam = _repl_seam("", control)          # no partial streaming this turn
+    Repl._on_assistant(seam, _assistant("PINGPONG"))
+    assert control.published == ["PINGPONG"]
