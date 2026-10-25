@@ -60,19 +60,28 @@ class Provider:
     def is_local(self) -> bool:
         return bool(self.base_url)
 
-    def resolve_env(self, *, subscription: bool = False) -> dict[str, str]:
+    def resolve_env(self, *, api_billing: bool = False) -> dict[str, str]:
         """The environment the CLI subprocess runs under.
 
         `ANTHROPIC_API_KEY` is scrubbed (set empty, which the CLI reads as
-        unset) whenever requests go to another host, and always under
-        `--subscription`. resolve_env only ever ADDED variables, so a key in
-        the parent shell reached the CLI unchanged: with a gateway provider
-        it was sent to that host, and `--subscription` — parsed and never
-        used — silently billed the API tab. A provider that needs the key on
-        purpose sets it in its own `env` table, which is applied last."""
+        unset) unless the caller asked to be billed per token. resolve_env only
+        ever ADDED variables, so a key in the parent shell reached the CLI
+        unchanged: with a gateway provider it was sent to that host, and
+        `--subscription` — parsed and never used — silently billed the API tab.
+
+        Scrubbing is now the DEFAULT rather than something `--subscription`
+        turns on. The premise of the harness is that the customer's claude.ai
+        plan pays; an API key that happens to be exported in a shell is not a
+        decision to be billed per token, and the moment the subscription is
+        refused — which Anthropic's terms now allow for the Agent SDK — a
+        present key is exactly what a silent fallback would reach for. Being
+        billed by the token is a choice, so it takes a flag (`--api-billing`)
+        or a provider that sets the key in its own `env` table, which is
+        applied last and therefore still wins."""
         out: dict[str, str] = {}
-        if self.base_url or subscription:
-            out["ANTHROPIC_API_KEY"] = ""
+        if self.base_url or not api_billing:
+            for var in API_KEY_VARS:
+                out[var] = ""
         if self.base_url:
             out["ANTHROPIC_BASE_URL"] = self.base_url
         token = self.auth_token
@@ -389,7 +398,7 @@ def context_window(provider: Provider, timeout: float = 5.0) -> int | None:
     return None
 
 
-def prepare(provider: Provider, timeout: float = 30.0, *, subscription: bool = False) -> Endpoint:
+def prepare(provider: Provider, timeout: float = 30.0, *, api_billing: bool = False) -> Endpoint:
     """Resolve a provider into environment for Claude Code, fixing what can be fixed.
 
     A local server whose chat template rejects mid-conversation system messages
@@ -398,7 +407,7 @@ def prepare(provider: Provider, timeout: float = 30.0, *, subscription: bool = F
     silent retries. Now the check runs here, and when the template refuses, the
     shim starts inside this process and the session is pointed at it.
     """
-    env = provider.resolve_env(subscription=subscription)
+    env = provider.resolve_env(api_billing=api_billing)
     if not provider.base_url:
         return Endpoint(env)
     reachable(provider)
@@ -503,6 +512,9 @@ def billing_lines(provider: Provider) -> list[str]:
         "Anthropic's terms (2026-02-19) bar Pro/Max OAuth tokens in third-party "
         "tools and the Agent SDK; API-layer enforcement began 2026-01-09.",
         "Working right now means this path is not being refused — if it starts, "
-        f'the error says "{CREDENTIAL_REFUSAL}". An API key is the sanctioned '
-        "alternative and is billed per token.",
+        f'the error says "{CREDENTIAL_REFUSAL}".',
+        "If it does: Scivo itself is unaffected. The MCP and the skills run in "
+        "Claude Code directly on the same plan — the harness is one host of "
+        "four. `--api-billing` is the other route and is metered per token, so "
+        "it is never taken on its own.",
     ]

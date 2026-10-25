@@ -41,11 +41,21 @@ def _provider(**kw):
     return providers.Provider(name="p", **kw)
 
 
-def test_the_api_key_is_scrubbed_for_another_host_and_under_subscription():
+def test_an_exported_key_never_pays_unless_it_was_asked_to():
+    """Scrubbing used to need `--subscription`; it is now the default.
+
+    A key exported in a shell is not a decision to be billed per token, and it
+    is exactly what a silent fallback reaches for the day the subscription path
+    is refused — which Anthropic's terms now allow for the Agent SDK. Being
+    metered is a choice, so it takes `--api-billing` (user, 2026-10-25).
+    """
     env = _provider(base_url="https://gateway.example.org").resolve_env()
     assert env["ANTHROPIC_API_KEY"] == "" and env["ANTHROPIC_BASE_URL"].startswith("https://gateway")
-    assert _provider().resolve_env(subscription=True)["ANTHROPIC_API_KEY"] == ""
-    assert "ANTHROPIC_API_KEY" not in _provider().resolve_env()
+    # The default for the plain Anthropic provider: both vars scrubbed.
+    plain = _provider().resolve_env()
+    assert plain["ANTHROPIC_API_KEY"] == "" and plain["ANTHROPIC_AUTH_TOKEN"] == ""
+    # Asked for: the harness gets out of the way and the exported key is used.
+    assert "ANTHROPIC_API_KEY" not in _provider().resolve_env(api_billing=True)
     # a provider that wants the key on purpose says so in its own env table
     env = _provider(base_url="https://gateway.example.org", env={"ANTHROPIC_API_KEY": "sk-gw"}).resolve_env()
     assert env["ANTHROPIC_API_KEY"] == "sk-gw"

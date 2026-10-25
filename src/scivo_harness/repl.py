@@ -454,10 +454,14 @@ class Repl:
                     "    Your claude.ai subscription is no longer accepted through the "
                     "Agent SDK, which is how every scivo session runs.\n"
                     "    Nothing here is broken and nothing you change locally will fix "
-                    "it. The sanctioned route is an Anthropic API key\n"
-                    "    (billed per token): set ANTHROPIC_API_KEY and start again, or "
-                    "point scivo at a local endpoint with `/model`.\n"
-                    "    `/doctor` shows which of those you are on."))
+                    "it — but SCIVO is not affected. The MCP and the\n"
+                    "    skills run in Claude Code itself on the same plan: open `claude` "
+                    "in this directory and carry on. The harness\n"
+                    "    is one host of four (`python -m co_scientist_local hosts`).\n"
+                    "    If you would rather keep the harness, `--api-billing` uses an "
+                    "exported ANTHROPIC_API_KEY and is metered\n"
+                    "    per token, or `/model <provider>` points at a local endpoint. "
+                    "`/doctor` shows which you are on."))
         if local:
             price, total = "local model", "local model"
             # What a local turn costs is time, and nearly all of it is the

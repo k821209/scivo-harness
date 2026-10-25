@@ -151,7 +151,7 @@ async def build(
     continue_last: bool = False,
     max_budget_usd: float | None = None,
     add_dirs: list[str] | None = None,
-    subscription: bool = False,
+    api_billing: bool = False,
 ) -> Session:
     chosen = provider if isinstance(provider, Provider) else get_provider(provider)
     model = model or chosen.model or DEFAULT_MODEL
@@ -160,7 +160,7 @@ async def build(
     import asyncio
 
     endpoint: Endpoint = await asyncio.to_thread(
-        lambda: prepare(chosen, subscription=subscription))
+        lambda: prepare(chosen, api_billing=api_billing))
     plan = toolsets.plan(tool_names, profile=profile, read_only=read_only)
     rails = guardrails.Guardrails()
 

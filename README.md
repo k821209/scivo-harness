@@ -12,6 +12,7 @@ scivo tools                # what each tool profile loads
 scivo run "..."            # one prompt, non-interactive
 scivo providers            # configured model endpoints
 scivo doctor               # the wiring, and what pays for a session
+scivo --api-billing        # let an exported API key pay (metered); off by default
 /doctor                    # the same billing answer from inside a session
 scivo update               # update scivo + the MCP, re-link skills
 scivo update --video       # …and the vh video toolkit, on a machine that has it

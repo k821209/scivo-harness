@@ -70,9 +70,16 @@ def _parser() -> argparse.ArgumentParser:
                         help="override the provider's model")
     parser.add_argument("--effort", default=DEFAULT_EFFORT,
                         choices=["low", "medium", "high", "xhigh", "max"])
+    parser.add_argument("--api-billing", action="store_true",
+                        help="let an exported ANTHROPIC_API_KEY / _AUTH_TOKEN pay for "
+                             "this session, metered per token. Off by default: the "
+                             "plan pays, and a key sitting in a shell is not a "
+                             "decision to be billed")
     parser.add_argument("--subscription", action="store_true",
                         help="ignore ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN so the CLI "
-                             "falls back to your claude.ai login (subscription billing)")
+                             "falls back to your claude.ai login (subscription "
+                             "billing). Now the DEFAULT; kept so existing commands "
+                             "and scripts keep working")
     parser.add_argument("--add-dir", action="append", default=[], metavar="PATH",
                         help="let the session reach this directory too; repeatable")
     parser.add_argument("--permission-mode", default="default",
@@ -579,8 +586,8 @@ def _login_state() -> str:
         # auth status reports the stored login even when an API key in the
         # environment is what will actually be used.
         var = "ANTHROPIC_API_KEY" if os.environ.get("ANTHROPIC_API_KEY") else "ANTHROPIC_AUTH_TOKEN"
-        text += (f" · {var} is set and takes precedence — pass `--subscription` "
-                 "(or unset it) to use the claude.ai login instead")
+        text += (f" · {var} is set but is IGNORED: the plan pays unless you ask "
+                 "for `--api-billing`")
     return text
 
 
@@ -671,7 +678,7 @@ async def _build_and_run(args, prompt_text: str | None) -> int:
         continue_last=continue_last,
         max_budget_usd=args.budget,
         add_dirs=args.add_dir,
-        subscription=bool(getattr(args, "subscription", False)),
+        api_billing=bool(getattr(args, "api_billing", False)),
     )
     if session.resumed is None and continue_last:
         session.resumed = resumed_id

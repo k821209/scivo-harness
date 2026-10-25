@@ -44,7 +44,10 @@ def test_a_subscription_session_is_told_what_could_stop_it(monkeypatch):
     assert SDK_ENTRYPOINT in joined                 # how the session identifies
     assert "2026-02-19" in joined and "2026-01-09" in joined
     assert CREDENTIAL_REFUSAL in joined             # the exact text to watch for
-    assert "API key is the sanctioned alternative" in joined
+    # The recovery is a different HOST, not a different bill: the MCP and the
+    # skills run in Claude Code directly, on the same plan.
+    assert "Claude Code directly" in joined
+    assert "never taken on its own" in joined
 
 
 def test_an_api_key_needs_no_lecture(monkeypatch):
