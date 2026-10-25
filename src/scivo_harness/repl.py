@@ -53,6 +53,7 @@ LOCAL_COMMANDS = {
     "/status": "reprint the session briefing",
     "/blocked": "what the guardrails stopped this session",
     "/cost": "spend so far",
+    "/doctor": "what pays for this session, and what could stop it",
     "/session": "this session's id, to resume it later",
     "/model": "switch model: opus · sonnet · haiku · fable, or a provider such as local",
     "/permissions": "show or change: default · acceptEdits · auto · plan · always <tool> · always -<tool>",
@@ -441,6 +442,22 @@ class Repl:
             # Reporting "! error:" for a stop the person asked for reads as a
             # fault in the harness.
             print(ui.red(f"\n  ! {message.stop_reason or 'error'}: {message.result or ''}"))
+            from .providers import CREDENTIAL_REFUSAL
+            if CREDENTIAL_REFUSAL in (message.result or ""):
+                # The one error whose cause is a policy rather than a bug. It
+                # would otherwise read as "the harness broke" on the day
+                # Anthropic starts enforcing its credential terms against the
+                # Agent SDK — which they published on 2026-02-19 and began
+                # enforcing at the API layer, for third-party tools, on
+                # 2026-01-09.
+                print(ui.yellow(
+                    "    Your claude.ai subscription is no longer accepted through the "
+                    "Agent SDK, which is how every scivo session runs.\n"
+                    "    Nothing here is broken and nothing you change locally will fix "
+                    "it. The sanctioned route is an Anthropic API key\n"
+                    "    (billed per token): set ANTHROPIC_API_KEY and start again, or "
+                    "point scivo at a local endpoint with `/model`.\n"
+                    "    `/doctor` shows which of those you are on."))
         if local:
             price, total = "local model", "local model"
             # What a local turn costs is time, and nearly all of it is the
@@ -520,6 +537,20 @@ class Repl:
             print(ui.dim("  Esc                    stop the turn that is running"))
             print(ui.dim(f"\n  and {len(self.skills)} skills — press / to list them"
                          + ("" if self.line.rich else " (see `scivo status`)") + "\n"))
+        elif command == "/doctor":
+            # The same lines `scivo doctor` prints, from inside the session —
+            # asked for because the answer can change under a running session
+            # (Anthropic's credential terms), and leaving to check it means
+            # losing the session (user, 2026-10-25).
+            from .providers import billing_lines
+            print()
+            print(f"  model     {self.session.model}")
+            print(f"  provider  {self.session.provider.name}")
+            print(f"  mode      {self.mode}")
+            for line in billing_lines(self.session.provider):
+                print(ui.dim(f"  billing   {line}") if line.startswith(("Anthropic", "Working"))
+                      else f"  billing   {line}")
+            print()
         elif command == "/status":
             print("\n" + to_markdown(self.session.briefing) + "\n")
         elif command == "/blocked":

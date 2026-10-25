@@ -190,6 +190,9 @@ async def _doctor(args) -> int:
     print(f"auth        {auth_source(provider)}")
     if not provider.is_local:
         print(f"login       {_login_state()}")
+    from .providers import billing_lines
+    for index, line in enumerate(billing_lines(provider)):
+        print(f"{'billing     ' if index == 0 else '            '}{line}")
     if provider.is_local:
         ok, detail = probe(provider)
         print(f"endpoint    {ui.green(detail) if ok else ui.red(detail)}")

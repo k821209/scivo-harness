@@ -11,6 +11,8 @@ scivo doctor               # check the wiring
 scivo tools                # what each tool profile loads
 scivo run "..."            # one prompt, non-interactive
 scivo providers            # configured model endpoints
+scivo doctor               # the wiring, and what pays for a session
+/doctor                    # the same billing answer from inside a session
 scivo update               # update scivo + the MCP, re-link skills
 scivo update --video       # …and the vh video toolkit, on a machine that has it
 /update                    # from inside a session: leave, update, come back into it

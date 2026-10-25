@@ -432,3 +432,77 @@ def provider_for_model(model: str) -> str | None:
         if provider.model == model or provider.small_model == model:
             return name
     return None
+
+
+# What a Pro/Max credential may and may not be used for, and how a session
+# identifies itself. All three are facts, not inference:
+#
+#   · The Agent SDK sets `CLAUDE_CODE_ENTRYPOINT=sdk-py` on the CLI it spawns
+#     (claude_agent_sdk/_internal/transport/subprocess_cli.py), so a harness
+#     session is identifiable as SDK usage at the source rather than passing
+#     for an interactive one.
+#   · Anthropic began rejecting subscription OAuth tokens outside Claude Code
+#     at the API layer on 2026-01-09, with one message:
+#     "This credential is only authorized for use with Claude Code and cannot
+#     be used for other API requests."
+#   · Its service terms gained an "Authentication and credential use" section
+#     on 2026-02-19 saying Free/Pro/Max OAuth tokens may not be used with
+#     third-party tools OR the Agent SDK.
+#
+# The harness runs the official CLI through the SDK, which is why it works at
+# all; whether that stays true is Anthropic's call, and the point of reporting
+# it is that the day it changes, the session says why instead of just failing.
+CREDENTIAL_REFUSAL = "only authorized for use with Claude Code"
+SDK_ENTRYPOINT = "sdk-py"
+
+
+def credential_state() -> dict:
+    """What `claude auth status` says, or {} when it cannot be read."""
+    import json
+    import subprocess
+
+    from .failures import claude_binary
+
+    try:
+        done = subprocess.run([claude_binary(), "auth", "status"],
+                              capture_output=True, text=True, timeout=30)
+        return json.loads(done.stdout)
+    except Exception:  # noqa: BLE001 - a report that cannot be made is empty
+        return {}
+
+
+def billing_lines(provider: Provider) -> list[str]:
+    """How this session's inference is paid for, as lines to print.
+
+    Short when nothing is in question — an API key or a local endpoint is
+    simply what it is. Longer only for the combination that Anthropic's terms
+    address: a claude.ai subscription driven through the Agent SDK.
+    """
+    import os
+
+    if provider.base_url:
+        return [f"{provider.name} endpoint — no Anthropic subscription involved"]
+    for var in API_KEY_VARS:
+        if os.environ.get(var):
+            return [f"${var} — metered per token on that account, not a plan"]
+
+    state = credential_state()
+    if not state:
+        return ["could not read `claude auth status`"]
+    if not state.get("loggedIn"):
+        return ["not signed in"]
+    method = state.get("authMethod")
+    plan = state.get("subscriptionType") or "?"
+    api_provider = state.get("apiProvider") or "?"
+    head = f"{method} login · {plan} · apiProvider={api_provider}"
+    if method != "claude.ai":
+        return [head]
+    return [
+        head,
+        f"sessions identify as CLAUDE_CODE_ENTRYPOINT={SDK_ENTRYPOINT} (the Agent SDK sets it)",
+        "Anthropic's terms (2026-02-19) bar Pro/Max OAuth tokens in third-party "
+        "tools and the Agent SDK; API-layer enforcement began 2026-01-09.",
+        "Working right now means this path is not being refused — if it starts, "
+        f'the error says "{CREDENTIAL_REFUSAL}". An API key is the sanctioned '
+        "alternative and is billed per token.",
+    ]
