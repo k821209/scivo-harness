@@ -152,6 +152,23 @@ def environment_note() -> str | None:
     return "\n".join(lines)
 
 
+def interpreter_path(value: str) -> str:
+    """An absolute path to the interpreter the user named — symlinks INTACT.
+
+    `Path.resolve()` was here, and it quietly undid the thing a venv is for:
+    `~/.scivo/bin/python` is a symlink to `bin/python3.11`, which is a symlink
+    to the base interpreter, so resolving it wrote `/…/miniconda3/bin/python3.11`
+    into .mcp.json. That interpreter has whatever copy of the package somebody
+    else installed — on the machine where this was found, an editable install
+    of a two-month-old checkout, which then served every project wired that
+    way. The venv's own site-packages was never consulted again.
+
+    `os.path.abspath` normalises `..` and makes it absolute without walking
+    symlinks, which is exactly the distinction that matters here.
+    """
+    return os.path.abspath(os.path.expanduser(value))
+
+
 def check_mcp_importable(interpreter: str | None = None, checkout: Path | None = None) -> None:
     interpreter = interpreter or sys.executable
     env = dict(os.environ)

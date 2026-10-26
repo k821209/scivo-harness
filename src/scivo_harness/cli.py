@@ -35,6 +35,7 @@ from .setup import (
     ensure_claude_md,
     environment_note,
     ensure_gitignore,
+    interpreter_path,
     link_skills as link_setup_skills,
     roll_back,
     write_mcp_json,
@@ -261,7 +262,7 @@ async def _setup(args) -> int:
     result = Result()
     interpreter = args.python
     if interpreter:
-        interpreter = str(Path(interpreter).expanduser().resolve())
+        interpreter = interpreter_path(interpreter)
     # The checkout is settled first: it is what makes the MCP importable at
     # all when the harness lives in its own venv without an installed copy.
     checkout, why_not = (None, None) if args.no_checkout else usable_checkout(interpreter)
@@ -275,13 +276,21 @@ async def _setup(args) -> int:
 
     # Verify against a real server before claiming the directory is set up.
     config = load(root)
-    async with connect(config) as client:
-        who = await client.call("whoami")
-        if not who:
-            undone = roll_back(mcp_path, backup)
-            print(ui.red(f"the MCP did not start: {who.error}\n{undone}"), file=sys.stderr)
-            return 1
-        identity = who.first or {}
+    try:
+        async with connect(config) as client:
+            who = await client.call("whoami")
+            if not who:
+                undone = roll_back(mcp_path, backup)
+                print(ui.red(f"the MCP did not start: {who.error}\n{undone}"), file=sys.stderr)
+                return 1
+            identity = who.first or {}
+    except ServerUnavailable as exc:
+        # The config was already written — with --force, over one that worked.
+        # A setup that fails must leave the directory as it found it, or the
+        # cost of a mistyped key is someone else's working project.
+        undone = roll_back(mcp_path, backup)
+        print(ui.red(f"{exc}\n{undone}"), file=sys.stderr)
+        return 1
 
     bound = str(identity.get("project_id", "?"))
     if args.project and args.project != bound:

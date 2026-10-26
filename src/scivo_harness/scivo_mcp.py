@@ -129,19 +129,60 @@ async def connect(config: ScivoConfig):
     # transport error, with the one line that said why thrown away.
     import tempfile
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as errlog:
+        started = False
         try:
             async with stdio_client(params, errlog=errlog) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
+                    started = True
                     yield ScivoClient(session)
+        except BaseException as exc:                      # noqa: BLE001
+            # A server that dies before answering `initialize` raises from
+            # inside two nested anyio task groups, so what reached the user was
+            # a 60-line ExceptionGroup ending in "McpError: Connection closed"
+            # — the transport's description of the symptom, with the cause (one
+            # line on the server's stderr) buried in a file nobody read. The
+            # `started` flag keeps this to STARTUP: once the session is live,
+            # an exception belongs to the caller's body and must pass through
+            # unchanged.
+            if started:
+                raise
+            _LAST_STDERR[0] = _tail(errlog)
+            from .preflight import ServerUnavailable
+            raise ServerUnavailable(_startup_failure(config, _LAST_STDERR[0], exc)) from None
         finally:
-            try:
-                errlog.seek(0, os.SEEK_END)
-                size = errlog.tell()
-                errlog.seek(max(0, size - 4000))
-                _LAST_STDERR[0] = errlog.read()
-            except (OSError, ValueError):
-                pass
+            if started:
+                _LAST_STDERR[0] = _tail(errlog)
+
+
+def _tail(errlog, limit: int = 4000) -> str:
+    try:
+        errlog.seek(0, os.SEEK_END)
+        size = errlog.tell()
+        errlog.seek(max(0, size - limit))
+        return errlog.read()
+    except (OSError, ValueError):
+        return ""
+
+
+def _startup_failure(config, stderr: str, exc: BaseException) -> str:
+    """What to print when the server never came up.
+
+    The server's own stderr is the answer whenever there is one — the MCP says
+    "the project API key was refused…" there — so it leads, and the transport
+    error is the footnote rather than the headline. With no stderr at all the
+    process did not get far enough to speak, which is its own diagnosis: the
+    command in the config is usually not an interpreter that has the package.
+    """
+    lines = [ln for ln in stderr.splitlines() if ln.strip()]
+    if lines:
+        said = "\n    ".join(lines[-8:])
+        return f"the MCP server did not start. It said:\n    {said}"
+    return (f"the MCP server did not start, and said nothing on stderr.\n"
+            f"    command: {config.command} {' '.join(config.args)}\n"
+            f"    Check that this interpreter has the package: "
+            f"`{config.command} -m co_scientist_local --help`\n"
+            f"    ({type(exc).__name__})")
 
 
 _LAST_STDERR: list[str] = [""]
