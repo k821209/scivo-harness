@@ -95,7 +95,7 @@ def _billed_to_api(provider) -> bool:
     # `auth_token = "unused"` on a local server does not count.
     if provider.auth_token_env:
         return True
-    if not provider.is_local:
+    if not provider.has_endpoint:
         # The built-in `anthropic` provider: billed only if the environment
         # names an API key.
         for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
@@ -432,10 +432,12 @@ class Repl:
         # A claude.ai subscription is billed by the plan, not the request, so
         # the dollar figure the CLI reports is what an equivalent API call
         # would cost — the user is not paying it. Only show a price when the
-        # session is actually API-billed.
-        local = self.session.provider.is_local
+        # session is actually API-billed. That table holds Anthropic's models
+        # and nothing else, so no total is kept for any endpoint of our own,
+        # paid or free — what a gateway charges is on the gateway's bill.
+        endpoint = self.session.provider.has_endpoint
         billed = _billed_to_api(self.session.provider)
-        turn_cost = (message.total_cost_usd or 0.0) if (billed and not local) else 0.0
+        turn_cost = (message.total_cost_usd or 0.0) if (billed and not endpoint) else 0.0
         self.cost += turn_cost
         if message.is_error and not self._stopping:
             # A turn stopped on purpose comes back as an error with no text.
@@ -462,8 +464,12 @@ class Repl:
                     "exported ANTHROPIC_API_KEY and is metered\n"
                     "    per token, or `/model <provider>` points at a local endpoint. "
                     "`/doctor` shows which you are on."))
-        if local:
-            price, total = "local model", "local model"
+        if endpoint:
+            # The CLI's dollar figure prices this turn off Anthropic's table,
+            # which this model is not on, so name the provider instead and say
+            # where the real cost lands.
+            price = self.session.provider.name
+            total = "metered on that account" if billed else "no cost"
             # What a local turn costs is time, and nearly all of it is the
             # prefill; the shim (when one is in the path) timed each call.
             from . import shim as _shim
@@ -477,7 +483,7 @@ class Repl:
             # claude.ai subscription: no per-turn dollars, keep the shape.
             price, total = "claude.ai", "on your plan"
         print(ui.dim(f"\n  ({message.num_turns} turns · {price} · {total}"
-                     + (f" · {cache}" if cache and not local else "") + ")\n"))
+                     + (f" · {cache}" if cache and not endpoint else "") + ")\n"))
         if self.control:
             self.control.result(message.num_turns, turn_cost, self.cost,
                                 error=(message.stop_reason or "error") if message.is_error else None)
@@ -524,7 +530,7 @@ class Repl:
                              "control": bool(self.control and self.control.active),
                              "video": "video" in line.split()[1:],
                              "permission_mode": self.mode,
-                             "model": (None if self.session.provider.is_local
+                             "model": (None if self.session.provider.has_endpoint
                                        else self.session.model)}
             coming_back = [
                 "with the control page back on" if self.relaunch["control"] else "",
@@ -573,17 +579,23 @@ class Repl:
             else:
                 print(ui.dim("\n  no id yet — it is assigned with the first reply\n"))
         elif command == "/cost":
-            if _billed_to_api(self.session.provider):
+            if self.session.provider.has_endpoint:
+                # Nothing was accumulated (see _on_result), so there is no
+                # figure to print — saying $0.0000 to someone whose gateway is
+                # metering them would be worse than saying nothing.
+                paid = (" — metered on that account" if _billed_to_api(self.session.provider)
+                        else ", no cost")
+                print(ui.dim(f"\n  {self.session.provider.name} endpoint{paid}"
+                             f" — {self.turns} turns\n"))
+            elif _billed_to_api(self.session.provider):
                 print(ui.dim(f"\n  ${self.cost:.4f} over {self.turns} turns\n"))
-            elif self.session.provider.is_local:
-                print(ui.dim(f"\n  local model — {self.turns} turns, no cost\n"))
             else:
                 print(ui.dim(f"\n  claude.ai subscription — {self.turns} turns, on your plan\n"))
         elif command == "/tools":
             plan = self.session.plan
             print(f"\n  {plan.summary()}")
-            if self.session.local_tools:
-                print(ui.dim(f"  local kit: {self.session.local_tools} of them are loaded — a local "
+            if self.session.lean_tools:
+                print(ui.dim(f"  lean kit: {self.session.lean_tools} of them are loaded — a small "
                              "model reads every schema on every request."))
                 print(ui.dim("  `scivo --profile video` (or deck, analysis) loads that domain too."))
             if plan.dropped:
@@ -745,7 +757,7 @@ class Repl:
         wanted = argument.split()[0]
         claude_model = CLAUDE_MODELS.get(wanted.lower()) or (wanted if wanted.startswith("claude-") else None)
 
-        if claude_model and not provider.is_local:
+        if claude_model and not provider.has_endpoint:
             try:
                 await self.client.set_model(claude_model)
             except Exception as exc:  # noqa: BLE001
@@ -774,7 +786,7 @@ class Repl:
         # blocks, which a local server is not known to accept.
         from .providers import ProviderError, prepare
 
-        if target.is_local:
+        if target.has_endpoint:
             self._say(ui.dim(f"\n  checking {target_name}…"))
         try:
             endpoint = await asyncio.to_thread(prepare, target)
@@ -1094,14 +1106,14 @@ class Repl:
     async def run(self) -> None:
         briefing = self.session.briefing
         label = self.session.model
-        if self.session.provider.is_local:
+        if self.session.provider.has_endpoint:
             label += f" @ {self.session.provider.name}"
         print(ui.banner(briefing.project_name, briefing.project_id,
                         self.session.plan.summary(), label))
         for line in ui.attention(briefing):
             print(line)
-        if self.session.local_tools:
-            print(ui.dim(f"  local kit: {self.session.local_tools} scivo tools"
+        if self.session.lean_tools:
+            print(ui.dim(f"  lean kit: {self.session.lean_tools} scivo tools"
                          + ("" if self.session.plan.profile != "full"
                             else " — `--profile video | deck | analysis` loads that domain too")))
         if self.session.endpoint is not None and self.session.endpoint.note:
@@ -1173,9 +1185,12 @@ class Repl:
             await self.client.disconnect()
             if self.session.endpoint is not None:
                 self.session.endpoint.close()
-        if _billed_to_api(self.session.provider):
+        if self.session.provider.has_endpoint:
+            print(ui.dim(f"session ended — {self.turns} turns on the "
+                         f"{self.session.provider.name} endpoint"))
+        elif _billed_to_api(self.session.provider):
             print(ui.dim(f"session total ${self.cost:.4f}"))
-        elif not self.session.provider.is_local:
+        else:
             print(ui.dim(f"session ended — {self.turns} turns on your claude.ai plan"))
         if self.session_id:
             print(ui.dim(f"resume: scivo resume {self.session_id[:8]}   (or scivo -c)"))

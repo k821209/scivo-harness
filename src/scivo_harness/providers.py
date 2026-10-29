@@ -29,6 +29,10 @@ BUILTIN_NAME = "anthropic"
 # not permitted either — so the harness stays out of the way entirely.
 API_KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
+# How big the model behind an endpoint is, which decides the session profile
+# and nothing else. See Provider.lean_profile.
+SIZES = ("small", "large")
+
 
 
 SEARCH_PATHS = (
@@ -52,13 +56,45 @@ class Provider:
     supports_effort: bool = True
     max_output_tokens: int | None = None
     context_tokens: int | None = None
+    size: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     note: str = ""
     source: str = "built-in"
 
+    def __post_init__(self) -> None:
+        if self.size is not None and self.size not in SIZES:
+            raise ProviderError(
+                f"provider '{self.name}': size = {self.size!r} is not one of "
+                f"{', '.join(SIZES)}."
+            )
+
     @property
-    def is_local(self) -> bool:
+    def has_endpoint(self) -> bool:
+        """True when requests go somewhere other than api.anthropic.com.
+
+        Everything about plumbing keys off this: which token authenticates,
+        whether there is an endpoint to probe, whether `/model` can switch
+        inside the conversation, and whether the CLI's own price table — which
+        only holds Anthropic's models — means anything.
+        """
         return bool(self.base_url)
+
+    @property
+    def lean_profile(self) -> bool:
+        """True when the session carries the short guide and the pruned kit.
+
+        This used to be the same property as `has_endpoint`, because for a year
+        every endpoint behind one was a small local model and the lean session
+        was built for exactly that. It is no longer the same question: a
+        frontier model served over an Anthropic-shaped API is reached through
+        `base_url` too, and would have been handed a 600-token guide and 27 of
+        272 tools because of where it is hosted rather than what it can do.
+        `size` says which, and an entry that does not say keeps the old
+        behaviour.
+        """
+        if self.size:
+            return self.size == "small"
+        return self.has_endpoint
 
     def resolve_env(self, *, api_billing: bool = False) -> dict[str, str]:
         """The environment the CLI subprocess runs under.
@@ -490,7 +526,11 @@ def billing_lines(provider: Provider) -> list[str]:
     import os
 
     if provider.base_url:
-        return [f"{provider.name} endpoint — no Anthropic subscription involved"]
+        # A gateway that carries a real token bills someone; saying only that
+        # Anthropic is not involved leaves out who is.
+        charged = ("; what it charges is on that account"
+                   if provider.auth_token_env else "")
+        return [f"{provider.name} endpoint — no Anthropic subscription involved{charged}"]
     for var in API_KEY_VARS:
         if os.environ.get(var):
             return [f"${var} — metered per token on that account, not a plan"]

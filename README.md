@@ -348,6 +348,7 @@ model     = "Qwen3.8-27B-fast"
 small_model = "Qwen3.8-27B-fast"   # the CLI's own small calls go here too
 auth_token = "unused"              # local servers ignore it; the CLI needs a value
 supports_effort = false            # effort/thinking are Anthropic-model features
+size = "small"                     # the lean session; see below
 max_output_tokens = 8192
 ```
 
@@ -356,6 +357,18 @@ tokenless skeleton lives in the package
 (`src/scivo_harness/providers.example.toml`) as the only copy, so it cannot
 drift from these docs; `--init` writes it out. For a real secret use
 `auth_token_env` and keep the value in the environment.
+
+`size` is `small` or `large`, and decides one thing: which session the provider
+gets. A small model gets the lean one — short guide, pruned tool kit, described
+below. Saying nothing means `small` whenever `base_url` is set, which was true
+of every endpoint this supported: for a year "behind a base_url" and "a small
+model" were the same fact, and one property answered both questions. They are
+not the same fact once a frontier model is served over an Anthropic-shaped API,
+and the old answer would have handed it a 600-token guide and 27 of 272 tools
+because of where it is hosted rather than what it can do. So a service-hosted
+frontier model sets `size = "large"` and gets the session Claude gets.
+`scivo doctor` and `scivo providers` both print which profile a provider got,
+and why — a silent demotion is the failure this is here to prevent.
 
 Config is read from `$SCIVO_PROVIDERS`, then `./.scivo/providers.toml`, then
 `~/.config/scivo/providers.toml`. A `$SCIVO_PROVIDERS` that does not exist is an
@@ -390,7 +403,7 @@ that grew past the window failed every turn with "request exceeds the available
 context size" instead of compacting. Set `context_tokens` in providers.toml for
 a server that reports none.
 
-A local session carries a smaller kit than a Claude one: no project guide in
+A session on a small model carries a smaller kit than a Claude one: no project guide in
 the prompt, the core file and shell tools, and ~36 scivo tools for reading and
 editing a paper, its todos and memory, and running jobs on registered servers.
 `--profile video`, `deck` or `analysis` loads that domain's tools on top, which
@@ -448,7 +461,11 @@ flattened onto white rather than dropped.
 Without Pillow nothing is resized and a large image is not inlined, with a
 note saying so once.
 
-## Known limitations of a local model
+## Known limitations of a small local model
+
+Both of these were measured against a 27B model on a local llama-server. They
+say nothing about a frontier model served over an API — that is a different
+model class, and the honest reading is "unmeasured", not "fine".
 
 - **A failing command gets retried forever.** A Qwen session spent ten hours on
   `ssh node2 'docker cp …'` every 7.8 seconds — 949 SSH connections into

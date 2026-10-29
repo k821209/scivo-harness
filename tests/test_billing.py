@@ -61,6 +61,15 @@ def test_a_local_endpoint_says_the_subscription_is_not_involved(monkeypatch):
     assert len(lines) == 1 and "no Anthropic subscription" in lines[0]
 
 
+def test_a_gateway_with_a_token_says_where_the_charge_lands(monkeypatch):
+    """"No Anthropic subscription involved" is true of a metered gateway too,
+    and on its own it reads as "nothing is being charged"."""
+    lines = billing_lines(Provider(name="svc", base_url="https://api.example.org",
+                                   auth_token_env="SCIVO_SVC_TOKEN"))
+    assert len(lines) == 1
+    assert "no Anthropic subscription" in lines[0] and "on that account" in lines[0]
+
+
 def test_a_console_login_is_one_line(monkeypatch):
     """An Anthropic Console org bills its own API account; the clause about
     subscription OAuth does not apply, so saying it would be noise."""

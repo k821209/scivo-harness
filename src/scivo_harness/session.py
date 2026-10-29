@@ -72,12 +72,12 @@ class Session:
     lean_append: str = ""
     scivo_tools: tuple[str, ...] = ()
     resumed: str | None = None
-    local_tools: int | None = None
+    lean_tools: int | None = None
 
     def options_for(self, provider: Provider, **changes: Any) -> ClaudeAgentOptions:
-        """Options for `provider`: the full session, or the lean one for a local model."""
+        """Options for `provider`: the full session, or the lean one for a small model."""
         base = replace(self.full_options, **changes)
-        if not provider.is_local:
+        if not provider.lean_profile:
             return base
         return lean(base, self.lean_append, self.scivo_tools, self.plan.profile)
 
@@ -232,8 +232,8 @@ async def build(
                       lean_append=prompt.build(briefing, plan, guide=None),
                       scivo_tools=tuple(tool_names), resumed=resume)
     session.options = session.options_for(chosen)
-    if chosen.is_local:
-        session.local_tools = len(local_kit(tuple(tool_names), profile))
+    if chosen.lean_profile:
+        session.lean_tools = len(local_kit(tuple(tool_names), profile))
     return session
 
 

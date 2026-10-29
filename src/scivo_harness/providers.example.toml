@@ -27,6 +27,15 @@
 #   supports_effort    false for non-Anthropic models — effort/thinking are
 #                      Anthropic-model features and a proxy may 400 on them.
 #   max_output_tokens  caps the CLI's output request.
+#   size               "small" or "large" — how big the model behind the
+#                      endpoint is, which decides nothing but the session it
+#                      gets. A small model gets the lean session: short guide,
+#                      pruned tool kit. Unset means small whenever base_url is
+#                      set, which was true of every endpoint here until
+#                      frontier models started being served from one. SET IT TO
+#                      "large" for a service-hosted frontier model, or it is
+#                      handed a 600-token guide and 27 of 272 tools because of
+#                      where it is hosted. `scivo doctor` prints which it got.
 #   context_tokens     the server's context window. Usually unnecessary: a
 #                      llama.cpp server is asked (/props) and the answer is
 #                      passed to the CLI, which auto-compacts against it
@@ -44,6 +53,7 @@ model = "REPLACE-ME"                  # e.g. the id from GET /v1/models
 small_model = "REPLACE-ME"
 auth_token = "unused"                 # not a secret; the CLI just requires a value
 supports_effort = false
+size = "small"                        # the lean session — also the default here
 max_output_tokens = 8192
 note = "local llama-server"
 
@@ -55,4 +65,5 @@ note = "local llama-server"
 # small_model = "REPLACE-ME"
 # auth_token_env = "SCIVO_GATEWAY_TOKEN"
 # supports_effort = false
+# size = "large"                      # a frontier model: the same session Claude gets
 # note = "shared inference gateway"

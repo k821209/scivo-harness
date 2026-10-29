@@ -196,12 +196,19 @@ async def _doctor(args) -> int:
     print(f"provider    {provider.name} → {provider.base_url or 'api.anthropic.com'}"
           f"   {ui.dim(args.provider_reason)}")
     print(f"auth        {auth_source(provider)}")
-    if not provider.is_local:
+    # A provider that silently got the lean session was the whole bug: the
+    # profile is a line in the report now, with the reason it was chosen.
+    kit = ("lean — short guide, pruned tool kit" if provider.lean_profile
+           else "full — project guide, every tool")
+    why = (f"size = {provider.size}" if provider.size
+           else "default for a custom endpoint" if provider.has_endpoint else "")
+    print(f"session     {kit}" + (f"   {ui.dim(why)}" if why else ""))
+    if not provider.has_endpoint:
         print(f"login       {_login_state()}")
     from .providers import billing_lines
     for index, line in enumerate(billing_lines(provider)):
         print(f"{'billing     ' if index == 0 else '            '}{line}")
-    if provider.is_local:
+    if provider.has_endpoint:
         ok, detail = probe(provider)
         print(f"endpoint    {ui.green(detail) if ok else ui.red(detail)}")
     print(f"root        {config.root}")
@@ -521,6 +528,8 @@ async def _providers(args) -> int:
             detail.append("no effort/thinking")
         if provider.auth_token_env:
             detail.append(f"token from ${provider.auth_token_env}")
+        if provider.has_endpoint:
+            detail.append("lean session" if provider.lean_profile else "full session")
         print(ui.dim(f"     {' · '.join(detail)}"))
         if provider.note:
             print(ui.dim(f"     {provider.note}"))
