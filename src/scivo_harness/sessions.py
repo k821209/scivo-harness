@@ -121,7 +121,10 @@ def recap(session_id: str, exchanges: int = 2) -> list[tuple[str, str]]:
                     continue
                 role = entry["type"]
                 if turns and turns[-1][0] == role:
-                    turns[-1] = (role, turns[-1][1] + "\n" + text)
+                    # A blank line, not a newline: these were separate entries
+                    # with tool calls printed between them, so gluing them into
+                    # one paragraph is not what the session looked like.
+                    turns[-1] = (role, turns[-1][1] + "\n\n" + text)
                 else:
                     turns.append((role, text))
     except OSError:

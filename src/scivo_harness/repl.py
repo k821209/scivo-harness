@@ -71,6 +71,28 @@ LOCAL_COMMANDS = {
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
+# How much of one resumed message is shown. Lines, not characters: the point of
+# the recap is the shape, and a character budget spends it all on the first
+# paragraph of a long reply.
+RECAP_LINES = 14
+RECAP_INDENT = " " * len("scivo> ")
+
+
+def recap_block(role: str, text: str, limit: int = RECAP_LINES) -> list[str]:
+    """One message of a resumed conversation, as the live session shows it."""
+    lines = text.strip().splitlines() or [""]
+    shown, dropped = lines[:limit], len(lines) - min(len(lines), limit)
+    if role == "user":
+        # At the prompt it was typed at, continuation lines under it, so a
+        # resumed exchange still reads as an exchange.
+        block = [ui.cyan("scivo> ") + shown[0]]
+        block += [RECAP_INDENT + line for line in shown[1:]]
+    else:
+        block = list(shown)
+    if dropped:
+        block.append(ui.dim(f"  … {dropped} more line{'' if dropped == 1 else 's'}"))
+    return block
+
 MODE_TAGS = {"default": "", "acceptEdits": "edits", "auto": "auto", "plan": "plan",
              "bypassPermissions": "skip", "dontAsk": "dontAsk"}
 MODE_ALIASES = {"default": "default", "ask": "default", "acceptedits": "acceptEdits",
@@ -1081,10 +1103,20 @@ class Repl:
                 await asyncio.gather(watcher, return_exceptions=True)
 
     def _print_recap(self) -> None:
-        """Show the tail of a resumed conversation.
+        """Show the tail of a resumed conversation, shaped as it was.
 
         `scivo -c` printed the same banner as a fresh session, so there was no
-        way to tell whether it had picked up the conversation you meant.
+        way to tell whether it had picked up the conversation you meant. The
+        first version of this then squashed each turn through
+        `" ".join(text.split())` and cut it at 240 characters, which collapses
+        every paragraph, list and code block into one dim run-on line: a
+        conversation came back looking like a log file, and the cut landed
+        mid-sentence (user, 2026-10-29 — "뭉쳐져서 구림").
+
+        So each turn is printed the way the live session prints it: the user's
+        at the prompt it was typed at, the reply flush-left with its own line
+        breaks, and anything too long to show cut BY LINES with a count of what
+        was left out.
         """
         if not self.session.resumed:
             return
@@ -1094,14 +1126,12 @@ class Repl:
         if not turns:
             print(ui.dim(f"  continuing {self.session.resumed[:8]} — no transcript to show\n"))
             return
-        print(ui.dim(f"  continuing {self.session.resumed[:8]}, from where it left off:"))
+        print(ui.dim(f"  continuing {self.session.resumed[:8]}, from where it left off:\n"))
         for role, text in turns:
-            who = "you" if role == "user" else "scivo"
-            body = " ".join(text.split())
-            if len(body) > 240:
-                body = body[:240] + " …"
-            print(ui.dim(f"    {who:>5}  ") + ui.dim(body))
-        print()
+            for line in recap_block(role, text):
+                print(line)
+            print()
+        print(ui.dim("  ---- live from here ----\n"))
 
     async def run(self) -> None:
         briefing = self.session.briefing

@@ -28,8 +28,12 @@ characters of the id. `/session` inside a session prints its id, and leaving
 prints the command that resumes it.
 
 Resuming prints the last two exchanges of the conversation it is joining, so
-you can see which one you got, and it comes back on the model that session was
-using — a conversation held with a local model does not resume on Claude.
+you can see which one you got. They are printed the way the live session
+printed them — your lines at the prompt, replies flush-left with their own line
+breaks — and anything too long to show is cut by lines, with a count of what
+was left out. (They used to be squashed into one dim run-on line each and cut
+at 240 characters, which turned a conversation into a log file.) It comes back
+on the model that session was using — a conversation held with a local model does not resume on Claude.
 `--provider` or `--model` overrides that.
 
 Inside a session, `/scivo-control` drives it from a web page — see below.
