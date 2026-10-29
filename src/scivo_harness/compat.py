@@ -33,6 +33,9 @@ REQUIRED: dict[str, tuple[str, tuple[str, ...]]] = {
     "list_servers": ("the compute registry", ()),
     "list_datasets": ("where the data is", ()),
     "list_todos": ("open work", ()),
+    # The briefing calls it, so a server without it has to be REPORTED rather
+    # than quietly produce a briefing with no questions section.
+    "count_open_study_questions": ("questions waiting on study documents", ()),
 }
 
 

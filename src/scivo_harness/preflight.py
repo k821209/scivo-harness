@@ -65,6 +65,10 @@ class Briefing:
     servers: list[Any] = field(default_factory=list)
     datasets: list[Any] = field(default_factory=list)
     todos: list[Any] = field(default_factory=list)
+    # Open questions on study documents, split by who asked: a reader's
+    # question is work waiting for this session, the agent's own is work
+    # waiting for the reader. One number would have the session nag itself.
+    study_questions: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -116,7 +120,8 @@ async def gather(client: ScivoClient, config: ScivoConfig) -> Briefing:
         )
 
     # Project-wide context: one round trip each, all independent.
-    memory, skills, decisions, servers, datasets, todos, papers = await asyncio.gather(
+    (memory, skills, decisions, servers, datasets, todos, papers,
+     questions) = await asyncio.gather(
         client.call("get_project_memory"),
         client.call("get_project_skills"),
         client.call("list_decisions"),
@@ -124,6 +129,10 @@ async def gather(client: ScivoClient, config: ScivoConfig) -> Briefing:
         client.call("list_datasets"),
         client.call("list_todos"),
         client.call("list_papers", summary=True),
+        # One call for the whole project. A question a reader left on a study
+        # is the one kind of waiting work that lives nowhere near a paper, so
+        # nothing else in this briefing would have shown it.
+        client.call("count_open_study_questions"),
     )
     brief.memory = _doc_content(memory)
     brief.skills = _doc_content(skills)
@@ -131,6 +140,8 @@ async def gather(client: ScivoClient, config: ScivoConfig) -> Briefing:
     brief.servers = servers.items
     brief.datasets = datasets.items
     brief.todos = [t for t in todos.items if str(_get(t, "status", "")) != "done"]
+    counts = questions.first if questions else None
+    brief.study_questions = counts if isinstance(counts, dict) else {}
 
     for name, outcome in [
         ("get_project_memory", memory), ("get_project_skills", skills),
@@ -272,6 +283,22 @@ def to_markdown(brief: Briefing) -> str:
                 out.append(f"  - {len(paper.findings)} unacknowledged citation finding(s) — surface and fix them.")
     else:
         out.append("_no papers yet._")
+
+    # Only when there is something waiting. A heading that says "0 questions"
+    # on every project trains the reader past the one session it matters.
+    q = brief.study_questions or {}
+    if q.get("from_reader") or q.get("from_agent"):
+        out += ["", "## Questions on study documents", ""]
+        if q.get("from_reader"):
+            out.append(
+                f"- **{q['from_reader']} question(s) a reader left on a study** "
+                f"— `list_study_questions()`, then `answer_study_question(...)`. "
+                f"An answer does not have to change the document; say which with "
+                f"`changed_study`.")
+        if q.get("from_agent"):
+            out.append(
+                f"- {q['from_agent']} question(s) a PAST session left for the "
+                f"reader — surface them, do not answer your own.")
 
     out += ["", "## Compute registry (the Runs tab's inventory — NOT project memory)", ""]
     if brief.servers:
