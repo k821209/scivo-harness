@@ -140,6 +140,42 @@ class Provider:
         return out
 
 
+def probe_token(provider: Provider) -> str | None:
+    """The token a probe must send, resolved the way a session resolves it.
+
+    Both probes used to send `auth_token or "unused"` as `x-api-key`, which is
+    right for a local server that ignores the value and wrong for every gateway
+    that does not: a provider whose token lives in the environment
+    (`auth_token_env`) was probed with the literal string "unused" and could
+    only ever come back 401. The probe is the gate for listing a provider at
+    all, so it has to talk the way the session will.
+    """
+    if provider.auth_token:
+        return provider.auth_token
+    if provider.auth_token_env:
+        return os.environ.get(provider.auth_token_env) or None
+    return None
+
+
+def probe_headers(provider: Provider) -> dict[str, str]:
+    """Headers for a /v1/messages probe.
+
+    `resolve_env` hands the CLI `ANTHROPIC_AUTH_TOKEN`, and the CLI sends that
+    as `Authorization: Bearer`. `x-api-key` is sent as well because a local
+    llama-server started with `--api-key` reads that one, and a server that
+    checks neither ignores both.
+    """
+    headers = {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    token = probe_token(provider)
+    headers["x-api-key"] = token or "unused"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _config_path() -> Path | None:
     # An explicit override that silently falls back is a trap: a typo in
     # $SCIVO_PROVIDERS would load a different project's endpoints with nothing
@@ -279,6 +315,9 @@ def probe(provider: Provider, timeout: float = 180.0) -> tuple[bool, str]:
 
     if not provider.base_url:
         return True, "Anthropic API (not probed)"
+    if provider.auth_token_env and not probe_token(provider):
+        return False, (f"${provider.auth_token_env} is not set, so there is no token to "
+                       "probe with — export it and run this again")
 
     body = json.dumps({
         "model": provider.model or "default",
@@ -294,18 +333,19 @@ def probe(provider: Provider, timeout: float = 180.0) -> tuple[bool, str]:
     request = urllib.request.Request(
         provider.base_url.rstrip("/") + "/v1/messages",
         data=body,
-        headers={
-            "content-type": "application/json",
-            "anthropic-version": "2023-06-01",
-            "x-api-key": provider.auth_token or "unused",
-        },
+        headers=probe_headers(provider),
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read())
     except urllib.error.HTTPError as exc:
-        hint = " — serves OpenAI chat-completions only? put a LiteLLM proxy in front" \
-            if exc.code == 404 else ""
+        hint = ""
+        if exc.code == 404:
+            hint = " — serves OpenAI chat-completions only? put a LiteLLM proxy in front"
+        elif exc.code in (401, 403):
+            where = (f"${provider.auth_token_env}" if provider.auth_token_env
+                     else "auth_token in providers.toml")
+            hint = f" — the endpoint refused the token ({where})"
         return False, f"HTTP {exc.code} on /v1/messages{hint}"
     except TimeoutError:
         # A local server shared with something else, or one reloading the model,
@@ -349,8 +389,7 @@ def system_messages_ok(base_url: str, provider: Provider, timeout: float = 30.0)
     }).encode()
     request = urllib.request.Request(
         base_url.rstrip("/") + "/v1/messages", data=shaped,
-        headers={"content-type": "application/json", "anthropic-version": "2023-06-01",
-                 "x-api-key": provider.auth_token or "unused"})
+        headers=probe_headers(provider))
     try:
         with urllib.request.urlopen(request, timeout=timeout):
             return True

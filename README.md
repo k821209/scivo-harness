@@ -381,7 +381,13 @@ agent loop is tool calls. Recent llama.cpp `llama-server` does this natively
 chat-completions needs a translator such as the LiteLLM proxy in front.
 `doctor` sends a tool-call request and then a request with a system message
 in the middle of the conversation, which is how Claude Code actually talks. It
-tells you which case you are in rather than letting it surface mid-task.
+tells you which case you are in rather than letting it surface mid-task. It
+authenticates the way the session will, with the provider's own token: a
+`Bearer` header from `auth_token`/`auth_token_env` and the same value as
+`x-api-key` for a local server started with `--api-key`. A provider whose
+`auth_token_env` is not set is told that, before anything is sent — the probe
+used to send the literal string "unused" for it and report the 401 that came
+back as if the endpoint were wrong.
 
 ### Local model, start to finish
 
