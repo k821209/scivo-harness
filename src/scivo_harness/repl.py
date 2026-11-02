@@ -38,8 +38,14 @@ from .permissions import is_outward
 from .session import Session, scivo_tool_label
 from .toolsets import PREFIX
 
-CLAUDE_MODELS = {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5",
-                 "haiku": "claude-haiku-4-5", "fable": "claude-fable-5-1"}
+# An alias names the CURRENT best of its tier, not a fixed release: `/model
+# opus` should mean today's Opus. Left at the 5 generation, the four aliases
+# were the whole menu `/model` prints, so 5.5 read as unavailable even though
+# an exact id has always passed through below. Probed on 2026-11-02: all four
+# answer, as do the ids they replace, which stay reachable verbatim
+# (`/model claude-opus-5`).
+CLAUDE_MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
+                 "haiku": "claude-haiku-5-5", "fable": "claude-fable-5-1"}
 from .skills import discover
 
 # Handled by Claude Code itself, not here: they go through as a prompt. Listed

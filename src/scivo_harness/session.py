@@ -17,7 +17,9 @@ from .preflight import Briefing, gather
 from .scivo_mcp import connect
 from .toolsets import PREFIX, ToolPlan
 
-DEFAULT_MODEL = "claude-opus-5"
+# The newest Opus, to match the `opus` alias in repl.CLAUDE_MODELS. A session
+# that wants another one says so: --model <id>, or /model mid-conversation.
+DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_EFFORT = "high"
 
 # Host tools the research work actually uses. Everything else the preset offers
