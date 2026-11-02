@@ -43,11 +43,30 @@ class _SlashCompleter:
 def _build_completer(commands: dict[str, str], skills: list[Skill]) -> Any:
     from prompt_toolkit.completion import Completer, Completion
 
+    from .session import CLAUDE_CATALOG
+
     inner = _SlashCompleter(commands, skills)
+    MODEL = "/model "
 
     class SlashCompleter(Completer):
         def get_completions(self, document, complete_event):  # noqa: ANN001
             text = document.text_before_cursor
+            # `/model` is the one command whose ARGUMENT is the thing being
+            # chosen, and the names are what nobody remembers. Completing them
+            # shows the choices without having to print the menu first; the
+            # menu (`/model` alone) stays the full list, numbers included.
+            if text.startswith(MODEL):
+                typed = text[len(MODEL):]
+                if " " in typed:
+                    return
+                needle = typed.strip().lower()
+                for alias, (model, era) in CLAUDE_CATALOG.items():
+                    offer = next((c for c in (alias, model)
+                                  if c.lower().startswith(needle)), None)
+                    if offer:
+                        yield Completion(offer, start_position=-len(typed),
+                                         display=offer, display_meta=f"Claude · {era}")
+                return
             # Only the first word, and only when it is a slash command.
             if not text.startswith("/") or " " in text:
                 return

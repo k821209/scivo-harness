@@ -107,11 +107,15 @@ Feedback tab.
 ## Switching models, inside a session
 
 ```
-/model                 current model and the choices
-/model sonnet          opus · sonnet · haiku · fable — the conversation continues
+/model                 the numbered menu: every Claude model and every provider
+/model 3               pick the third line of that menu
+/model sonnet          by name — the conversation continues
+/model claude-opus-5   by exact id, listed or not (a model released today works)
 /model local           a provider from providers.toml — starts a new conversation
-/model opus            back to Claude (also a new conversation, if you were on local)
 ```
+
+`/model ` also completes the names at the prompt, so the choices are there
+without printing the menu first.
 
 Claude models change in place. The same session, with its history, carries on
 under the new model. A different provider cannot: the endpoint belongs to the

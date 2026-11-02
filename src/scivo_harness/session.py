@@ -17,9 +17,26 @@ from .preflight import Briefing, gather
 from .scivo_mcp import connect
 from .toolsets import PREFIX, ToolPlan
 
-# The newest Opus, to match the `opus` alias in repl.CLAUDE_MODELS. A session
-# that wants another one says so: --model <id>, or /model mid-conversation.
-DEFAULT_MODEL = "claude-opus-5-5"
+# What `/model` can switch to: alias -> (model id, generation). An alias names
+# the CURRENT best of its tier, so the ids it replaced are listed too rather
+# than being reachable only by someone who remembers them — `/model` with no
+# argument prints this as a numbered menu. Probed live on 2026-11-02: all seven
+# answer on a subscription credential. It is a MENU, not a gate: repl resolves
+# any `claude-*` id, listed here or not, so a model released tomorrow is usable
+# the day it ships.
+CLAUDE_CATALOG: dict[str, tuple[str, str]] = {
+    "opus":      ("claude-opus-5-5",   "current"),
+    "sonnet":    ("claude-sonnet-5-5", "current"),
+    "haiku":     ("claude-haiku-5-5",  "current"),
+    "fable":     ("claude-fable-5-1",  "current"),
+    "opus-5":    ("claude-opus-5",     "previous"),
+    "sonnet-5":  ("claude-sonnet-5",   "previous"),
+    "haiku-4-5": ("claude-haiku-4-5",  "previous"),
+}
+CLAUDE_MODELS = {alias: model for alias, (model, _) in CLAUDE_CATALOG.items()}
+
+# Derived, so "the newest Opus" is written down once.
+DEFAULT_MODEL = CLAUDE_MODELS["opus"]
 DEFAULT_EFFORT = "high"
 
 # Host tools the research work actually uses. Everything else the preset offers

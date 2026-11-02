@@ -38,14 +38,9 @@ from .permissions import is_outward
 from .session import Session, scivo_tool_label
 from .toolsets import PREFIX
 
-# An alias names the CURRENT best of its tier, not a fixed release: `/model
-# opus` should mean today's Opus. Left at the 5 generation, the four aliases
-# were the whole menu `/model` prints, so 5.5 read as unavailable even though
-# an exact id has always passed through below. Probed on 2026-11-02: all four
-# answer, as do the ids they replace, which stay reachable verbatim
-# (`/model claude-opus-5`).
-CLAUDE_MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
-                 "haiku": "claude-haiku-5-5", "fable": "claude-fable-5-1"}
+# Defined in session.py, beside DEFAULT_MODEL which derives from it. Re-exported
+# here because this is where `/model` reads it.
+from .session import CLAUDE_CATALOG, CLAUDE_MODELS  # noqa: F401
 from .skills import discover
 
 # Handled by Claude Code itself, not here: they go through as a prompt. Listed
@@ -61,7 +56,7 @@ LOCAL_COMMANDS = {
     "/cost": "spend so far",
     "/doctor": "what pays for this session, and what could stop it",
     "/session": "this session's id, to resume it later",
-    "/model": "switch model: opus · sonnet · haiku · fable, or a provider such as local",
+    "/model": "switch model — on its own it lists every choice, numbered",
     "/permissions": "show or change: default · acceptEdits · auto · plan · always <tool> · always -<tool>",
     "/dangerously-skip-permissions": "stop asking for anything (`off` to ask again); guardrails still apply",
     "/tools": "which scivo tools this profile loaded",
@@ -766,23 +761,57 @@ class Repl:
 
     # ----------------------------------------------------------------- model
 
+    def _model_rows(self, providers: dict) -> list[tuple[str, str, str]]:
+        """Everything this session can switch to: what to type, what it is.
+
+        One list builds the numbered menu AND resolves `/model 3`, so the
+        number a person reads cannot drift from the number that is picked.
+        A provider is listed under its own name rather than its model id,
+        because that is what the switch below takes.
+        """
+        rows = [(alias, model, f"Claude · {era}")
+                for alias, (model, era) in CLAUDE_CATALOG.items()]
+        rows += [(name, candidate.model or "(the provider's default)",
+                  f"{name} · new conversation")
+                 for name, candidate in providers.items() if name != "anthropic"]
+        return rows
+
     async def _model(self, argument: str) -> None:
         from .providers import load_all
         from .session import DEFAULT_EFFORT, DEFAULT_MODEL
 
         provider = self.session.provider
         providers = load_all()
+        rows = self._model_rows(providers)
         if not argument:
+            token_width = max(len(token) for token, _, _ in rows)
+            model_width = max(len(model) for _, model, _ in rows)
+            listing = []
+            for index, (token, model, note) in enumerate(rows, start=1):
+                here = model == self.session.model
+                listing.append(
+                    f"\n  {index:>2}. " + ui.bold(token.ljust(token_width)) + "  "
+                    + (ui.green(model.ljust(model_width)) if here else model.ljust(model_width))
+                    + ui.dim(f"  {note}")
+                    + (ui.green("  ← this session") if here else ""))
             self._say(f"\n  model     {self.session.model}"
                       + f"\n  provider  {provider.name}" + (f" → {provider.base_url}" if provider.base_url else "")
-                      + ui.dim("\n\n  Claude, keeps the conversation:  /model " + " | ".join(CLAUDE_MODELS)
-                               + "\n  another endpoint, new conversation: /model "
-                               + " | ".join(n for n in providers if n != "anthropic")
-                               + ("" if len(providers) > 1 else "(none configured — scivo providers --init)")
-                               + "\n  to make it stick for this project: scivo providers use <name>\n"))
+                      + "\n" + "".join(listing)
+                      + ui.dim("\n\n  /model <number>, <name>, or any claude-* id"
+                               + ("" if len(providers) > 1 else
+                                  "\n  no other endpoint configured — scivo providers --init")
+                               + "\n  to make a provider stick for this project: scivo providers use <name>\n"))
             return
 
         wanted = argument.split()[0]
+        if wanted.isdigit():
+            # The menu's own numbering, read back from the list that printed it.
+            choice = int(wanted)
+            if not 1 <= choice <= len(rows):
+                self._say(ui.red(f"\n  there is no choice {choice}")
+                          + ui.dim(f" — /model lists {len(rows)}\n"))
+                return
+            wanted = rows[choice - 1][0]
         claude_model = CLAUDE_MODELS.get(wanted.lower()) or (wanted if wanted.startswith("claude-") else None)
 
         if claude_model and not provider.has_endpoint:
