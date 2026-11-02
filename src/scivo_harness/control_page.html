@@ -67,6 +67,30 @@
   .sc-md blockquote { border-left: 3px solid var(--line); margin: 8px 0; padding: 2px 12px; color: var(--muted); }
   .sc-md img { max-width: 100%; }
   .sc-md a { color: var(--accent); }
+  /* The dashboard renders a published page INTO its own document, and its
+     Tailwind preflight zeroes exactly the defaults markdown leans on:
+     `ol, ul { list-style: none; margin: 0; padding: 0 }`, `margin: 0` on
+     p / headings / hr, and headings down to `font-size: inherit;
+     font-weight: inherit`. A two-item ordered list arrived as two unnumbered
+     lines, so the "1번 / 2번" in the next paragraph pointed at nothing
+     (feedback 552ccf991ba9). Restored for the markdown subtree only: the page
+     must not depend on being opened standalone, where the browser defaults
+     would have covered this. */
+  .sc-md p { margin: 8px 0; }
+  .sc-md ul, .sc-md ol { margin: 8px 0; padding-left: 1.7em; }
+  .sc-md ul { list-style: disc outside; }
+  .sc-md ol { list-style: decimal outside; }
+  .sc-md li { margin: 3px 0; }
+  .sc-md li > p { margin: 0; }
+  .sc-md li > ul, .sc-md li > ol { margin: 3px 0; }
+  .sc-md h1, .sc-md h2, .sc-md h3, .sc-md h4, .sc-md h5, .sc-md h6 {
+    font-weight: 650; line-height: 1.3; margin: 14px 0 6px; }
+  .sc-md h1 { font-size: 1.3em; }
+  .sc-md h2 { font-size: 1.17em; }
+  .sc-md h3 { font-size: 1.05em; }
+  .sc-md hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+  .sc-md > :first-child { margin-top: 0; }
+  .sc-md > :last-child { margin-bottom: 0; }
   .sc-preview { width: 100%; min-height: 160px; height: 280px; border: 1px solid var(--line); border-radius: 8px; background: #fff; margin: 4px 0 10px; resize: vertical; }
   .sc-preview-label { font-size: 12px; color: var(--muted); }
   .sc-tool { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); padding: 0 4px; white-space: pre-wrap; word-break: break-all; }
