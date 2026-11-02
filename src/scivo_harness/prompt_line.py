@@ -145,6 +145,21 @@ class Line:
     def rich(self) -> bool:
         return self._session is not None
 
+    def pending_text(self) -> str:
+        """What is half-typed at the live prompt right now, if anything.
+
+        Cancelling `prompt_async` drops its buffer, so an interruption that
+        wins the race against the prompt — a web message, a finished task —
+        would eat a line someone was in the middle of writing. The REPL reads
+        it here before cancelling and hands it back as the next default.
+        """
+        if self._session is None:
+            return ""
+        try:
+            return self._session.default_buffer.text or ""
+        except Exception:  # noqa: BLE001 — no live prompt means nothing typed
+            return ""
+
     async def ask(self, styled: str, plain: str, default: str = "") -> str:
         """`styled` may carry ANSI; `plain` is the fallback for a dumb stdin.
 

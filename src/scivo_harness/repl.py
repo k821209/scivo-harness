@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import io
 import json
+import os
 import re
 import sys
 import time
@@ -57,6 +58,7 @@ LOCAL_COMMANDS = {
     "/doctor": "what pays for this session, and what could stop it",
     "/session": "this session's id, to resume it later",
     "/model": "switch model — on its own it lists every choice, numbered",
+    "/notify": "what a finished background task does: off | ask | always",
     "/permissions": "show or change: default · acceptEdits · auto · plan · always <tool> · always -<tool>",
     "/dangerously-skip-permissions": "stop asking for anything (`off` to ask again); guardrails still apply",
     "/tools": "which scivo tools this profile loaded",
@@ -71,6 +73,21 @@ LOCAL_COMMANDS = {
 }
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+NOTIFY_MODES = ("off", "ask", "always")
+
+# Typed at the offer, these mean "yes, pick it up". "확인" is in the list
+# because that is the word the user was already typing by hand to make the
+# model notice a finished job (2026-11-03).
+NOTIFY_YES = frozenset({"y", "ye", "yes", "ok", "okay", "go", "sure",
+                        "ㅇ", "ㅇㅇ", "ㄱ", "ㄱㄱ", "네", "예", "응", "확인"})
+
+
+def _notify_mode_from_env() -> str:
+    """`SCIVO_NOTIFY=off|ask|always`, else ask. An unreadable value is ask,
+    not a crash: this decides a convenience, not a permission."""
+    value = os.environ.get("SCIVO_NOTIFY", "").strip().lower()
+    return value if value in NOTIFY_MODES else "ask"
 
 # How much of one resumed message is shown. Lines, not characters: the point of
 # the recap is the shape, and a character budget spends it all on the first
@@ -228,6 +245,14 @@ class Repl:
         self.mode: str = session.options.permission_mode or "default"
         self._compacting = False
         self._typed_ahead = ""
+        # What a finished background task does while the prompt sits idle.
+        # `ask` is the default on purpose: a session that spends a turn — and
+        # takes tool actions — while nobody is watching should be a thing you
+        # chose, not a thing you inherited. The Event coalesces either way:
+        # five notifications in a row are one offer, not five.
+        self.notify_mode = _notify_mode_from_env()
+        self._wake = asyncio.Event()
+        self._wake_notes: list[str] = []
         self._stopping = False
         self.tool_calls = 0
         self._tool_started: dict[str, tuple[int, float]] = {}
@@ -380,6 +405,67 @@ class Repl:
         print(paint(f"\n[{stamp}]") + " " + paint(line), flush=True)
         if self.control and self.control.active:
             self.control.status(f"task {task} {status}: {summary}", level="warn")
+        if self.notify_mode != "off":
+            # Printing it was only half the job: the model is not in a turn, so
+            # nothing acts on it until the user says something. `/notify off`
+            # goes back to printing only.
+            self._wake_notes.append(f"task {task} {status}" if task else str(status))
+            self._wake.set()
+
+    def _consume_wake(self) -> list[str]:
+        """The notifications waiting for a turn, taken and cleared.
+
+        Cleared on EVERY turn, not only an automatic one: a notification that
+        arrives while the user is typing is already in the conversation by the
+        time their line is sent, so the model sees it in that turn and must not
+        be woken again for it afterwards.
+        """
+        notes, self._wake_notes = self._wake_notes, []
+        self._wake.clear()
+        return notes
+
+    def _wake_line(self, notes: list[str]) -> str:
+        """What the automatic turn says. Prefixed, because it was not typed.
+
+        Deliberately thin: the notification itself is already in the
+        conversation (that is why typing anything at all used to produce a
+        report), so this only has to say that nobody is waiting to be asked.
+        """
+        what = "; ".join(notes) or "a background task finished"
+        return (f"[scivo] {what} — the notification is above, in this "
+                f"conversation. Nobody typed this: pick the work back up, or "
+                f"say what you found and stop.")
+
+    async def _offer_wake(self, prompt: str, plain: str, typed: str) -> tuple[str, str]:
+        """Ask before spending a turn on it — the default.
+
+        One prompt does both jobs, so there is no second input channel to get
+        wrong: a bare yes picks the work up, any other words become the turn
+        (which carries the notification just the same, since it is already in
+        the conversation), and an empty line declines. Whatever was half-typed
+        arrives as the default, so the offer cannot eat it either.
+        """
+        notes = self._consume_wake()
+        what = "; ".join(notes) or "a background task finished"
+        print(ui.yellow(f"\n  {what}"), flush=True)
+        reply = (await self.line.ask(
+            ui.yellow("  pick it up? ") + ui.dim("[y/N, or say what you want instead] "),
+            "  pick it up? [y/N] ", default=typed)).strip()
+        if reply.lower() in NOTIFY_YES:
+            line = self._wake_line(notes)
+            print(f"{prompt}{line}  {ui.dim('[task]')}", flush=True)
+            return line, "task"
+        return reply, "terminal"
+
+    def _announce_wake(self, prompt: str) -> str:
+        """Show the automatic turn where a typed line would have been.
+
+        A turn that appears with no visible prompt line reads as the model
+        talking to itself.
+        """
+        line = self._wake_line(self._consume_wake())
+        print(f"{prompt}{line}  {ui.dim('[task]')}", flush=True)
+        return line
 
     def _on_task_update(self, message) -> None:
         # Terminal state updates only; running/queued spam the log.
@@ -714,27 +800,53 @@ class Repl:
             prompt = ui.cyan("scivo> ")
         plain = f"scivo[{tag}]> " if tag else "scivo> "
         typed, self._typed_ahead = self._typed_ahead, ""
-        if not (self.control and self.control.active):
-            return await self.line.ask(prompt, plain, default=typed), "terminal"
+        on_page = bool(self.control and self.control.active)
+        # A notification that landed before we got here needs no race.
+        if self.notify_mode != "off" and self._wake.is_set():
+            if self.notify_mode == "ask":
+                # The offer's prompt carries what was typed, so it is not
+                # stashed as well — that would send it twice.
+                return await self._offer_wake(prompt, plain, typed)
+            # No prompt was drawn, so anything typed during the last turn is
+            # still pending: hand it back rather than consume it here.
+            self._typed_ahead = typed
+            return self._announce_wake(prompt), "task"
+        # A plain stdin read runs in a thread that cannot be withdrawn, so
+        # neither a web message nor a wake-up can interrupt it; the next Enter
+        # carries them (SCIVO_PROMPT_STYLE=simple).
+        if not on_page and not (self.notify_mode != "off" and self.line.rich):
+            line = await self.line.ask(prompt, plain, default=typed)
+            self._consume_wake()
+            return line, "terminal"
 
-        web = asyncio.create_task(self.control.messages.get())
-        waiting = {web}
+        web = asyncio.create_task(self.control.messages.get()) if on_page else None
+        wake = asyncio.create_task(self._wake.wait()) if self.notify_mode != "off" else None
+        waiting = {task for task in (web, wake) if task is not None}
         terminal = None
-        # A plain stdin read runs in a thread that cannot be withdrawn, so it
-        # would swallow the next typed line after a web message won. Only the
-        # prompt_toolkit prompt can be cancelled cleanly.
+        # Only the prompt_toolkit prompt can be cancelled cleanly.
         if self.line.rich:
             terminal = asyncio.create_task(self.line.ask(prompt, plain, default=typed))
             waiting.add(terminal)
+        # What is half-typed at the prompt, read BEFORE anything is cancelled:
+        # cancelling `prompt_async` drops its buffer, and a wake-up that ate a
+        # half-written line would be worse than waiting.
         done, pending = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+        half_typed = "" if terminal in done else self.line.pending_text()
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
 
         if terminal is not None and terminal in done:
-            if web in done:  # both at once: keep the web message for next time
+            if web is not None and web in done:  # both at once: keep it for next time
                 await self.control.messages.put(web.result())
+            self._consume_wake()
             return terminal.result(), "terminal"
+        if wake is not None and wake in done and (web is None or web not in done):
+            if self.notify_mode == "ask":
+                return await self._offer_wake(prompt, plain, half_typed)
+            self._typed_ahead = half_typed
+            return self._announce_wake(prompt), "task"
+        self._consume_wake()
         got = web.result()
         # Anything else already queued goes in with it: the page may have
         # taken several lines while the previous turn ran, and the later ones
@@ -758,6 +870,26 @@ class Repl:
         text = got
         print(f"{prompt}{text}  {ui.dim('[web]')}")
         return text, "web"
+
+    # ---------------------------------------------------------------- notify
+
+    def _notify(self, argument: str) -> None:
+        want = argument.strip().lower()
+        want = "always" if want == "on" else want
+        if want and want not in NOTIFY_MODES:
+            self._say(ui.red(f"\n  /notify takes {' | '.join(NOTIFY_MODES)}, not {want!r}\n"))
+            return
+        if want:
+            self.notify_mode = want
+            if want == "off":
+                self._consume_wake()
+        says = {"off": "is printed, and waits for you to say something",
+                "ask": "is printed, and asks whether to pick it up",
+                "always": "starts a turn by itself, with nobody asked"}
+        self._say(f"\n  notify   {self.notify_mode}"
+                  + ui.dim(f"  — a finished background task {says[self.notify_mode]}"
+                           f"\n  /notify {' | '.join(NOTIFY_MODES)}"
+                           f"\n  SCIVO_NOTIFY=<mode> to start every session that way\n"))
 
     # ----------------------------------------------------------------- model
 
@@ -1233,6 +1365,11 @@ class Repl:
                         if self.control and self.control.active and via != "web":
                             self.control.user(line, via)
                         await self._model(argument.strip())
+                        continue
+                    if command == "/notify":
+                        if self.control and self.control.active and via != "web":
+                            self.control.user(line, via)
+                        self._notify(argument.strip())
                         continue
                     if self.control and self.control.active and via != "web":
                         self.control.user(line, via)

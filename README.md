@@ -104,6 +104,37 @@ dropped silently.
 once went to Anthropic and the user found out only when it never appeared in the
 Feedback tab.
 
+## A finished background job gets picked up
+
+A `Monitor`, or a background task the model started, finishes while the prompt
+sits empty. The notification is printed the moment the CLI delivers it — and
+since 2026-11-03 it is also **offered**, so the model can pick the work back up
+instead of waiting to be asked:
+
+```
+  task b51wc35va completed
+  pick it up? [y/N, or say what you want instead]
+```
+
+One prompt does both jobs. A bare yes (`y`, `ok`, `ㄱㄱ`, `확인`) starts the
+turn; any other words become the turn instead — the notification is already in
+the conversation, so there is nothing to repeat; an empty line declines.
+Whatever was half-typed when the task finished arrives as the offer's default
+rather than being lost with the cancelled prompt, and several notifications at
+once are one offer, not one each.
+
+```
+/notify ask            print it and ask — the default
+/notify always         start the turn without asking
+/notify off            print it and wait for me to say something
+```
+
+`SCIVO_NOTIFY=off|ask|always` starts every session that way. `ask` is the
+default deliberately: a turn spends tokens and may call tools, and that is
+worth choosing rather than inheriting. With `SCIVO_PROMPT_STYLE=simple` a
+notification landing while the prompt is already open waits for the next Enter
+— a thread reading stdin cannot be withdrawn.
+
 ## Switching models, inside a session
 
 ```
