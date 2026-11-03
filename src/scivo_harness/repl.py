@@ -451,7 +451,14 @@ class Repl:
         conversation (that is why typing anything at all used to produce a
         report), so this only has to say that nobody is waiting to be asked.
         """
-        what = "; ".join(notes) or "a background task finished"
+        # Bounded, because five finished tasks with summaries and output paths
+        # made a 700-character "line" — which crashed the dispatch loop when it
+        # was handed to `Path(...).exists()`. The notifications themselves are
+        # in the conversation above; this only has to point at them.
+        shown = [note[:160] for note in notes[:3]]
+        what = "; ".join(shown) or "a background task finished"
+        if len(notes) > 3:
+            what += f" (+{len(notes) - 3} more above)"
         # "this session's own" is a checked claim, not a reassurance: a
         # notification whose session_id is not ours never reaches here.
         return (f"[scivo] {what} — this session's own task, and the notification "
@@ -1413,7 +1420,12 @@ class Repl:
                         continue
 
                     command, _, argument = line.partition(" ")
-                    if command in {"/paste", "/img"} or (via != "web" and _attachments.image_path_in(line)):
+                    # `via == "terminal"`, not `!= "web"`: a line this process
+                    # generated itself (a task wake-up) is not a path someone
+                    # dropped at the prompt, and probing it sent prose to
+                    # `os.stat`.
+                    if command in {"/paste", "/img"} or (
+                            via == "terminal" and _attachments.image_path_in(line)):
                         self._attach(command, argument.strip() if command in {"/paste", "/img"} else line)
                         continue
                     if command == "/scivo-control":

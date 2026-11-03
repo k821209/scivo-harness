@@ -79,15 +79,48 @@ def clipboard_tool_hint() -> str:
     return "needs wl-paste (Wayland) or xclip (X11): sudo apt install -y wl-clipboard xclip"
 
 
+# Every line typed or injected into the REPL goes through here, to spot someone
+# dropping an image path at the prompt — so this ran `stat` on prose, and a
+# 700-character notification killed the session from inside the dispatch loop,
+# where nothing catches it:
+#
+#   OSError: [Errno 36] File name too long: "[scivo] task bt8mmz5t5 completed …"
+#
+# `_exists` is the fix: the filesystem does not answer "no" for a name it
+# cannot take, it raises. The NAME_MAX check below is a fast path for the
+# common shape (one long run of prose) and is not load-bearing on its own —
+# removing it changes nothing a test can see, which is worth knowing before
+# someone "simplifies" the other one instead.
+_NAME_MAX = 255
+
+
 def image_path_in(line: str) -> Path | None:
     """A line that is nothing but the path of an existing image file."""
     text = line.strip().strip("'\"")
-    if not text or "\n" in text or " " in text and not Path(text).exists():
+    if not text or "\n" in text:
+        return None
+    if any(len(part.encode("utf-8", "ignore")) > _NAME_MAX for part in text.split("/")):
+        return None   # prose, not a path — and `stat` would raise, not say no
+    if " " in text and not _exists(text):
         return None
     p = Path(text).expanduser()
-    if p.suffix.lower() in IMAGE_SUFFIXES and p.is_file():
-        return p.resolve()
+    try:
+        if p.suffix.lower() in IMAGE_SUFFIXES and p.is_file():
+            return p.resolve()
+    except OSError:
+        return None
     return None
+
+
+def _exists(text: str) -> bool:
+    """`Path.exists()` that answers instead of raising. A line is untrusted
+    input — an embedded NUL, a bad surrogate or an over-long component all
+    raise from `os.stat`, and the caller only wants to know whether to treat
+    the line as a path."""
+    try:
+        return Path(text).exists()
+    except (OSError, ValueError):
+        return False
 
 
 def save_inbound(root: Path, data: bytes, mime: str, stem: str = "") -> Path:

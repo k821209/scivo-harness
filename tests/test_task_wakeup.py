@@ -142,14 +142,37 @@ def test_the_word_the_user_was_typing_by_hand_counts_as_yes():
         assert _input(stub)[1] == "task", word
 
 
-def test_five_notifications_are_one_offer_naming_all_of_them():
+def test_five_notifications_are_one_offer_that_counts_the_rest():
     stub = _repl(FakeLine(answers=["y"]))
     for n in range(5):
         _note(stub, task=f"task{n}")
     line, via = _input(stub)
-    assert via == "task" and stub.line.asked == 1
-    assert all(f"task{n}" in line for n in range(5))
+    assert via == "task" and stub.line.asked == 1, "one offer, not five"
+    assert all(f"task{n}" in line for n in range(3))
+    assert "(+2 more above)" in line
     assert not stub._wake.is_set() and stub._wake_notes == []
+
+
+def test_the_wake_line_stays_a_line():
+    """Five finished tasks with summaries and output paths made a
+    700-character "line", and the dispatch loop handed it to
+    `Path(...).exists()`: `OSError: [Errno 36] File name too long`, raised
+    where nothing catches it, so the session died. Two ends were fixed — this
+    line is bounded, and `image_path_in` no longer raises on anything — and
+    either alone would have stopped the crash. Both, because a bounded line
+    is not a guarantee about the next caller and a hardened probe is not a
+    reason to inject prose as a line."""
+    from scivo_harness.attachments import image_path_in
+
+    stub = _repl(FakeLine(answers=["y"]))
+    for n in range(5):
+        _note(stub, task=f"task{n}", summary="Run the remote self-report script "
+                                             "with stderr visible" * 3,
+              output=f"/tmp/claude-1001/-home-k821209-works/session/tasks/task{n}.output")
+    line, _ = _input(stub)
+    assert len(line) < 800, len(line)
+    # And the call that crashed answers instead of raising.
+    assert image_path_in(line) is None
 
 
 def test_the_offer_carries_a_half_typed_line_as_its_default():
