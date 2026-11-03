@@ -76,6 +76,18 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 NOTIFY_MODES = ("off", "ask", "always")
 
+# Tools that create a run row worth following (bare names; the scivo prefix is
+# already stripped by `scivo_tool_label`).
+RUN_CREATING_TOOLS = frozenset({"submit_remote_job", "launch_local_job",
+                                "record_analysis_run"})
+# Long enough to cost nothing next to an 11-minute job, short enough that the
+# answer arrives while the person is still thinking about it.
+RUN_POLL_SECONDS = 30.0
+# Consecutive refusals before the watch gives up. An MCP without `run_notices`
+# refuses every time and should stop being asked; a dropped pipe should not
+# cost the notification for a job that is still running.
+RUN_POLL_GIVE_UP = 3
+
 # Typed at the offer, these mean "yes, pick it up". "확인" is in the list
 # because that is the word the user was already typing by hand to make the
 # model notice a finished job (2026-11-03).
@@ -277,6 +289,11 @@ class Repl:
         self.notify_mode = _notify_mode_from_env()
         self._wake = asyncio.Event()
         self._wake_notes: list[str] = []
+        # Runs this session launched, watched until they close. Started only
+        # when a run-creating tool is actually called, and stopped the moment
+        # nothing of ours is open: the cheapest poll is the one not made.
+        self._runs_task: asyncio.Task | None = None
+        self._runs_since: str | None = None
         self._stopping = False
         self.tool_calls = 0
         self._tool_started: dict[str, tuple[int, float]] = {}
@@ -363,6 +380,8 @@ class Repl:
                 print(ui.dim(line), flush=True)
                 if self.control:
                     self.control.tool(f"#{self.tool_calls} {stamp} {label}", detail)
+                if label in RUN_CREATING_TOOLS:
+                    self._watch_runs()
         self._streamed = ""
         if self.control:
             self.control.end_assistant()
@@ -399,6 +418,86 @@ class Repl:
         pump = getattr(self, "pump", None)
         if pump is not None:
             await pump.stop()
+
+    def _watch_runs(self) -> None:
+        """Start following this session's runs, if we are not already.
+
+        A remote job finishes, the row is closed, the dashboard knows — and the
+        session that launched it was never told, so an agent blocked on
+        `wait_for_run` for seven minutes and then reported a finished job as
+        still running (feedback ecba6396d9b4). The MCP stamps each run with the
+        client that recorded it and `run_notices` answers what closed; this is
+        the loop that asks, between turns, without holding the session.
+        """
+        if self._runs_task is not None and not self._runs_task.done():
+            return
+        self._runs_task = asyncio.create_task(self._follow_runs(), name="scivo-run-watch")
+
+    async def _follow_runs(self) -> None:
+        """Ask `run_notices` until nothing of ours is open, then stop.
+
+        Errors are swallowed and end the loop rather than the session: this is
+        a convenience, and an MCP that predates `run_notices` must not take the
+        REPL down with it. The next submitted run starts a fresh loop.
+        """
+        from .scivo_mcp import connect
+
+        try:
+            async with connect(self.session.config) as client:
+                refused = 0
+                while True:
+                    await asyncio.sleep(RUN_POLL_SECONDS)
+                    outcome = await client.call("run_notices", **(
+                        {"since": self._runs_since} if self._runs_since else {}))
+                    if not outcome.ok:
+                        # A blip must not end the watch — an eleven-minute job
+                        # would then finish unannounced because one poll lost
+                        # the pipe. A tool that is simply not there refuses
+                        # every time, so a run of them is the real signal.
+                        refused += 1
+                        if refused >= RUN_POLL_GIVE_UP:
+                            return
+                        continue
+                    refused = 0
+                    # A scalar tool comes back as ONE content block: `items`
+                    # is always a list (one block per record), so the dict is
+                    # `first`. Reading `items` here looked fine and silently
+                    # never found a notice.
+                    data = outcome.first if isinstance(outcome.first, dict) else {}
+                    self._runs_since = data.get("now") or self._runs_since
+                    for notice in (data.get("closed") or []):
+                        self._on_run_closed(notice)
+                    if not data.get("still_open"):
+                        return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a convenience must not end a session
+            return
+
+    def _on_run_closed(self, notice: dict) -> None:
+        """One finished run: printed now, and offered like a finished task."""
+        code = notice.get("exit_code")
+        run_key = str(notice.get("run_key") or "")
+        where = f"{notice.get('slug')}/{notice.get('analysis')}"
+        verdict = "exit 0" if code == 0 else f"exit {code}"
+        paint = ui.yellow if code == 0 else ui.red
+        stamp = time.strftime("%H:%M:%S")
+        print(paint(f"\n[{stamp}]") + paint(f"  · run {run_key} {verdict}  {where}"),
+              flush=True)
+        if notice.get("caution"):
+            print(ui.dim(f"    {notice['caution']}"), flush=True)
+        if self.control and self.control.active:
+            self.control.status(f"run {run_key} {verdict} ({where})",
+                                level="info" if code == 0 else "warn")
+        if self.notify_mode == "off":
+            return
+        note = f"run {run_key} in {where} finished, {verdict}"
+        if notice.get("caution"):
+            note += " — nothing recorded whether it worked, so read the log"
+        if notice.get("log_path"):
+            note += f" ({notice['log_path']})"
+        self._wake_notes.append(note)
+        self._wake.set()
 
     def _on_idle_message(self, message) -> None:
         """A message that arrived between turns — printed now, above the
@@ -1481,6 +1580,9 @@ class Repl:
             if self.control and self.control.active:
                 await self.control.stop()
             await self._stop_pump()
+            if self._runs_task is not None:
+                self._runs_task.cancel()
+                await asyncio.gather(self._runs_task, return_exceptions=True)
             await self.client.disconnect()
             if self.session.endpoint is not None:
                 self.session.endpoint.close()

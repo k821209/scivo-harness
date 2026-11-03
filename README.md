@@ -146,6 +146,26 @@ worth choosing rather than inheriting. With `SCIVO_PROMPT_STYLE=simple` a
 notification landing while the prompt is already open waits for the next Enter
 — a thread reading stdin cannot be withdrawn.
 
+## A finished remote job comes back on its own
+
+`submit_remote_job` returns, the job runs for eleven minutes on a compute
+server, and the row is closed when it ends — by the job's own self-report, by a
+poll, or by the stale sweep. The session used to learn none of that: the only
+ways to find out were to block on `wait_for_run` or to keep asking, and an
+agent that had asked a minute earlier told its user a finished job was still
+running.
+
+Each run now records the MCP client that created it (the MCP process is the
+session), and the harness follows its own runs with `run_notices` — starting
+when a run-creating tool is actually called, stopping the moment nothing of
+its own is open, and holding nothing while it waits. A close arrives like a
+finished background task: printed at once, then offered, with `exit_code` and
+the log path. An `exit_code` of -2 says so loudly, because it means only that
+the process is gone and nothing recorded whether it worked.
+
+`/notify off` silences the offer for runs as well as tasks. Following costs one
+MCP call every 30 seconds, and only while one of this session's runs is open.
+
 ## Switching models, inside a session
 
 ```
