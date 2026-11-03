@@ -83,6 +83,30 @@ NOTIFY_YES = frozenset({"y", "ye", "yes", "ok", "okay", "go", "sure",
                         "ㅇ", "ㅇㅇ", "ㄱ", "ㄱㄱ", "네", "예", "응", "확인"})
 
 
+def _wake_summary(notes: list[str], *, name: int = 2, clip: int = 90) -> str:
+    """What finished, short enough to be a prompt and a card title.
+
+    Two separate things were sized wrong by the same oversight. The automatic
+    turn's text was bounded after five notifications made a 700-character
+    "line" that crashed the dispatch loop — and the OFFER was left joining
+    every note in full, so a session with 22 finished tasks put thousands of
+    characters into the question on the control page and the card could not be
+    approved at all (user, 2026-11-03, in another project). The offer is the
+    one a person has to read and click, so it is the shorter of the two.
+
+    One renderer for both: the turn and the question describing the same
+    notifications differently is the next confusion.
+    """
+    if not notes:
+        return "a background task finished"
+    if len(notes) == 1:
+        return notes[0][:clip * 2]
+    shown = "; ".join(note[:clip] for note in notes[:name])
+    rest = len(notes) - name
+    return (f"{len(notes)} background tasks finished: {shown}"
+            + (f" (+{rest} more above)" if rest > 0 else ""))
+
+
 def _notify_mode_from_env() -> str:
     """`SCIVO_NOTIFY=off|ask|always`, else ask. An unreadable value is ask,
     not a crash: this decides a convenience, not a permission."""
@@ -451,14 +475,7 @@ class Repl:
         conversation (that is why typing anything at all used to produce a
         report), so this only has to say that nobody is waiting to be asked.
         """
-        # Bounded, because five finished tasks with summaries and output paths
-        # made a 700-character "line" — which crashed the dispatch loop when it
-        # was handed to `Path(...).exists()`. The notifications themselves are
-        # in the conversation above; this only has to point at them.
-        shown = [note[:160] for note in notes[:3]]
-        what = "; ".join(shown) or "a background task finished"
-        if len(notes) > 3:
-            what += f" (+{len(notes) - 3} more above)"
+        what = _wake_summary(notes)
         # "this session's own" is a checked claim, not a reassurance: a
         # notification whose session_id is not ours never reaches here.
         return (f"[scivo] {what} — this session's own task, and the notification "
@@ -475,7 +492,7 @@ class Repl:
         arrives as the default, so the offer cannot eat it either.
         """
         notes = self._consume_wake()
-        what = "; ".join(notes) or "a background task finished"
+        what = _wake_summary(notes)
         if self.control is not None and self.control.active:
             # The page renders the question card and collects the answer. Asking
             # in the terminal while someone is on the page is the mistake

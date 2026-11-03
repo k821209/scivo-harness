@@ -148,8 +148,8 @@ def test_five_notifications_are_one_offer_that_counts_the_rest():
         _note(stub, task=f"task{n}")
     line, via = _input(stub)
     assert via == "task" and stub.line.asked == 1, "one offer, not five"
-    assert all(f"task{n}" in line for n in range(3))
-    assert "(+2 more above)" in line
+    assert "5 background tasks finished" in line
+    assert "task0" in line and "(+3 more above)" in line
     assert not stub._wake.is_set() and stub._wake_notes == []
 
 
@@ -387,3 +387,22 @@ def test_a_foreign_notification_does_not_block_our_own():
     line, via = _input(stub)
     assert via == "task"
     assert "b51wc35va" in line and "btrw53fkr" not in line
+
+
+def test_twenty_two_finished_tasks_still_fit_in_a_card_that_can_be_clicked():
+    """The offer's question joined every note in full, so a session with 22
+    finished tasks put thousands of characters into the control page's
+    question card and it could not be approved at all (user, 2026-11-03, in
+    another project). The turn text had already been bounded; the offer — the
+    one a person has to read and click — had not."""
+    stub = _on_page(answer=Repl._PICK_UP)
+    for n in range(22):
+        _note(stub, task=f"b{n:08d}", summary=f"Wire set-para-style through the api {n}" * 2,
+              output=f"/tmp/claude-1001/-home-k821209-works-hwp-cmd/s/tasks/b{n:08d}.output")
+    line, via = _input(stub)
+    assert via == "task"
+    question = stub.control.asked[0]["questions"][0]["question"]
+    assert len(question) < 300, f"{len(question)} chars: {question[:120]}…"
+    assert "22 background tasks finished" in question
+    # The turn and the card describe the same notifications the same way.
+    assert question.split(" — pick it up?")[0] in line
