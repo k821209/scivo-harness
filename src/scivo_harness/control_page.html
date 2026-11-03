@@ -307,7 +307,14 @@
   // The page keeps a per-question answer draft in memory; when every question
   // has an answer (or was skipped), the whole set is submitted so the harness
   // can hand the model one answers object.
-  const questionDrafts = new Map();  // rid -> { [question_text]: label_or_text_or_null }
+  // rid -> { [question_INDEX]: label_or_text_or_null }. Keyed by index, not by
+  // the question text: the draft is written to Firestore as a map, so its keys
+  // become part of a property path, and a path may not exceed 1500 bytes. A
+  // long question (22 finished background tasks, in one case) made every click
+  // fail with "Not sent: property path is longer than 1500 bytes" — the card
+  // rolled back correctly, so the button simply looked dead. The harness maps
+  // indices back to question text, which it already has.
+  const questionDrafts = new Map();
   function markChosen(box, button, label) {
     box.classList.add("answered");
     box.querySelectorAll("button, input").forEach((el) => { el.disabled = true; });
@@ -320,12 +327,12 @@
     const q = ev.questions[qi];
     if (!questionDrafts.has(ev.rid)) questionDrafts.set(ev.rid, {});
     const draft = questionDrafts.get(ev.rid);
-    draft[q.question] = value;
+    draft[String(qi)] = value;
     // Only this card's rows: querying the whole log picked rows of an
     // earlier question card when two were on the page.
     const rows = box ? [box] : [];
     // When every question is answered or skipped, push.
-    if (ev.questions.every((qq) => draft[qq.question] !== undefined)) {
+    if (ev.questions.every((_qq, i) => draft[String(i)] !== undefined)) {
       const answers = {};
       for (const [k, v] of Object.entries(draft)) if (v !== null) answers[k] = v;
       C.put("responses", "questions", { doc: "questions", sid: S.sid,

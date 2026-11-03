@@ -600,6 +600,33 @@ class Control:
         self._touch(index)
         return answers
 
+    def _name_answers(self, pending: "_Question", answered: dict) -> dict:
+        """Index-keyed answers from the page → `{question_text: value}`.
+
+        `AskUserQuestion` checks answers against the option set by question
+        text, so the text has to come back — but it must not travel as a map
+        KEY: those become a Firestore property path, capped at 1500 bytes, and
+        a long question made every click fail to send. The questions are on the
+        event this card was posted from, so the mapping is free here.
+
+        A key that is not an index passes through unchanged: a browser tab
+        loaded before this change still sends question text, and an answer that
+        arrives is worth more than a tidy shape.
+        """
+        try:
+            questions = self.events[pending.index].get("questions") or []
+        except (IndexError, KeyError, TypeError, AttributeError):
+            questions = []
+        out: dict = {}
+        for key, value in answered.items():
+            text = None
+            if isinstance(key, str) and key.isdigit():
+                position = int(key)
+                if 0 <= position < len(questions):
+                    text = str(questions[position].get("question") or "") or None
+            out[text or key] = value
+        return out
+
     async def ask_approval(self, tool: str, detail: str, outward: bool) -> str:
         """Post an approval card and wait for the owner's decision on the page."""
         self.end_assistant()
@@ -758,12 +785,17 @@ class Control:
                     pending = self._questions_pending.get(rid)
                     if not (pending and not pending.future.done()):
                         continue
-                    # The page sends {question_text: label_or_text} directly,
-                    # or `None` on skip. Trust the shape; the tool validates.
+                    # The page sends {question_index: label_or_text}, or `None`
+                    # on skip. Indices, because these keys become a Firestore
+                    # property path and a path is capped at 1500 bytes — keyed
+                    # by question text, a long question made every click fail
+                    # to send. The tool wants them keyed by text, and the
+                    # questions are on the event we posted, so map them here.
                     if answered in (None, {}):
                         pending.future.set_result(None)
                     elif isinstance(answered, dict):
-                        pending.future.set_result(answered)
+                        pending.future.set_result(
+                            self._name_answers(pending, answered))
             elif kind == "control":
                 seq = int(doc.get("interrupt") or 0)
                 if seq > self._interrupt_seen:
