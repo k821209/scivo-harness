@@ -123,6 +123,10 @@ Whatever was half-typed when the task finished arrives as the offer's default
 rather than being lost with the cancelled prompt, and several notifications at
 once are one offer, not one each.
 
+**On the scivo-control page the offer is a question card**, with the same two
+choices and the same freedom to type something else instead; the terminal is
+not asked while the page is up, so there is nothing to walk back to.
+
 ```
 /notify ask            print it and ask — the default
 /notify always         start the turn without asking

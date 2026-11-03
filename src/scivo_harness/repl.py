@@ -447,15 +447,59 @@ class Repl:
         """
         notes = self._consume_wake()
         what = "; ".join(notes) or "a background task finished"
-        print(ui.yellow(f"\n  {what}"), flush=True)
-        reply = (await self.line.ask(
-            ui.yellow("  pick it up? ") + ui.dim("[y/N, or say what you want instead] "),
-            "  pick it up? [y/N] ", default=typed)).strip()
+        if self.control is not None and self.control.active:
+            # The page renders the question card and collects the answer. Asking
+            # in the terminal while someone is on the page is the mistake
+            # `permissions._questions` already records: the page existed and was
+            # never called, so the person at the page had to walk to the
+            # terminal. No terminal prompt is drawn here, so anything typed
+            # before goes back to pending.
+            self._typed_ahead = typed
+            reply = await self._offer_on_page(what)
+        else:
+            print(ui.yellow(f"\n  {what}"), flush=True)
+            reply = (await self.line.ask(
+                ui.yellow("  pick it up? ") + ui.dim("[y/N, or say what you want instead] "),
+                "  pick it up? [y/N] ", default=typed)).strip()
         if reply.lower() in NOTIFY_YES:
             line = self._wake_line(notes)
             print(f"{prompt}{line}  {ui.dim('[task]')}", flush=True)
             return line, "task"
         return reply, "terminal"
+
+    # The card's own wording. `_PICK_UP` doubles as the yes: whatever comes
+    # back is compared against it, so the label and the test cannot drift.
+    _PICK_UP = "Pick it up"
+    _NOT_NOW = "Not now"
+
+    async def _offer_on_page(self, what: str) -> str:
+        """The same offer, as a question card on the scivo-control page.
+
+        Returns a yes word, free text the owner typed instead, or "" when the
+        card was skipped — the shapes `_offer_wake` already handles.
+        """
+        question = f"{what} — pick it up?"
+        answers = await self.control.ask_question({"questions": [{
+            "question": question,
+            "header": "background task",
+            "options": [
+                {"label": self._PICK_UP,
+                 "description": "start a turn on it now"},
+                {"label": self._NOT_NOW,
+                 "description": "leave it — say something else when you want to"},
+            ],
+        }]})
+        picked = (answers or {}).get(question)
+        if isinstance(picked, list):
+            picked = picked[0] if picked else ""
+        picked = str(picked or "").strip()
+        if picked == self._PICK_UP:
+            return "y"
+        if picked == self._NOT_NOW:
+            return ""
+        # Their own words, typed into the card instead of choosing: that
+        # becomes the turn, exactly as it does in the terminal.
+        return picked
 
     def _announce_wake(self, prompt: str) -> str:
         """Show the automatic turn where a typed line would have been.

@@ -71,8 +71,11 @@ def _repl(line: FakeLine | None = None, notify: str = "ask"):
     )
     stub._say = stub.said.append
     for name in ("_next_input", "_on_task_note", "_consume_wake", "_wake_line",
-                 "_announce_wake", "_offer_wake", "_notify"):
+                 "_announce_wake", "_offer_wake", "_offer_on_page", "_notify"):
         setattr(stub, name, getattr(Repl, name).__get__(stub))
+    # The card's labels are read back off the answer, so the stub takes them
+    # from the class rather than repeating the strings.
+    stub._PICK_UP, stub._NOT_NOW = Repl._PICK_UP, Repl._NOT_NOW
     return stub
 
 
@@ -231,3 +234,80 @@ def test_a_dumb_prompt_is_offered_before_it_opens_but_cannot_be_interrupted():
     during.line = FakeLine(answers=["ok"], rich=False, on_ask=lambda: _note(during))
     assert _input(during) == ("ok", "terminal")
     assert not during._wake.is_set()
+
+
+# ── on the scivo-control page ─────────────────────────────────────────────
+
+class FakePage:
+    """The control page: a question card, and whatever the owner picked."""
+
+    def __init__(self, answer=None, active: bool = True):
+        self.active = active
+        self.answer = answer
+        self.asked: list[dict] = []
+        self.statuses: list[str] = []
+        self.messages: asyncio.Queue = asyncio.Queue()
+        self.waiting = False
+
+    def status(self, text, level="info"):
+        self.statuses.append(text)
+
+    async def ask_question(self, payload):
+        self.asked.append(payload)
+        question = payload["questions"][0]["question"]
+        return None if self.answer is None else {question: self.answer}
+
+
+def _on_page(answer=None, notify="ask", line: FakeLine | None = None):
+    stub = _repl(line or FakeLine(answers=[]), notify=notify)   # terminal hangs
+    stub.control = FakePage(answer)
+    return stub
+
+
+def test_the_offer_is_a_card_on_the_page_not_a_prompt_in_the_terminal():
+    # The mistake permissions._questions already records: the page exists and
+    # is never called, so whoever is on the page has to walk to the terminal.
+    stub = _on_page(answer=Repl._PICK_UP)
+    _note(stub)
+    line, via = _input(stub)
+    assert via == "task" and "b51wc35va" in line
+    assert len(stub.control.asked) == 1, "the page was never asked"
+    assert stub.line.asked == 0, "it asked in the terminal while the page was up"
+    card = stub.control.asked[0]["questions"][0]
+    assert "pick it up?" in card["question"]
+    assert [o["label"] for o in card["options"]] == ["Pick it up", "Not now"]
+
+
+def test_not_now_on_the_page_starts_no_turn():
+    stub = _on_page(answer=Repl._NOT_NOW)
+    _note(stub)
+    assert _input(stub) == ("", "terminal")
+    assert not stub._wake.is_set() and stub._wake_notes == []
+
+
+def test_a_skipped_card_starts_no_turn():
+    stub = _on_page(answer=None)          # the page skipped it
+    _note(stub)
+    assert _input(stub) == ("", "terminal")
+
+
+def test_words_typed_into_the_card_become_the_turn():
+    stub = _on_page(answer="로그 먼저 보여줘")
+    _note(stub)
+    assert _input(stub) == ("로그 먼저 보여줘", "terminal")
+
+
+def test_a_multi_select_answer_is_read_as_its_first_label():
+    stub = _on_page(answer=[Repl._PICK_UP])
+    _note(stub)
+    assert _input(stub)[1] == "task"
+
+
+def test_the_page_offer_keeps_what_was_typed_in_the_terminal():
+    # No terminal prompt is drawn while the card is up, so text typed during
+    # the last turn must stay pending rather than vanish with the offer.
+    stub = _on_page(answer=Repl._NOT_NOW)
+    stub._typed_ahead = "그리고 배포까지"
+    _note(stub)
+    _input(stub)
+    assert stub._typed_ahead == "그리고 배포까지"
