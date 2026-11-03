@@ -127,6 +127,13 @@ once are one offer, not one each.
 choices and the same freedom to type something else instead; the terminal is
 not asked while the page is up, so there is nothing to walk back to.
 
+**Only this session's own tasks are offered.** Every notification carries the
+session that started the task, and one from anywhere else is printed with its
+source and left alone — including one whose source cannot be established. A
+notification that says "pick the work back up" about a task this session never
+started is an instruction to invent a result, and four of them arrived before
+this check existed.
+
 ```
 /notify ask            print it and ask — the default
 /notify always         start the turn without asking

@@ -64,6 +64,7 @@ def _repl(line: FakeLine | None = None, notify: str = "ask"):
         control=None,
         mode="default",
         _typed_ahead="",
+        session_id="s-this-session",
         notify_mode=notify,
         _wake=asyncio.Event(),
         _wake_notes=[],
@@ -79,8 +80,15 @@ def _repl(line: FakeLine | None = None, notify: str = "ask"):
     return stub
 
 
-def _note(stub, task="b51wc35va", status="completed", summary=""):
-    stub._on_task_note(types.SimpleNamespace(task_id=task, status=status, summary=summary))
+def _note(stub, task="b51wc35va", status="completed", summary="", session=..., output=""):
+    """A notification as the CLI delivers it — including whose task it was.
+
+    `session` defaults to this session's own id; pass another to post a
+    notification that belongs somewhere else.
+    """
+    stub._on_task_note(types.SimpleNamespace(
+        task_id=task, status=status, summary=summary, output_file=output,
+        session_id=stub.session_id if session is ... else session))
 
 
 def _input(stub, timeout: float = 2.0):
@@ -311,3 +319,48 @@ def test_the_page_offer_keeps_what_was_typed_in_the_terminal():
     _note(stub)
     _input(stub)
     assert stub._typed_ahead == "그리고 배포까지"
+
+
+# ── whose task was it ─────────────────────────────────────────────────────
+
+def test_another_session_s_task_is_printed_and_never_picked_up(capsys):
+    """Four notifications for tasks this session never started arrived with
+    "pick the work back up" attached. The CLI says whose task it is —
+    `session_id` is a field on the message — and this read three fields and
+    threw the rest away (feedback e6c90056c2f8)."""
+    stub = _repl(FakeLine(answers=["y"]))
+    _note(stub, task="btrw53fkr", session="s-somewhere-else")
+    assert not stub._wake.is_set(), "a foreign task must not queue a wake-up"
+    printed = ANSI.sub("", capsys.readouterr().out)
+    assert "btrw53fkr" in printed, "it is still worth seeing"
+    assert "not this one" in printed and "not picked up here" in printed
+
+
+def test_a_notification_with_no_session_is_not_claimed():
+    # Cannot be shown to be ours, so it is not treated as ours. The reporter's
+    # first request: route it, and if you cannot, do not inject it.
+    for unknown in (None, ""):
+        stub = _repl(FakeLine(answers=["y"]))
+        _note(stub, session=unknown)
+        assert not stub._wake.is_set(), repr(unknown)
+
+
+def test_the_offer_names_the_output_file_and_the_summary():
+    stub = _repl(FakeLine(answers=["y"]))
+    _note(stub, summary="trained 3 epochs", output="/tmp/x/tasks/b51wc35va.output")
+    line, via = _input(stub)
+    assert via == "task"
+    # Provenance the model can act on without guessing: what it was, and where
+    # the output is.
+    assert "trained 3 epochs" in line and "/tmp/x/tasks/b51wc35va.output" in line
+    # And the ownership claim is checked, not decorative.
+    assert "this session's own task" in line
+
+
+def test_a_foreign_notification_does_not_block_our_own():
+    stub = _repl(FakeLine(answers=["y"]))
+    _note(stub, task="btrw53fkr", session="s-somewhere-else")
+    _note(stub, task="b51wc35va")
+    line, via = _input(stub)
+    assert via == "task"
+    assert "b51wc35va" in line and "btrw53fkr" not in line

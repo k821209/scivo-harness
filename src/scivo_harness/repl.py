@@ -400,16 +400,36 @@ class Repl:
         status = str(getattr(message, "status", ""))
         task = str(getattr(message, "task_id", ""))[:12]
         summary = str(getattr(message, "summary", "")).strip().replace("\n", " ")[:120]
+        # Whose task this was. The CLI has always said — `session_id` is a field
+        # on the message — and this read `task_id`/`status`/`summary` and threw
+        # the rest away. Four notifications for tasks this session never
+        # started arrived with "pick the work back up" attached, and the only
+        # thing that stopped a plausible invented report was the agent
+        # distrusting its own instructions (feedback e6c90056c2f8).
+        where = str(getattr(message, "session_id", "") or "")
+        output = str(getattr(message, "output_file", "") or "")
+        mine = bool(where) and where == self.session_id
         paint = ui.red if status in ("failed", "errored") else ui.yellow
         line = f"  · task {task} {status}" + (f" — {summary}" if summary else "")
         print(paint(f"\n[{stamp}]") + " " + paint(line), flush=True)
+        if not mine:
+            # Printed, because it is true and may matter; never acted on, and
+            # it says why rather than looking like a wake-up that was missed.
+            print(ui.dim(f"    session {where[:8] or 'unknown'}, not this one"
+                         f" — not picked up here"), flush=True)
         if self.control and self.control.active:
-            self.control.status(f"task {task} {status}: {summary}", level="warn")
-        if self.notify_mode != "off":
+            self.control.status(f"task {task} {status}: {summary}"
+                                + ("" if mine else " (another session)"), level="warn")
+        if self.notify_mode != "off" and mine:
             # Printing it was only half the job: the model is not in a turn, so
             # nothing acts on it until the user says something. `/notify off`
             # goes back to printing only.
-            self._wake_notes.append(f"task {task} {status}" if task else str(status))
+            note = f"task {task} {status}" if task else str(status)
+            if summary:
+                note += f" ({summary})"
+            if output:
+                note += f", output in {output}"
+            self._wake_notes.append(note)
             self._wake.set()
 
     def _consume_wake(self) -> list[str]:
@@ -432,9 +452,11 @@ class Repl:
         report), so this only has to say that nobody is waiting to be asked.
         """
         what = "; ".join(notes) or "a background task finished"
-        return (f"[scivo] {what} — the notification is above, in this "
-                f"conversation. Nobody typed this: pick the work back up, or "
-                f"say what you found and stop.")
+        # "this session's own" is a checked claim, not a reassurance: a
+        # notification whose session_id is not ours never reaches here.
+        return (f"[scivo] {what} — this session's own task, and the notification "
+                f"is above in this conversation. Nobody typed this: pick the work "
+                f"back up, or say what you found and stop.")
 
     async def _offer_wake(self, prompt: str, plain: str, typed: str) -> tuple[str, str]:
         """Ask before spending a turn on it — the default.
@@ -519,7 +541,9 @@ class Repl:
             return
         stamp = time.strftime("%H:%M:%S")
         task = str(getattr(message, "task_id", ""))[:12]
-        print(ui.dim(f"\n[{stamp}]  · task {task} {status}"), flush=True)
+        where = str(getattr(message, "session_id", "") or "")
+        whose = "" if where == self.session_id else f"  (session {where[:8] or 'unknown'})"
+        print(ui.dim(f"\n[{stamp}]  · task {task} {status}{whose}"), flush=True)
 
     def _on_system(self, message: SystemMessage) -> None:
         """Compaction is the one background step long enough to look like a hang."""
