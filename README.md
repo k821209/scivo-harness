@@ -127,12 +127,18 @@ once are one offer, not one each.
 choices and the same freedom to type something else instead; the terminal is
 not asked while the page is up, so there is nothing to walk back to.
 
-**Only this session's own tasks are offered.** Every notification carries the
-session that started the task, and one from anywhere else is printed with its
-source and left alone — including one whose source cannot be established. A
-notification that says "pick the work back up" about a task this session never
-started is an instruction to invent a result, and four of them arrived before
-this check existed.
+**Only this session's own tasks are offered**, and "own" means this session
+watched the task START — a `TaskUpdatedMessage` saying running or queued.
+Anything else is printed with what it claims and left alone. A notification
+that says "pick the work back up" about a task this session never started is an
+instruction to invent a result, and four of them arrived before any check
+existed.
+
+The notice's own `session_id` is not the test, though it looked like one: a
+completion naming a task that exists nowhere on this machine arrived carrying
+THIS session's id and was announced as its own work (2026-11-04). A field that
+says what you want to hear is not a filter. When a notice is refused, the line
+says why, so a feature that goes quiet does it out loud.
 
 ```
 /notify ask            print it and ask — the default

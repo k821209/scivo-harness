@@ -312,6 +312,9 @@ class Repl:
         # Runs this session launched, watched until they close. Started only
         # when a run-creating tool is actually called, and stopped the moment
         # nothing of ours is open: the cheapest poll is the one not made.
+        # Task ids this session watched start. Ownership of a finished task is
+        # decided by this and nothing else.
+        self._own_tasks: set[str] = set()
         self._runs_task: asyncio.Task | None = None
         self._runs_since: str | None = None
         self._stopping = False
@@ -561,14 +564,21 @@ class Repl:
         # distrusting its own instructions (feedback e6c90056c2f8).
         where = str(getattr(message, "session_id", "") or "")
         output = str(getattr(message, "output_file", "") or "")
-        mine = bool(where) and where == self.session_id
+        # Not `session_id`: a notice naming a task that exists nowhere on this
+        # machine arrived with OUR session id on it, so that field does not
+        # answer "whose task is this". The answer is whether we watched it
+        # start.
+        full = str(getattr(message, "task_id", "") or "")
+        mine = bool(full) and full in self._own_tasks
         paint = ui.red if status in ("failed", "errored") else ui.yellow
         line = f"  · task {task} {status}" + (f" — {summary}" if summary else "")
         print(paint(f"\n[{stamp}]") + " " + paint(line), flush=True)
         if not mine:
             # Printed, because it is true and may matter; never acted on, and
-            # it says why rather than looking like a wake-up that was missed.
-            print(ui.dim(f"    session {where[:8] or 'unknown'}, not this one"
+            # it says WHY — a feature that goes quiet for a reason nobody can
+            # see is worse than one that is wrong out loud.
+            print(ui.dim(f"    this session never saw task {full[:12] or '?'} start"
+                         f" (it says session {where[:8] or 'unknown'})"
                          f" — not picked up here"), flush=True)
         if self.control and self.control.active:
             self.control.status(f"task {task} {status}: {summary}"
@@ -687,9 +697,17 @@ class Repl:
         return line
 
     def _on_task_update(self, message) -> None:
-        # Terminal state updates only; running/queued spam the log.
         patch = getattr(message, "patch", {}) or {}
         status = str(patch.get("status") or getattr(message, "status", "") or "")
+        # A task this session watched START is a task this session owns. This
+        # is the ownership test now: `session_id` on a completion notice
+        # claimed one that exists nowhere on this machine as "this session's
+        # own", so filtering on it is not a filter (2026-11-04). What we saw
+        # with our own eyes, we keep.
+        started = str(getattr(message, "task_id", "") or "")
+        if started and status in ("running", "queued", "starting", "resumed"):
+            self._own_tasks.add(started)
+        # Terminal state updates only; running/queued spam the log.
         if status in ("running", "queued", "starting", "resumed", ""):
             return
         stamp = time.strftime("%H:%M:%S")

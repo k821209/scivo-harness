@@ -70,9 +70,11 @@ def _repl(line: FakeLine | None = None, notify: str = "ask"):
         _wake_notes=[],
         said=[],
     )
+    stub._own_tasks = set()
     stub._say = stub.said.append
-    for name in ("_next_input", "_on_task_note", "_consume_wake", "_wake_line",
-                 "_announce_wake", "_offer_wake", "_offer_on_page", "_notify"):
+    for name in ("_next_input", "_on_task_note", "_on_task_update", "_consume_wake",
+                 "_wake_line", "_announce_wake", "_offer_wake", "_offer_on_page",
+                 "_notify"):
         setattr(stub, name, getattr(Repl, name).__get__(stub))
     # The card's labels are read back off the answer, so the stub takes them
     # from the class rather than repeating the strings.
@@ -80,12 +82,24 @@ def _repl(line: FakeLine | None = None, notify: str = "ask"):
     return stub
 
 
-def _note(stub, task="b51wc35va", status="completed", summary="", session=..., output=""):
-    """A notification as the CLI delivers it — including whose task it was.
+def _start(stub, task, session=...):
+    """The session watching a task begin — which is what makes it ours.
 
-    `session` defaults to this session's own id; pass another to post a
-    notification that belongs somewhere else.
+    Not `session_id` on the completion notice: one naming a task that exists
+    nowhere on this machine arrived carrying OUR session id, so that field
+    does not answer "whose task is this" (2026-11-04).
     """
+    stub._on_task_update(types.SimpleNamespace(
+        task_id=task, status="running", patch={},
+        session_id=stub.session_id if session is ... else session))
+
+
+def _note(stub, task="b51wc35va", status="completed", summary="", session=...,
+          output="", watched=True):
+    """A notification as the CLI delivers it. `watched=False` posts one for a
+    task this session never saw start."""
+    if watched:
+        _start(stub, task, session)
     stub._on_task_note(types.SimpleNamespace(
         task_id=task, status=status, summary=summary, output_file=output,
         session_id=stub.session_id if session is ... else session))
@@ -346,17 +360,27 @@ def test_the_page_offer_keeps_what_was_typed_in_the_terminal():
 
 # ── whose task was it ─────────────────────────────────────────────────────
 
-def test_another_session_s_task_is_printed_and_never_picked_up(capsys):
-    """Four notifications for tasks this session never started arrived with
-    "pick the work back up" attached. The CLI says whose task it is —
-    `session_id` is a field on the message — and this read three fields and
-    threw the rest away (feedback e6c90056c2f8)."""
+def test_a_task_this_session_never_saw_start_is_printed_and_never_picked_up(capsys):
+    """Notifications for tasks this session never started arrived with "pick
+    the work back up" attached (feedback e6c90056c2f8). Filtering on the
+    notice's `session_id` looked like the answer and was not: one naming a task
+    that exists nowhere on this machine came carrying OUR session id, and was
+    announced as "this session's own task" (2026-11-04). Ownership is what we
+    watched begin."""
     stub = _repl(FakeLine(answers=["y"]))
-    _note(stub, task="btrw53fkr", session="s-somewhere-else")
-    assert not stub._wake.is_set(), "a foreign task must not queue a wake-up"
+    _note(stub, task="btrw53fkr", watched=False)      # our own id on the notice
+    assert not stub._wake.is_set(), "a task we never saw start must not wake us"
     printed = ANSI.sub("", capsys.readouterr().out)
     assert "btrw53fkr" in printed, "it is still worth seeing"
-    assert "not this one" in printed and "not picked up here" in printed
+    assert "never saw task" in printed and "not picked up here" in printed
+
+
+def test_watching_a_task_start_is_what_makes_it_ours(capsys):
+    stub = _repl(FakeLine(answers=["y"]))
+    _start(stub, "b51wc35va")
+    assert "b51wc35va" in stub._own_tasks
+    _note(stub, task="b51wc35va", watched=False)      # already watched above
+    assert stub._wake.is_set()
 
 
 def test_a_notification_with_no_session_is_not_claimed():
@@ -364,7 +388,7 @@ def test_a_notification_with_no_session_is_not_claimed():
     # first request: route it, and if you cannot, do not inject it.
     for unknown in (None, ""):
         stub = _repl(FakeLine(answers=["y"]))
-        _note(stub, session=unknown)
+        _note(stub, session=unknown, watched=False)
         assert not stub._wake.is_set(), repr(unknown)
 
 
@@ -382,7 +406,7 @@ def test_the_offer_names_the_output_file_and_the_summary():
 
 def test_a_foreign_notification_does_not_block_our_own():
     stub = _repl(FakeLine(answers=["y"]))
-    _note(stub, task="btrw53fkr", session="s-somewhere-else")
+    _note(stub, task="btrw53fkr", session="s-somewhere-else", watched=False)
     _note(stub, task="b51wc35va")
     line, via = _input(stub)
     assert via == "task"
