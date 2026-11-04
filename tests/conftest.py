@@ -40,3 +40,14 @@ if "claude_agent_sdk" not in sys.modules or not hasattr(sys.modules["claude_agen
     sdk.HookMatcher = lambda *a, **k: None  # type: ignore[attr-defined]
     sys.modules["claude_agent_sdk"] = sdk
     sys.modules["claude_agent_sdk.types"] = sdk_types
+
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _netlog_to_tmp(tmp_path, monkeypatch):
+    """Never the real log. The MCP's netlog defaults to
+    ~/.co-scientist/net.log, which exists to answer a question about REAL
+    traffic; a test run must not add to it."""
+    monkeypatch.setenv("SCIVO_NETLOG_PATH", str(tmp_path / "net.log"))
