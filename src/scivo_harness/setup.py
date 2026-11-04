@@ -314,6 +314,19 @@ def point_at_checkout(root: Path, interpreter: str | None = None) -> str | None:
     package = str(checkout / "apps" / "local-mcp")
     if env.get("PYTHONPATH") == package:
         return None
+    # Bring it current BEFORE pointing a session at it. `scivo update` pulls
+    # the checkout the session already runs, and only then writes this — so the
+    # first update on a project that did not name one skipped the pull and
+    # pinned it to a clone 79 commits behind: the update handed the session
+    # AUGUST code, and `whoami` then said 0.1.20260824 with an editable install
+    # (2026-11-04). Pointing at code older than what was running is never the
+    # right answer, so a checkout that cannot be brought current is left alone.
+    from .update import pull_checkout
+
+    ok, note = pull_checkout(checkout)
+    if not ok:
+        return (f"{checkout} is not current and could not be pulled, so this "
+                f"project was left on its installed copy — {note}")
     env["PYTHONPATH"] = package
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     path.chmod(0o600)
