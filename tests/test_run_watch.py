@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import types
 
+import pytest
+
 from scivo_harness.repl import RUN_CREATING_TOOLS, ANSI, Repl
 
 
@@ -206,3 +208,40 @@ def test_a_transport_error_does_not_end_the_session(monkeypatch):
 
     _run_loop(stub, Explodes(), monkeypatch)   # must not raise
     assert stub._wake_notes == []
+
+
+def test_each_poll_is_written_to_the_shared_outbound_log(monkeypatch, tmp_path):
+    """The three things under suspicion for the wifi drops are an SSH
+    keepalive, an SSH `ps` poll and this Firestore poll (todo d27e0606a7bb).
+    They have to land in ONE file or they cannot be compared against the
+    moment the link went down."""
+    netlog = pytest.importorskip(
+        "co_scientist_local.netlog",
+        reason="the MCP is a dependency in production; a bare dev venv may lack it")
+
+    target = tmp_path / "net.log"
+    monkeypatch.setenv("SCIVO_NETLOG_PATH", str(target))
+    monkeypatch.delenv("SCIVO_NETLOG", raising=False)
+    stub = _repl()
+    client = _FakeClient([{"now": "T1", "closed": [], "still_open": 0}])
+    _run_loop(stub, client, monkeypatch)
+    rows = [l.split("\t") for l in target.read_text(encoding="utf-8").splitlines()]
+    assert rows and rows[0][1:4] == ["mcp", "firestore", "run_notices"]
+    assert rows[0][5] == "0"
+    assert netlog.classify("whatever") == "other"   # the module is the real one
+
+
+def test_a_refused_poll_is_logged_as_refused(monkeypatch, tmp_path):
+    pytest.importorskip("co_scientist_local.netlog")
+    target = tmp_path / "net.log"
+    monkeypatch.setenv("SCIVO_NETLOG_PATH", str(target))
+    monkeypatch.delenv("SCIVO_NETLOG", raising=False)
+    stub = _repl()
+
+    class Refuses:
+        async def call(self, name, **arguments):
+            return types.SimpleNamespace(ok=False, items=[], first=None, error="nope")
+
+    _run_loop(stub, Refuses(), monkeypatch)
+    rows = [l.split("\t") for l in target.read_text(encoding="utf-8").splitlines()]
+    assert rows and all(r[5] == "1" for r in rows)

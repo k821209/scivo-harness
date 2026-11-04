@@ -119,6 +119,24 @@ def _wake_summary(notes: list[str], *, name: int = 2, clip: int = 90) -> str:
             + (f" (+{rest} more above)" if rest > 0 else ""))
 
 
+def _net_record(*args, **kwargs) -> None:
+    """The MCP's outbound-call log, if this install has one.
+
+    The harness depends on co-scientist-local, so the log lives in one file
+    for both processes — which is the point: a drop is lined up against
+    everything that was in flight, not against one process's half. An older
+    MCP has no netlog, and that is not worth an error.
+    """
+    try:
+        from co_scientist_local import netlog
+    except Exception:  # noqa: BLE001 — no log is not a failure
+        return
+    try:
+        netlog.record(*args, **kwargs)
+    except Exception:  # noqa: BLE001
+        return
+
+
 def _notify_mode_from_env() -> str:
     """`SCIVO_NOTIFY=off|ask|always`, else ask. An unreadable value is ask,
     not a crash: this decides a convenience, not a permission."""
@@ -447,8 +465,18 @@ class Repl:
                 refused = 0
                 while True:
                     await asyncio.sleep(RUN_POLL_SECONDS)
+                    asked = time.monotonic()
                     outcome = await client.call("run_notices", **(
                         {"since": self._runs_since} if self._runs_since else {}))
+                    # Same log the MCP writes its SSH calls to, so a dropped
+                    # link can be lined up against everything we were sending
+                    # (todo d27e0606a7bb). This poll is HTTPS to Firestore, not
+                    # SSH, and it is one of the three periodic things under
+                    # suspicion — it has to be in the same file as the others
+                    # or the comparison cannot be made.
+                    _net_record("mcp", host="firestore", kind="run_notices",
+                                ms=int((time.monotonic() - asked) * 1000),
+                                rc=0 if outcome.ok else 1)
                     if not outcome.ok:
                         # A blip must not end the watch — an eleven-minute job
                         # would then finish unannounced because one poll lost
