@@ -107,6 +107,30 @@ if you need it after a compaction.
 # that decide whether work lands where the user can see it, in the fewest
 # words that still say WHICH tool. Mirrors `project_guide()`; when the two
 # disagree the guide is right and this is what needs fixing.
+# What a compaction destroys and what to keep. Written here once because two
+# things send it: the PreCompact hook (automatic, the default) and `/handoff`
+# (when a person asks). Two copies of an instruction drift, and the drift is
+# invisible — one path would quietly ask for something else.
+#
+# Deliberately NOT a copy of Claude Code's own summary: that is written for the
+# next turn's continuity and is long and narrative. This is for the record, and
+# the record is read by a person on another machine looking for what happened.
+# What the transcript on this machine already has, it keeps; what this adds is
+# being visible in the dashboard, searchable per project, and reachable from
+# elsewhere.
+HANDOFF_ASK = (
+    "Before anything else: the conversation is about to be compacted, so write "
+    "the handoff to Scivo now — `log_activity(title=\"session handoff — <five "
+    "words>\", detail=...)`, ten lines at most, facts and identifiers only:\n"
+    "- what shipped (versions, commit shas, what each one fixed)\n"
+    "- what is still open, each with the id that finds it again (feedback, "
+    "todo, run_key)\n"
+    "- the one thing the next session should read first, by path or id\n"
+    "No narrative, no recap of the conversation — that is what the summary "
+    "already does. Then carry on with what you were doing."
+)
+
+
 LOCAL_GUIDE = """
 # Project guide, short form (the full guide is not loaded for this model)
 

@@ -9,11 +9,15 @@ fires at that moment instead.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from typing import Any
 
 from claude_agent_sdk import HookMatcher
+
+from . import ui
+from .prompt import HANDOFF_ASK
 
 # `ssh host "nohup ... &"` — the guide's #1 reason the Runs tab is blind.
 # Crosses `;`, `|` and newlines (a heredoc body): the class `[^\n|;]` let
@@ -340,6 +344,24 @@ class Guardrails:
             "the question, say that in words instead of repeating the call."
         )
 
+    async def on_compact(self, payload: Any, tool_use_id: str | None,
+                         context: Any) -> dict[str, Any]:
+        """Ask for the handoff while the detail is still here.
+
+        Whether `additionalContext` is honoured on this event is not something
+        this can check from in here, so the hook also PRINTS that it fired:
+        "the hook never ran" and "the hook ran and the model ignored it" are
+        different problems, and a silent automation that turns out to do
+        nothing is the failure mode worth spending a line of output on.
+        `/handoff` does the same thing on demand either way.
+        """
+        if not handoff_enabled():
+            return {}
+        print(ui.dim("\n  compacting — asking for a Scivo handoff first "
+                     "(/notify-style off switch: SCIVO_HANDOFF=off)"), flush=True)
+        return {"hookSpecificOutput": {"hookEventName": "PreCompact",
+                                       "additionalContext": HANDOFF_ASK}}
+
     async def on_bash(self, payload: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         command = str(payload.get("tool_input", {}).get("command", ""))
         # What the shell will RUN, without the file contents it writes.
@@ -399,6 +421,14 @@ class Guardrails:
         )
 
 
+def handoff_enabled() -> bool:
+    """`SCIVO_HANDOFF=off` turns the automatic handoff off. On by default: a
+    compaction is the one moment where detail is discarded for good, and the
+    person who would have asked for a handoff is usually not watching."""
+    return (os.environ.get("SCIVO_HANDOFF", "").strip().lower() or "on") not in (
+        "off", "0", "no", "false")
+
+
 def build(rails: Guardrails) -> dict[str, list[HookMatcher]]:
     return {
         "PreToolUse": [
@@ -417,4 +447,9 @@ def build(rails: Guardrails) -> dict[str, list[HookMatcher]]:
         # per-turn counters above, fed by what actually happened.
         "PostToolUseFailure": [HookMatcher(hooks=[rails.on_tool_failure])],
         "PostToolUse": [HookMatcher(hooks=[rails.on_tool_success])],
+        # The one moment detail is discarded for good. `PreCompact` is the only
+        # compaction event there is — there is no PostCompact — so the handoff
+        # is asked for BEFORE the summary exists, which is also better: we want
+        # what the session knows, not a rewrite of Claude Code's summary.
+        "PreCompact": [HookMatcher(hooks=[rails.on_compact])],
     }

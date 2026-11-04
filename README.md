@@ -166,6 +166,28 @@ the process is gone and nothing recorded whether it worked.
 `/notify off` silences the offer for runs as well as tasks. Following costs one
 MCP call every 30 seconds, and only while one of this session's runs is open.
 
+## A compaction leaves something behind
+
+When the conversation is compacted, the detail is gone for good and Claude
+Code's own summary lives only in this machine's transcript. Before that
+happens, the session is asked to write a handoff to Scivo —
+`log_activity(title="session handoff — …")`, ten lines of facts: what shipped,
+what is still open with the id that finds it again, and the one thing to read
+first. It lands on the project's Activity tab, so it is visible in the
+dashboard, searchable per project, and reachable from another machine. That is
+what it adds; the transcript keeps everything else.
+
+```
+/handoff               write one now
+SCIVO_HANDOFF=off      stop asking before a compaction
+```
+
+It is asked for, not scraped. The summary itself is reachable only as an
+untyped `user` message beginning "This session is being continued…", and a
+string match on a private format is how an archive quietly stops filling. The
+hook prints a line when it fires, so "the hook never ran" and "it ran and was
+ignored" stay different problems.
+
 ## Switching models, inside a session
 
 ```

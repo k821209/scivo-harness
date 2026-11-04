@@ -28,6 +28,7 @@ from claude_agent_sdk import (
 )
 
 from . import guardrails, ui
+from .prompt import HANDOFF_ASK
 from .pump import MessagePump, PumpClosed
 from .control import Control, merge_web_messages
 from .preflight import to_markdown
@@ -58,6 +59,7 @@ LOCAL_COMMANDS = {
     "/doctor": "what pays for this session, and what could stop it",
     "/session": "this session's id, to resume it later",
     "/model": "switch model — on its own it lists every choice, numbered",
+    "/handoff": "write the session handoff to Scivo now (automatic before a compaction)",
     "/notify": "what a finished background task does: off | ask | always",
     "/permissions": "show or change: default · acceptEdits · auto · plan · always <tool> · always -<tool>",
     "/dangerously-skip-permissions": "stop asking for anything (`off` to ask again); guardrails still apply",
@@ -1594,6 +1596,15 @@ class Repl:
                         if self.control and self.control.active and via != "web":
                             self.control.user(line, via)
                         self._notify(argument.strip())
+                        continue
+                    if command == "/handoff":
+                        if self.control and self.control.active and via != "web":
+                            self.control.user(line, via)
+                        # The same words the PreCompact hook sends, from one
+                        # definition: two copies of an instruction drift, and
+                        # the drift is invisible — one path would quietly ask
+                        # for something else.
+                        await self._turn(self.client, HANDOFF_ASK)
                         continue
                     if self.control and self.control.active and via != "web":
                         self.control.user(line, via)
