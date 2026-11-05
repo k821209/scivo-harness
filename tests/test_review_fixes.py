@@ -109,7 +109,13 @@ def test_discovery_cache_is_off_for_the_cli_but_a_provider_may_override():
     import inspect
     from scivo_harness import session
     src = inspect.getsource(session.build)
-    assert '"MCP_DISCOVERY_CACHE": "false", **endpoint.env' in src
+    # The ORDER, not the line it happens to sit on: the default is written
+    # first and `**endpoint.env` spread after it, which is what lets a provider
+    # override it. Asserting the exact string broke when another variable
+    # joined that dict and said nothing about the rule it was guarding.
+    assert '"MCP_DISCOVERY_CACHE": "false"' in src
+    assert "**endpoint.env" in src
+    assert src.index('"MCP_DISCOVERY_CACHE"') < src.index("**endpoint.env")
 
 
 def test_a_question_goes_to_the_control_page_when_it_is_up():

@@ -245,3 +245,44 @@ def test_a_refused_poll_is_logged_as_refused(monkeypatch, tmp_path):
     _run_loop(stub, Refuses(), monkeypatch)
     rows = [l.split("\t") for l in target.read_text(encoding="utf-8").splitlines()]
     assert rows and all(r[5] == "1" for r in rows)
+
+
+def test_one_client_id_for_every_mcp_this_session_starts(monkeypatch):
+    """The session starts two MCP processes — the one the model calls tools
+    through, and the one this watcher opens — and the MCP minted its id per
+    PROCESS. So `run_notices`, filtered by the caller's id, saw none of the
+    session's runs, found nothing open and stopped on the first poll: silent,
+    by design, while a finished job waited 92 minutes (feedback f7c878a2b9c6).
+    """
+    import os
+
+    from scivo_harness.session import session_client_id
+
+    monkeypatch.delenv("SCIVO_CLIENT_ID", raising=False)
+    first = session_client_id()
+    assert first and first == os.environ["SCIVO_CLIENT_ID"], (
+        "it must be in OUR environment too — config.child_env() is what the "
+        "watcher's own connection inherits")
+    # Asked twice in one session, it is the same client both times.
+    assert session_client_id() == first
+
+
+def test_a_pinned_client_id_is_kept(monkeypatch):
+    from scivo_harness.session import session_client_id
+
+    monkeypatch.setenv("SCIVO_CLIENT_ID", "pinned-by-the-host")
+    assert session_client_id() == "pinned-by-the-host"
+
+
+def test_the_cli_is_told_the_client_id_too():
+    """Both MCP processes have to read the same one. The watcher's connection
+    inherits it through `config.child_env()`; the model's MCP is started by the
+    CLI, so the CLI has to carry it. Checked in the source, because that dict
+    is not reachable without a live session — the same way the discovery-cache
+    rule beside it is checked."""
+    import inspect
+
+    from scivo_harness import session
+
+    src = inspect.getsource(session.build)
+    assert '"SCIVO_CLIENT_ID": session_client_id()' in src

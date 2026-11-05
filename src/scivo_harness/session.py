@@ -39,6 +39,28 @@ CLAUDE_MODELS = {alias: model for alias, (model, _) in CLAUDE_CATALOG.items()}
 DEFAULT_MODEL = CLAUDE_MODELS["opus"]
 DEFAULT_EFFORT = "high"
 
+
+def session_client_id() -> str:
+    """One identity for every MCP this session starts, in the environment.
+
+    The MCP minted its own per PROCESS, and this session starts two of them:
+    the one the model calls tools through, and the one the run watcher opens
+    for itself. Two pids, two ids — so `run_notices`, which filters by the
+    caller's id, saw none of the runs the session had recorded, found nothing
+    open and stopped on the first poll. In silence, by design, while a finished
+    job waited an hour and a half to be noticed (feedback f7c878a2b9c6).
+
+    Put in OUR environment as well as the CLI's, because `config.child_env()`
+    hands our environment to the watcher's connection: both paths then read the
+    same value. An id already set wins, so a host that pins one keeps it.
+    """
+    import os
+    import secrets
+    import socket
+
+    return os.environ.setdefault(
+        "SCIVO_CLIENT_ID", f"{socket.gethostname()}-{secrets.token_hex(4)}")
+
 # Host tools the research work actually uses. Everything else the preset offers
 # stays available; these are the ones that never need a permission prompt.
 AUTO_APPROVED_HOST_TOOLS = ["Read", "Glob", "Grep", "TodoWrite", "WebSearch", "WebFetch"]
@@ -227,7 +249,8 @@ async def build(
         # can outlive an MCP update: after `git pull` the server had new
         # parameters and the session still saw the old schema. The CLI reads
         # this switch from its environment; off means every start discovers.
-        env={"MCP_DISCOVERY_CACHE": "false", **endpoint.env},
+        env={"MCP_DISCOVERY_CACHE": "false",
+             "SCIVO_CLIENT_ID": session_client_id(), **endpoint.env},
         cwd=str(config.root),
         add_dirs=list(add_dirs or []),
         # Makes bypassPermissions *available* without turning it on, so
