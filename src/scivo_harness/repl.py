@@ -583,7 +583,18 @@ class Repl:
         if self.control and self.control.active:
             self.control.status(f"task {task} {status}: {summary}"
                                 + ("" if mine else " (another session)"), level="warn")
-        if self.notify_mode != "off" and mine:
+        # A FOREGROUND call's completion is not work to pick up: its result was
+        # already handed back inside the turn, so an offer to "carry on with
+        # it" is a loop. Five such notices arrived naming this session's own
+        # Bash descriptions verbatim — "Make the fixtures watch tasks start" —
+        # for calls whose output this conversation had already used
+        # (2026-11-05). A real background task writes an output file and these
+        # do not, which is the cheapest line between the two.
+        backgrounded = bool(output)
+        if mine and not backgrounded:
+            print(ui.dim(f"    task {full[:12]} ran in the foreground — its result "
+                         f"is already in this turn, nothing to pick up"), flush=True)
+        if self.notify_mode != "off" and mine and backgrounded:
             # Printing it was only half the job: the model is not in a turn, so
             # nothing acts on it until the user says something. `/notify off`
             # goes back to printing only.

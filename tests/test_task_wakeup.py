@@ -95,9 +95,15 @@ def _start(stub, task, session=...):
 
 
 def _note(stub, task="b51wc35va", status="completed", summary="", session=...,
-          output="", watched=True):
-    """A notification as the CLI delivers it. `watched=False` posts one for a
-    task this session never saw start."""
+          output=..., watched=True):
+    """A notification as the CLI delivers it.
+
+    `output` defaults to the file a REAL background task writes; pass "" for a
+    foreground call's completion, which carries none. `watched=False` posts one
+    for a task this session never saw start.
+    """
+    if output is ...:
+        output = f"/tmp/claude-1001/-home-k821209-works/s/tasks/{task}.output"
     if watched:
         _start(stub, task, session)
     stub._on_task_note(types.SimpleNamespace(
@@ -430,3 +436,23 @@ def test_twenty_two_finished_tasks_still_fit_in_a_card_that_can_be_clicked():
     assert "22 background tasks finished" in question
     # The turn and the card describe the same notifications the same way.
     assert question.split(" — pick it up?")[0] in line
+
+
+def test_a_foreground_call_s_completion_is_not_work_to_pick_up(capsys):
+    """Five notices arrived naming this session's own Bash descriptions
+    verbatim — "Make the fixtures watch tasks start" — for calls whose output
+    this conversation had already used. Offering to "carry on with it" is a
+    loop: the result was handed back inside the turn (2026-11-05)."""
+    stub = _repl(FakeLine(answers=["y"]))
+    _note(stub, task="bezpphd7e", summary="Base ownership on what the session "
+                                          "watched start", output="")
+    assert not stub._wake.is_set()
+    printed = ANSI.sub("", capsys.readouterr().out)
+    assert "ran in the foreground" in printed
+    assert "nothing to pick up" in printed
+
+
+def test_a_real_background_task_still_wakes_us(capsys):
+    stub = _repl(FakeLine(answers=["y"]))
+    _note(stub, task="bjfz4ehhy")           # the default output file
+    assert stub._wake.is_set()
