@@ -86,6 +86,15 @@ NOTIFY_MODES = ("off", "ask", "always")
 # pruned as tasks reach a terminal state.
 TASKS_FILE = Path(".scivo") / "tasks.json"
 TASKS_KEPT = 200
+# A task's output file is written by the CLI at
+#   /tmp/claude-<uid>/<cwd-slug>/<session-id>/tasks/<task-id>.output
+# so the PATH names the session that owns it — evidence from where the file
+# actually landed, which is stronger than the `session_id` field on the notice
+# (that one once carried our id for a task that existed nowhere on this
+# machine). Matched as a uuid-shaped segment so a layout change degrades to
+# "cannot tell" rather than to a wrong answer.
+SESSION_IN_PATH = re.compile(
+    r"/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/")
 
 # Tools that create a run row worth following (bare names; the scivo prefix is
 # already stripped by `scivo_tool_label`).
@@ -614,7 +623,13 @@ class Repl:
         if store.pop(task_id, None) is not None:
             self._write_task_store(store)
 
-    def _task_ownership(self, task_id: str, claimed: str) -> str:
+    def _session_in_output(self, output: str) -> str:
+        """The session id the CLI's own output path puts this task under, if any."""
+        found = SESSION_IN_PATH.search(output or "")
+        return found.group(1) if found else ""
+
+    def _task_ownership(self, task_id: str, claimed: str,
+                        output: str = "") -> str:
         """"own" | "foreign" | "unknown" — three states, because there are three.
 
         This was a bool, and the two readings it could not tell apart were
@@ -632,6 +647,15 @@ class Repl:
             return "own"
         if isinstance(row, dict) and row.get("session"):
             return "foreign"            # another session here watched it start
+        # Where the CLI actually put the output. This is what settles a task
+        # that was already running when the record did not exist yet — an
+        # upgrade, or any restart before `.scivo/tasks.json` was written
+        # (user, 2026-11-06: an in-flight pbsim task came back "could not be
+        # determined", and its output file was under the session's own folder
+        # the whole time).
+        wrote = self._session_in_output(output)
+        if wrote and self.session_id:
+            return "own" if wrote == self.session_id else "foreign"
         if claimed and self.session_id and claimed != self.session_id:
             return "foreign"
         return "unknown"
@@ -660,7 +684,7 @@ class Repl:
         # answer "whose task is this". The answer is whether we watched it
         # start.
         full = str(getattr(message, "task_id", "") or "")
-        owned = self._task_ownership(full, where)
+        owned = self._task_ownership(full, where, output)
         mine = owned == "own"
         paint = ui.red if status in ("failed", "errored") else ui.yellow
         line = f"  · task {task} {status}" + (f" — {summary}" if summary else "")

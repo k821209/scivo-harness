@@ -62,7 +62,7 @@ class FakeLine:
 
 
 def _repl(line: FakeLine | None = None, notify: str = "ask", root=None,
-          session_id: str = "s-this-session"):
+          session_id: str = "a2d62845-99d9-4bca-9096-e53dbcec4d76"):
     # A real project root, because ownership is now also written to
     # `<root>/.scivo/tasks.json` — the set alone does not survive a restart.
     root = Path(root or tempfile.mkdtemp())
@@ -83,7 +83,7 @@ def _repl(line: FakeLine | None = None, notify: str = "ask", root=None,
                  "_wake_line", "_announce_wake", "_offer_wake", "_offer_on_page",
                  "_notify", "_tasks_file", "_read_task_store", "_stored_task_ids",
                  "_write_task_store", "_remember_task", "_forget_task",
-                 "_task_ownership"):
+                 "_task_ownership", "_session_in_output"):
         setattr(stub, name, getattr(Repl, name).__get__(stub))
     stub._own_tasks = set()
     # The card's labels are read back off the answer, so the stub takes them
@@ -104,8 +104,13 @@ def _start(stub, task, session=...):
         session_id=stub.session_id if session is ... else session))
 
 
+def _note_output(task, session_dir="a2d62845-99d9-4bca-9096-e53dbcec4d76"):
+    """The path the CLI writes a background task's output to."""
+    return f"/tmp/claude-1001/-home-k821209-works/{session_dir}/tasks/{task}.output"
+
+
 def _note(stub, task="b51wc35va", status="completed", summary="", session=...,
-          output=..., watched=True):
+          output=..., watched=True, session_dir=""):
     """A notification as the CLI delivers it.
 
     `output` defaults to the file a REAL background task writes; pass "" for a
@@ -113,7 +118,9 @@ def _note(stub, task="b51wc35va", status="completed", summary="", session=...,
     for a task this session never saw start.
     """
     if output is ...:
-        output = f"/tmp/claude-1001/-home-k821209-works/s/tasks/{task}.output"
+        # The real layout: the owning session's id is a segment of the path.
+        output = _note_output(task, session_dir
+                              or "a2d62845-99d9-4bca-9096-e53dbcec4d76")
     if watched:
         _start(stub, task, session)
     stub._on_task_note(types.SimpleNamespace(
@@ -385,8 +392,12 @@ def test_a_task_this_session_never_saw_start_is_printed_and_never_picked_up(caps
     watched begin — and when nothing settles it, it is left UNSETTLED rather
     than guessed either way."""
     stub = _repl(FakeLine(answers=["y"]))
-    _note(stub, task="btrw53fkr", watched=False)      # our own id on the notice
-    assert not stub._wake.is_set(), "a task we never saw start must not wake us"
+    # Our own id on the notice — the field that lied once — and NO other
+    # evidence: no sighting, no record, and an output path that names no
+    # session. Nothing can show it is ours, so it is not treated as ours.
+    _note(stub, task="btrw53fkr", watched=False,
+          output="/tmp/claude-1001/-home-k821209-works/no-uuid-here/tasks/btrw53fkr.output")
+    assert not stub._wake.is_set(), "nothing shows it is ours — do not act on it"
     printed = ANSI.sub("", capsys.readouterr().out)
     assert "btrw53fkr" in printed, "it is still worth seeing"
     assert "cannot tell whose task" in printed
@@ -395,9 +406,38 @@ def test_a_task_this_session_never_saw_start_is_printed_and_never_picked_up(caps
     assert "another session" not in printed
 
 
+def test_the_output_path_settles_a_task_from_before_a_restart(capsys):
+    """The case the user hit right after upgrading (2026-11-06).
+
+    A task was already running when `.scivo/tasks.json` did not yet exist, so
+    there was no record and this process had not watched it start — and it came
+    back "could not be determined". But the CLI had been writing its output
+    under this session's own folder the whole time:
+    `/tmp/claude-<uid>/<cwd>/<session-id>/tasks/<task>.output`. That is where
+    the file actually landed, which is better evidence than the notice's
+    `session_id` field, and it resolves every in-flight task retroactively.
+    """
+    stub = _repl(FakeLine(answers=["y"]))
+    _note(stub, task="bhul0ysn3", watched=False,
+          summary="Measure error rate by base quality using pbsim MAF truth")
+    assert stub._own_tasks == set(), "never seen start, no record — only the path"
+    assert stub._task_ownership("bhul0ysn3", "", _note_output("bhul0ysn3")) == "own"
+    printed = ANSI.sub("", capsys.readouterr().out)
+    assert "cannot tell" not in printed and "another session" not in printed
+
+
+def test_an_output_path_under_another_session_is_foreign(capsys):
+    stub = _repl(FakeLine(answers=["y"]))
+    _note(stub, task="bq9zz1abc", watched=False, session_dir="11111111-2222-3333-4444-555555555555")
+    assert not stub._wake.is_set()
+    printed = ANSI.sub("", capsys.readouterr().out)
+    assert "another session started task" in printed
+
+
 def test_a_notice_from_a_different_session_says_so(capsys):
     stub = _repl(FakeLine(answers=["y"]))
-    _note(stub, task="bq9zz1abc", watched=False, session="s-somebody-else")
+    _note(stub, task="bq9zz1abc", watched=False, session="s-somebody-else",
+          output="/tmp/claude-1001/-home-k821209-works/plain/tasks/bq9zz1abc.output")
     assert not stub._wake.is_set()
     printed = ANSI.sub("", capsys.readouterr().out)
     assert "another session started task" in printed
@@ -463,12 +503,15 @@ def test_watching_a_task_start_is_what_makes_it_ours(capsys):
     assert stub._wake.is_set()
 
 
-def test_a_notification_with_no_session_is_not_claimed():
+def test_a_notification_with_nothing_to_go_on_is_not_claimed():
     # Cannot be shown to be ours, so it is not treated as ours. The reporter's
-    # first request: route it, and if you cannot, do not inject it.
+    # first request: route it, and if you cannot, do not inject it. Every
+    # source of evidence is absent here — no sighting, no record, no session on
+    # the notice, and an output path that names none either.
     for unknown in (None, ""):
         stub = _repl(FakeLine(answers=["y"]))
-        _note(stub, session=unknown, watched=False)
+        _note(stub, session=unknown, watched=False,
+              output="/tmp/claude-1001/-home-k821209-works/plain/tasks/b51wc35va.output")
         assert not stub._wake.is_set(), repr(unknown)
 
 
@@ -486,7 +529,7 @@ def test_the_offer_names_the_output_file_and_the_summary():
 
 def test_a_foreign_notification_does_not_block_our_own():
     stub = _repl(FakeLine(answers=["y"]))
-    _note(stub, task="btrw53fkr", session="s-somewhere-else", watched=False)
+    _note(stub, task="btrw53fkr", watched=False, session_dir="11111111-2222-3333-4444-555555555555")
     _note(stub, task="b51wc35va")
     line, via = _input(stub)
     assert via == "task"
