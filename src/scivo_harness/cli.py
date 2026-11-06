@@ -211,6 +211,28 @@ async def _doctor(args) -> int:
     if provider.has_endpoint:
         ok, detail = probe(provider)
         print(f"endpoint    {ui.green(detail) if ok else ui.red(detail)}")
+    # WHICH Claude Code, not whether one exists. The SDK spawns its bundled
+    # copy before anything on PATH, so `claude --version` answers a different
+    # question than "what is this session running" — and when a model needs a
+    # newer CLI, that difference is the whole problem (user, 2026-11-06).
+    from .failures import bundled_cli, cli_in_use, cli_outpaced, cli_version
+    in_use = cli_in_use()
+    where = "bundled in claude-agent-sdk" if bundled_cli() else "on PATH"
+    if in_use is None:
+        print(f"claude code {ui.red('not found')}")
+    else:
+        version = cli_version(in_use)
+        print(f"claude code {version or ui.yellow('version unreadable')}"
+              f"   {ui.dim(where)}")
+        print(f"            {ui.dim(str(in_use))}")
+    state, detail = cli_outpaced()
+    if state != "ok" and detail:
+        # "could not compare" is printed too. A check that goes quiet when it
+        # could not run reads exactly like a check that passed.
+        paint = ui.yellow if state == "outpaced" else ui.dim
+        prefix = "" if state == "outpaced" else "could not compare: "
+        for line in (prefix + detail).splitlines():
+            print(f"            {paint(line)}")
     print(f"root        {config.root}")
     print(f"mcp command {config.command} {' '.join(config.args)}")
     print(f"api key     {'set' if config.api_key else ui.red('MISSING')}")

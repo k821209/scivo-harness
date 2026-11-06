@@ -92,7 +92,34 @@ def inspect_installed() -> dict:
 
     from importlib.metadata import version
     return {"version": version("claude-agent-sdk"), "imports": _imported(),
-            "missing": missing, "rejected": rejected}
+            "missing": missing, "rejected": rejected,
+            "cli_order": _cli_resolution_order()}
+
+
+def _cli_resolution_order() -> list[str]:
+    """Which copy of Claude Code the INSTALLED SDK looks for first.
+
+    `failures.cli_in_use` tells the user which binary their session runs, and
+    answers "the bundled one, before PATH" because that is what the SDK does
+    today. If the SDK ever flips that order, our answer becomes a confident
+    lie — and the thing it is used for is telling someone which command will
+    fix a version error, so a wrong answer costs them the same loop again.
+    Read from the installed source, in call order, rather than asserted from
+    memory.
+    """
+    import inspect as _inspect
+
+    from claude_agent_sdk._internal.transport.subprocess_cli import (
+        SubprocessCLITransport,
+    )
+    source = _inspect.getsource(SubprocessCLITransport._find_cli)
+    order: list[str] = []
+    for line in source.splitlines():
+        if "_find_bundled_cli" in line and "bundled" not in order:
+            order.append("bundled")
+        if 'which("claude")' in line and "path" not in order:
+            order.append("path")
+    return order
 
 
 def _verdict() -> dict:
@@ -121,6 +148,21 @@ def test_every_kwarg_the_harness_passes_is_still_accepted():
         pytest.skip(f"no SDK to check here: {verdict['unavailable']}")
     assert not verdict["rejected"], (
         f"claude-agent-sdk {verdict['version']} no longer accepts: {verdict['rejected']}")
+
+
+def test_the_sdk_still_prefers_its_bundled_cli_over_path():
+    """The premise behind every "which claude am I running" answer we give."""
+    verdict = _verdict()
+    if "unavailable" in verdict:
+        import pytest
+        pytest.skip(f"no SDK to check here: {verdict['unavailable']}")
+    order = verdict["cli_order"]
+    assert order, ("could not read the SDK's CLI resolution order — treat as "
+                   "UNKNOWN, not as agreement, and re-read _find_cli")
+    assert order[0] == "bundled", (
+        f"claude-agent-sdk {verdict['version']} now resolves the CLI as "
+        f"{order} — `failures.cli_in_use` and the version-error advice both "
+        f"assume the bundled copy wins, and must be updated with it")
 
 
 if __name__ == "__main__":

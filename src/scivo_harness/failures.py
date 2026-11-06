@@ -7,13 +7,106 @@ first thing a person sees when they have not signed in, and the least useful.
 
 from __future__ import annotations
 
+import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 AUTH_MARKERS = ("authenticate", "401", "api key is invalid", "not logged in",
                 "invalid api key", "oauth", "unauthorized")
 OVERLOAD_MARKERS = ("429", "rate limit", "overloaded", "529")
 REFUSAL_MARKERS = ("refusal", "declined to", "stop_details")
+# The API refuses a model the running CLI is too old to drive, and says so by
+# naming a minimum version: "Claude Code 2.1.274 does not support this model;
+# version 2.1.280 or newer is required. Run 'claude update' …". That advice is
+# wrong for a session here, which is what makes it expensive — see explain().
+CLI_TOO_OLD_MARKERS = ("does not support this model", "or newer is required")
+
+
+def bundled_cli() -> Path | None:
+    """The Claude Code carried inside claude_agent_sdk, if this install has one."""
+    try:
+        import claude_agent_sdk
+    except Exception:  # noqa: BLE001
+        return None
+    name = "claude.exe" if sys.platform == "win32" else "claude"
+    path = Path(claude_agent_sdk.__file__).parent / "_bundled" / name
+    return path if path.is_file() else None
+
+
+def cli_in_use() -> Path | None:
+    """The Claude Code a session will actually spawn.
+
+    The SDK tries its BUNDLED copy before anything on PATH
+    (`_find_cli` → `_find_bundled_cli`, subprocess_cli.py). So on a machine
+    with Claude Code installed, `claude --version` and the version a scivo
+    session runs are two different numbers, and the one on PATH is the one
+    that does not matter. Getting this round the wrong way is how a user runs
+    `claude update`, is told it succeeded, and hits the identical version
+    error on the next turn with nothing left to try.
+    """
+    return bundled_cli() or (Path(found) if (found := shutil.which("claude")) else None)
+
+
+def cli_version(path: Path | None) -> str | None:
+    """`x.y.z` from `<path> --version`, or None if it cannot be read."""
+    if path is None:
+        return None
+    try:
+        done = subprocess.run([str(path), "--version"], capture_output=True,
+                              text=True, timeout=30)
+    except Exception:  # noqa: BLE001
+        return None
+    match = re.search(r"\b(\d+\.\d+\.\d+)\b", done.stdout or "")
+    return match.group(1) if match else None
+
+
+def _parts(version: str | None) -> tuple[int, ...]:
+    try:
+        return tuple(int(p) for p in (version or "").split("."))
+    except ValueError:
+        return ()
+
+
+def cli_outpaced() -> tuple[str, str | None]:
+    """Whether `claude update` has outpaced the copy this session runs.
+
+    Three outcomes, and the third is why this returns a pair:
+
+      ("ok", None)            compared, and the session's copy is not behind
+      ("outpaced", sentence)  PATH is newer — what a `claude update` leaves
+                              behind when the SDK carries its own binary
+      ("unknown", why)        could NOT compare, naming what was missing
+
+    Derived, not guessed: it needs no knowledge of what any model requires.
+    The first version of this collapsed "unknown" into "ok" by returning None
+    for both, which is the shape this project forbids — a caller could not
+    tell a passing check from a check that never ran, and the permissive
+    reading is the one that gets believed.
+    """
+    bundled = bundled_cli()
+    if bundled is None:
+        # PATH's copy IS the one in use, so there is nothing to be behind.
+        return ("ok", None)
+    on_path = shutil.which("claude")
+    if not on_path:
+        return ("ok", None)
+    mine = cli_version(bundled)
+    theirs = cli_version(Path(on_path))
+    if not _parts(mine):
+        return ("unknown", f"cannot read the version of {bundled}")
+    if not _parts(theirs):
+        return ("unknown", f"cannot read the version of {on_path}")
+    if _parts(theirs) <= _parts(mine):
+        return ("ok", None)
+    return ("outpaced",
+            f"Claude Code on PATH is {theirs}, but this session runs the copy "
+            f"bundled in claude-agent-sdk, which is {mine}. `claude update` "
+            f"cannot change that one. To move it:\n"
+            f"  {sys.executable} -m pip install -U claude-agent-sdk\n"
+            f"then restart the session — a running process keeps the binary it "
+            f"started with.")
 
 
 def claude_binary() -> str:
@@ -91,6 +184,33 @@ def explain(error: Exception) -> str | None:
     if any(marker in text for marker in OVERLOAD_MARKERS):
         return ("The model endpoint is rate limited or overloaded. Wait and retry; "
                 "`--effort low` and a narrower `--profile` both cost less per turn.")
+
+    if all(marker in text for marker in CLI_TOO_OLD_MARKERS):
+        # The API's own remedy — "Run 'claude update', or update the Claude
+        # desktop app" — is written for someone running Claude Code directly.
+        # Neither reaches a session here: the SDK spawns its OWN bundled copy
+        # before anything on PATH, and `scivo update` will not move it either
+        # (the pin is a floor, and the dep top-up only installs packages that
+        # are MISSING). So a user can follow both instructions, see both
+        # report success, and get the same error every turn. Name the binary
+        # that is actually running, and the one command that changes it.
+        in_use = cli_in_use()
+        version = cli_version(in_use)
+        return (
+            "The model is newer than the Claude Code this session runs.\n\n"
+            f"  in use   {in_use or 'not found'}"
+            + (f"   ({version})" if version else "") + "\n"
+            + (f"  on PATH  {shutil.which('claude')}"
+               f"   ({cli_version(Path(shutil.which('claude')))})\n"
+               if shutil.which("claude") and bundled_cli() else "")
+            + "\nThe SDK spawns its bundled copy before anything on PATH, so "
+            "`claude update` does not reach it and neither does `scivo "
+            "update`. Upgrade the package that carries it:\n\n"
+            f"  {sys.executable} -m pip install -U claude-agent-sdk\n\n"
+            "Then restart the session — a running process keeps the binary it "
+            "started with. Or pick a model the current CLI supports with "
+            "`/model`."
+        )
 
     if "not found" in text and "claude" in text:
         return ("The Claude Code binary could not be found. It normally ships inside "
