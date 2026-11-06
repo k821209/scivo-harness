@@ -10,6 +10,8 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import (
@@ -77,6 +79,13 @@ LOCAL_COMMANDS = {
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 NOTIFY_MODES = ("off", "ask", "always")
+
+# Task ids this project's sessions watched start, so a RESTARTED session can
+# still tell its own background work from somebody else's. Kept beside the
+# other per-project state (.scivo/control.json, .scivo/settings.json) and
+# pruned as tasks reach a terminal state.
+TASKS_FILE = Path(".scivo") / "tasks.json"
+TASKS_KEPT = 200
 
 # Tools that create a run row worth following (bare names; the scivo prefix is
 # already stripped by `scivo_tool_label`).
@@ -312,8 +321,15 @@ class Repl:
         # Runs this session launched, watched until they close. Started only
         # when a run-creating tool is actually called, and stopped the moment
         # nothing of ours is open: the cheapest poll is the one not made.
-        # Task ids this session watched start. Ownership of a finished task is
-        # decided by this and nothing else.
+        # Task ids this process watched start. The DECISION is made by
+        # `_task_ownership`, which reads this and the record on disk — this set
+        # alone is emptied by a restart, so after `--resume` a session's OWN
+        # long task reported as another session's when it finished, which is
+        # the one case where the label is actively misleading: the work IS this
+        # project's and the user can see it is (user, 2026-11-06). Nothing
+        # preloads the file into here, deliberately — a second copy of the
+        # answer is a second thing to keep true, and the one reader that
+        # matters already consults both.
         self._own_tasks: set[str] = set()
         self._runs_task: asyncio.Task | None = None
         self._runs_since: str | None = None
@@ -545,6 +561,81 @@ class Repl:
             self._on_system(message)
         # Anything else between turns has no turn to belong to; nothing to show.
 
+    def _tasks_file(self) -> Path:
+        return self.session.config.root / TASKS_FILE
+
+    def _read_task_store(self) -> dict:
+        path = self._tasks_file()
+        if not path.is_file():
+            return {}
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return stored if isinstance(stored, dict) else {}
+
+    def _stored_task_ids(self) -> set[str]:
+        """Task ids a session with THIS id watched start, from an earlier process.
+
+        Keyed by session id, so a resume — which keeps the id — gets its own
+        tasks back, and a different session in the same project does not
+        inherit them.
+        """
+        if not self.session_id:
+            return set()
+        return {task for task, row in self._read_task_store().items()
+                if isinstance(row, dict) and row.get("session") == self.session_id}
+
+    def _write_task_store(self, store: dict) -> None:
+        # Bounded: terminal tasks are dropped as they finish, and the file is
+        # capped so a long-lived project cannot grow one without end.
+        if len(store) > TASKS_KEPT:
+            ordered = sorted(store.items(), key=lambda kv: str(kv[1].get("at") or ""))
+            store = dict(ordered[-TASKS_KEPT:])
+        path = self._tasks_file()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(store, indent=1), encoding="utf-8")
+        except OSError:
+            pass          # never let bookkeeping break a session
+
+    def _remember_task(self, task_id: str) -> None:
+        self._own_tasks.add(task_id)
+        if not self.session_id:
+            return
+        store = self._read_task_store()
+        store[task_id] = {"session": self.session_id,
+                          "at": datetime.now(timezone.utc).isoformat()}
+        self._write_task_store(store)
+
+    def _forget_task(self, task_id: str) -> None:
+        """A task that reached a terminal state needs no record."""
+        store = self._read_task_store()
+        if store.pop(task_id, None) is not None:
+            self._write_task_store(store)
+
+    def _task_ownership(self, task_id: str, claimed: str) -> str:
+        """"own" | "foreign" | "unknown" — three states, because there are three.
+
+        This was a bool, and the two readings it could not tell apart were
+        "someone else's" and "mine, from before this process started". The
+        second one printed "this session never saw it start", which is true and
+        reads as "not yours", and the user could see the work was in fact
+        theirs. `session_id` on the notice cannot settle it either: a task that
+        exists nowhere on this machine once arrived carrying OUR id. So when
+        the two disagree, say so rather than pick.
+        """
+        if task_id and task_id in self._own_tasks:
+            return "own"
+        row = self._read_task_store().get(task_id) if task_id else None
+        if isinstance(row, dict) and row.get("session") == self.session_id:
+            return "own"
+        if isinstance(row, dict) and row.get("session"):
+            return "foreign"            # another session here watched it start
+        if claimed and self.session_id and claimed != self.session_id:
+            return "foreign"
+        return "unknown"
+
     def _on_task_note(self, message) -> None:
         """A background task finished, failed, or was stopped — show it live.
 
@@ -569,20 +660,39 @@ class Repl:
         # answer "whose task is this". The answer is whether we watched it
         # start.
         full = str(getattr(message, "task_id", "") or "")
-        mine = bool(full) and full in self._own_tasks
+        owned = self._task_ownership(full, where)
+        mine = owned == "own"
         paint = ui.red if status in ("failed", "errored") else ui.yellow
         line = f"  · task {task} {status}" + (f" — {summary}" if summary else "")
         print(paint(f"\n[{stamp}]") + " " + paint(line), flush=True)
-        if not mine:
+        if owned == "foreign":
             # Printed, because it is true and may matter; never acted on, and
             # it says WHY — a feature that goes quiet for a reason nobody can
             # see is worse than one that is wrong out loud.
-            print(ui.dim(f"    this session never saw task {full[:12] or '?'} start"
+            print(ui.dim(f"    another session started task {full[:12] or '?'}"
                          f" (it says session {where[:8] or 'unknown'})"
                          f" — not picked up here"), flush=True)
+        elif owned == "unknown":
+            # NOT "another session's". Most often this session's own task from
+            # before a restart, with the record lost; stated as the open
+            # question it is, with what to do about it.
+            # Only real things are named here: the notice's own session field,
+            # and `/session` for this one's id. An earlier draft pointed at a
+            # `/tasks` command that does not exist.
+            print(ui.dim(f"    cannot tell whose task {full[:12] or '?'} is — this "
+                         f"process never saw it start, and no record here "
+                         f"claims it"
+                         + (f"; the notice says session {where[:8]}" if where
+                            else "; the notice names no session")
+                         + f". If this session was resumed, it is most likely "
+                         f"its own (/session shows this session's id). "
+                         f"Not picked up until you say so."), flush=True)
         if self.control and self.control.active:
-            self.control.status(f"task {task} {status}: {summary}"
-                                + ("" if mine else " (another session)"), level="warn")
+            label = {"own": "", "foreign": " — another session's, not handled here",
+                     "unknown": " — whose task this is could not be determined"}[owned]
+            self.control.status(f"task {task} {status}: {summary}{label}", level="warn")
+        if full and status not in ("running", "queued", "starting", "resumed"):
+            self._forget_task(full)
         # A FOREGROUND call's completion is not work to pick up: its result was
         # already handed back inside the turn, so an offer to "carry on with
         # it" is a loop. Five such notices arrived naming this session's own
@@ -717,7 +827,8 @@ class Repl:
         # with our own eyes, we keep.
         started = str(getattr(message, "task_id", "") or "")
         if started and status in ("running", "queued", "starting", "resumed"):
-            self._own_tasks.add(started)
+            # Written down, not just remembered: see _task_ownership.
+            self._remember_task(started)
         # Terminal state updates only; running/queued spam the log.
         if status in ("running", "queued", "starting", "resumed", ""):
             return

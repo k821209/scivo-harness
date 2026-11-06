@@ -20,7 +20,10 @@ prompt_toolkit prompt drops whatever was half-typed into it.
 from __future__ import annotations
 
 import asyncio
+import json
+import tempfile
 import types
+from pathlib import Path
 
 from scivo_harness.repl import ANSI, Repl
 
@@ -58,24 +61,31 @@ class FakeLine:
         return self.typed
 
 
-def _repl(line: FakeLine | None = None, notify: str = "ask"):
+def _repl(line: FakeLine | None = None, notify: str = "ask", root=None,
+          session_id: str = "s-this-session"):
+    # A real project root, because ownership is now also written to
+    # `<root>/.scivo/tasks.json` — the set alone does not survive a restart.
+    root = Path(root or tempfile.mkdtemp())
     stub = types.SimpleNamespace(
+        session=types.SimpleNamespace(config=types.SimpleNamespace(root=root)),
         line=line or FakeLine(),
         control=None,
         mode="default",
         _typed_ahead="",
-        session_id="s-this-session",
+        session_id=session_id,
         notify_mode=notify,
         _wake=asyncio.Event(),
         _wake_notes=[],
         said=[],
     )
-    stub._own_tasks = set()
     stub._say = stub.said.append
     for name in ("_next_input", "_on_task_note", "_on_task_update", "_consume_wake",
                  "_wake_line", "_announce_wake", "_offer_wake", "_offer_on_page",
-                 "_notify"):
+                 "_notify", "_tasks_file", "_read_task_store", "_stored_task_ids",
+                 "_write_task_store", "_remember_task", "_forget_task",
+                 "_task_ownership"):
         setattr(stub, name, getattr(Repl, name).__get__(stub))
+    stub._own_tasks = set()
     # The card's labels are read back off the answer, so the stub takes them
     # from the class rather than repeating the strings.
     stub._PICK_UP, stub._NOT_NOW = Repl._PICK_UP, Repl._NOT_NOW
@@ -372,13 +382,77 @@ def test_a_task_this_session_never_saw_start_is_printed_and_never_picked_up(caps
     notice's `session_id` looked like the answer and was not: one naming a task
     that exists nowhere on this machine came carrying OUR session id, and was
     announced as "this session's own task" (2026-11-04). Ownership is what we
-    watched begin."""
+    watched begin — and when nothing settles it, it is left UNSETTLED rather
+    than guessed either way."""
     stub = _repl(FakeLine(answers=["y"]))
     _note(stub, task="btrw53fkr", watched=False)      # our own id on the notice
     assert not stub._wake.is_set(), "a task we never saw start must not wake us"
     printed = ANSI.sub("", capsys.readouterr().out)
     assert "btrw53fkr" in printed, "it is still worth seeing"
-    assert "never saw task" in printed and "not picked up here" in printed
+    assert "cannot tell whose task" in printed
+    # NOT claimed as somebody else's: that is the reading that misled, since
+    # the usual cause is this session's own task from before a restart.
+    assert "another session" not in printed
+
+
+def test_a_notice_from_a_different_session_says_so(capsys):
+    stub = _repl(FakeLine(answers=["y"]))
+    _note(stub, task="bq9zz1abc", watched=False, session="s-somebody-else")
+    assert not stub._wake.is_set()
+    printed = ANSI.sub("", capsys.readouterr().out)
+    assert "another session started task" in printed
+    assert "not picked up here" in printed
+
+
+def test_a_resumed_session_still_owns_the_task_it_started(capsys, tmp_path):
+    """The reported bug (user, 2026-11-06).
+
+    `_own_tasks` was memory only, so after `--resume` a session's own long
+    task — still running across the restart — reported as another session's
+    when it finished. The user could see the work was theirs ("Llm2assem 잡
+    맞는것 같기도 해서"), which is the worst case: the label was confidently
+    wrong about the one thing it exists to say.
+    """
+    before = _repl(FakeLine(), root=tmp_path, session_id="s-long-lived")
+    _start(before, "bcwskkm1m")
+    assert (tmp_path / ".scivo" / "tasks.json").is_file(), "it must outlive the process"
+
+    # A NEW process, same session id — which is what a resume is.
+    after = _repl(FakeLine(answers=["y"]), root=tmp_path, session_id="s-long-lived")
+    # Asserted through the decision function, not through a cached copy of its
+    # answer: `_own_tasks` is this process's own sightings and is empty here by
+    # design — the record on disk is what carries ownership across the restart.
+    assert after._own_tasks == set()
+    assert after._task_ownership("bcwskkm1m", "") == "own"
+    _note(after, task="bcwskkm1m", status="stopped", watched=False)
+    printed = ANSI.sub("", capsys.readouterr().out)
+    assert "another session" not in printed and "cannot tell" not in printed
+
+
+def test_another_session_in_the_same_project_does_not_inherit_it(tmp_path):
+    """The store is keyed by session id, so sharing a project is not owning."""
+    mine = _repl(FakeLine(), root=tmp_path, session_id="s-one")
+    _start(mine, "btask111")
+    theirs = _repl(FakeLine(), root=tmp_path, session_id="s-two")
+    assert "btask111" not in theirs._own_tasks
+    assert theirs._task_ownership("btask111", "") == "foreign"
+
+
+def test_a_finished_task_is_dropped_from_the_record(tmp_path):
+    """Bookkeeping that only grows is a leak; a closed task needs no row."""
+    stub = _repl(FakeLine(answers=["y"]), root=tmp_path, session_id="s-one")
+    _start(stub, "btask222")
+    assert "btask222" in json.loads((tmp_path / ".scivo" / "tasks.json").read_text())
+    _note(stub, task="btask222", status="completed", watched=False)
+    assert "btask222" not in json.loads((tmp_path / ".scivo" / "tasks.json").read_text())
+
+
+def test_an_unreadable_record_is_not_fatal(tmp_path):
+    (tmp_path / ".scivo").mkdir()
+    (tmp_path / ".scivo" / "tasks.json").write_text("{not json")
+    stub = _repl(FakeLine(), root=tmp_path, session_id="s-one")
+    assert stub._own_tasks == set()
+    assert stub._task_ownership("bwhatever", "") == "unknown"
 
 
 def test_watching_a_task_start_is_what_makes_it_ours(capsys):
