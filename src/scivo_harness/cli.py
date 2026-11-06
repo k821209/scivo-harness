@@ -43,6 +43,7 @@ from .setup import (
 from .update import (
     checkout_in_use,
     fill_missing_deps,
+    upgrade_sdk,
     pull_checkout,
     apply as apply_update,
     inspect as inspect_install,
@@ -475,6 +476,29 @@ async def _update(args) -> int:
         failed = failed or not ok
         moved_any = moved_any or moved
 
+    # The Claude Code a session runs ships INSIDE claude-agent-sdk, and
+    # nothing here was moving it: the reinstall is --no-deps and the dep
+    # top-up only fills what is missing, so an SDK already present stayed put
+    # while `claude update` moved a binary no session ever spawns. Skipped
+    # with --no-self, because then the harness's own interpreter is not this
+    # command's business.
+    sdk_moved = False
+    if not args.no_self:
+        if args.check:
+            print(ui.dim(f"  {'claude-agent-sdk':20} would run: pip install --upgrade "
+                         f"--no-deps claude-agent-sdk"))
+        else:
+            state, detail = upgrade_sdk(sys.executable)
+            paint = {"moved": ui.green, "current": ui.dim, "absent": ui.dim,
+                     "failed": ui.red, "unknown": ui.yellow}[state]
+            # Every state says which it was. "unknown" is printed, not
+            # swallowed: a check that goes quiet when it could not run reads
+            # exactly like one that passed.
+            label = "could not verify: " if state == "unknown" else ""
+            print(f"  {'claude-agent-sdk':20} {paint(label + detail[:160])}")
+            sdk_moved = state == "moved"
+            failed = failed or state == "failed"
+
     if args.check:
         return 0
 
@@ -501,7 +525,15 @@ async def _update(args) -> int:
         return 1
     # pip prints success whether or not anything moved, so the verdict comes
     # from re-reading the installs and a fresh server process, not from pip.
-    if moved_any or (after_sha, after_version) != (before_sha, before_version):
+    if sdk_moved:
+        # Said separately and first: a new bundled CLI only takes effect in a
+        # NEW process, and the session that just ran this is still holding the
+        # old binary. That is the step the user had to be told by hand.
+        print(ui.green("updated — including the Claude Code bundled in "
+                       "claude-agent-sdk."))
+        print(ui.yellow("Restart the session: a running process keeps the binary it "
+                        "started with, so the new CLI is not in effect until you do."))
+    elif moved_any or (after_sha, after_version) != (before_sha, before_version):
         print(ui.green("updated. Restart any running scivo session to pick it up."))
     elif left_stale:
         # Not "current": a snapshot the warning asked to undo was left alone.

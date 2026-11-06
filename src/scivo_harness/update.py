@@ -216,6 +216,92 @@ def apply(install: Install) -> tuple[bool, str]:
     return code == 0, output[-1200:]
 
 
+SDK_DIST = "claude-agent-sdk"
+
+# Asked of the TARGET interpreter, not this one: the SDK that matters is the
+# one that interpreter imports, and after a pip upgrade this process still
+# holds the old module. Prints one JSON line.
+SDK_CLI_PROBE = r"""
+import json, pathlib, re, subprocess
+out = {"sdk": None, "cli": None, "bundled": False}
+try:
+    import claude_agent_sdk as sdk
+except Exception:
+    print(json.dumps(out)); raise SystemExit(0)
+try:
+    import importlib.metadata as md
+    out["sdk"] = md.version("claude-agent-sdk")
+except Exception:
+    pass
+binary = pathlib.Path(sdk.__file__).parent / "_bundled" / "claude"
+out["bundled"] = binary.is_file()
+if out["bundled"]:
+    try:
+        said = subprocess.run([str(binary), "--version"], capture_output=True,
+                              text=True, timeout=30).stdout
+        found = re.search(r"\b(\d+\.\d+\.\d+)\b", said or "")
+        out["cli"] = found.group(1) if found else None
+    except Exception:
+        pass
+print(json.dumps(out))
+"""
+
+
+def _sdk_state(interpreter: str) -> dict | None:
+    code, output = _run([interpreter, "-c", SDK_CLI_PROBE], timeout=120)
+    if code != 0 or not output:
+        return None
+    import json as _json
+    try:
+        return _json.loads(output.strip().splitlines()[-1])
+    except (_json.JSONDecodeError, IndexError):
+        return None
+
+
+def upgrade_sdk(interpreter: str) -> tuple[str, str]:
+    """Move `claude-agent-sdk`, because the Claude Code it carries IS the CLI.
+
+    The SDK spawns the copy bundled in its own package before anything on
+    PATH, so that binary's version decides which models a session can drive —
+    and nothing was moving it. `apply()` reinstalls with `--no-deps` to protect
+    pins other projects on a shared interpreter depend on, and
+    `fill_missing_deps` only installs what is MISSING, so an SDK already
+    present stayed exactly where it was. Measured on one machine: bundled
+    2.1.274 against 2.1.319 on PATH, 45 versions apart, and the API refusing a
+    model with advice (`claude update`) that could not reach it (user,
+    2026-11-06).
+
+    `--no-deps` is kept here for the same reason it is kept there — this moves
+    the harness's own runtime, not anyone's science stack.
+
+    Returns (state, detail): "moved" | "current" | "absent" | "failed" |
+    "unknown". "unknown" is not "current": it says the probe could not be
+    read, and the caller must not print it as a pass.
+    """
+    before = _sdk_state(interpreter)
+    if before is None:
+        return ("unknown", f"could not read {SDK_DIST} under {interpreter}")
+    if before.get("sdk") is None:
+        return ("absent", f"{SDK_DIST} is not installed under {interpreter}")
+    code, output = _run([interpreter, "-m", "pip", "install", "--upgrade",
+                         "--no-deps", SDK_DIST], timeout=900)
+    if code != 0:
+        return ("failed", output[-400:])
+    after = _sdk_state(interpreter)
+    if after is None:
+        return ("unknown", f"upgraded, but could not re-read {SDK_DIST} afterwards")
+
+    def _line(state: dict) -> str:
+        cli = state.get("cli")
+        if not state.get("bundled"):
+            return f"{state.get('sdk')} (carries no CLI — PATH's copy is the one in use)"
+        return f"{state.get('sdk')} · Claude Code {cli or 'version unreadable'}"
+
+    if (after.get("sdk"), after.get("cli")) != (before.get("sdk"), before.get("cli")):
+        return ("moved", f"{_line(before)}  →  {_line(after)}")
+    return ("current", f"{_line(after)} — already the latest")
+
+
 def fill_missing_deps(install: Install) -> tuple[bool, str]:
     """Install declared runtime deps that the interpreter is missing.
 
