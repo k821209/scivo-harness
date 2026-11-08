@@ -95,6 +95,9 @@ TASKS_KEPT = 200
 # "cannot tell" rather than to a wrong answer.
 SESSION_IN_PATH = re.compile(
     r"/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/")
+# Where those per-session folders live. A name, so a test can point it
+# somewhere else instead of depending on the host's own /tmp.
+TASK_TMP = Path("/tmp")
 
 # Tools that create a run row worth following (bare names; the scivo prefix is
 # already stripped by `scivo_tool_label`).
@@ -628,6 +631,31 @@ class Repl:
         found = SESSION_IN_PATH.search(output or "")
         return found.group(1) if found else ""
 
+    def _task_on_disk(self, task_id: str) -> bool:
+        """Is there a file for this task under THIS session's own task folder?
+
+        Asked of the filesystem rather than of the notice, because a stopped
+        background command's notification carries no `output_file` at all —
+        which is how a task of this session's own came back "could not be
+        determined" a second time (user, 2026-11-08: a `Background command …
+        was stopped after reaching its` time limit).
+
+        Globbed on the session id, not built from the cwd: the slug's spelling
+        is the CLI's business, and a layout we cannot match returns False,
+        which costs an "unknown" rather than buying a wrong answer.
+
+        ONE-WAY evidence. Present proves the task is ours; ABSENT proves
+        nothing — the session may be on another machine, and these files are
+        temporary. So the caller may only read True.
+        """
+        if not task_id or not self.session_id:
+            return False
+        try:
+            pattern = f"claude-*/*/{self.session_id}/tasks/{task_id}.*"
+            return any(TASK_TMP.glob(pattern))
+        except OSError:
+            return False
+
     def _task_ownership(self, task_id: str, claimed: str,
                         output: str = "") -> str:
         """"own" | "foreign" | "unknown" — three states, because there are three.
@@ -656,6 +684,10 @@ class Repl:
         wrote = self._session_in_output(output)
         if wrote and self.session_id:
             return "own" if wrote == self.session_id else "foreign"
+        # Nothing on the notice to go on — look for the file ourselves. Only a
+        # hit counts; see _task_on_disk on why a miss is not foreignness.
+        if self._task_on_disk(task_id):
+            return "own"
         if claimed and self.session_id and claimed != self.session_id:
             return "foreign"
         return "unknown"

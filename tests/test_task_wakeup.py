@@ -83,7 +83,7 @@ def _repl(line: FakeLine | None = None, notify: str = "ask", root=None,
                  "_wake_line", "_announce_wake", "_offer_wake", "_offer_on_page",
                  "_notify", "_tasks_file", "_read_task_store", "_stored_task_ids",
                  "_write_task_store", "_remember_task", "_forget_task",
-                 "_task_ownership", "_session_in_output"):
+                 "_task_ownership", "_session_in_output", "_task_on_disk"):
         setattr(stub, name, getattr(Repl, name).__get__(stub))
     stub._own_tasks = set()
     # The card's labels are read back off the answer, so the stub takes them
@@ -424,6 +424,62 @@ def test_the_output_path_settles_a_task_from_before_a_restart(capsys):
     assert stub._task_ownership("bhul0ysn3", "", _note_output("bhul0ysn3")) == "own"
     printed = ANSI.sub("", capsys.readouterr().out)
     assert "cannot tell" not in printed and "another session" not in printed
+
+
+def _plant(tmp, session, task, slug="-home-k821209-works-llm2assem"):
+    """A task's output file where the CLI puts it, under `tmp` as /tmp."""
+    folder = tmp / "claude-1001" / slug / session / "tasks"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{task}.output").write_text("")
+    return folder
+
+
+def test_a_notice_with_no_output_file_is_settled_by_looking_on_disk(monkeypatch, tmp_path, capsys):
+    """The second "could not be determined" (user, 2026-11-08).
+
+    A STOPPED background command — `Background command "Wait in background for
+    the window-4096 qk training to finish or fail" was stopped after reaching
+    its` time limit — carries no `output_file`, so there was nothing on the
+    notice to read a session out of. The file was on disk the whole time; we
+    just waited to be handed its path instead of looking.
+    """
+    from scivo_harness import repl as repl_mod
+    monkeypatch.setattr(repl_mod, "TASK_TMP", tmp_path)
+    me = "a2d62845-99d9-4bca-9096-e53dbcec4d76"
+    stub = _repl(FakeLine(answers=["y"]), session_id=me)
+    _plant(tmp_path, me, "bu0q1r143")
+    assert stub._task_on_disk("bu0q1r143") is True
+    assert stub._task_ownership("bu0q1r143", me, "") == "own"
+    _note(stub, task="bu0q1r143", status="stopped", output="", watched=False)
+    printed = ANSI.sub("", capsys.readouterr().out)
+    assert "cannot tell" not in printed and "another session" not in printed
+
+
+def test_a_missing_file_is_not_evidence_of_anything(monkeypatch, tmp_path):
+    """One-way on purpose: present proves ours, absent proves nothing.
+
+    The session may be on another machine — the two reported ids were on no
+    disk here at all — and these files are temporary. Reading a miss as "not
+    ours" would turn a cleanup into a wrong verdict.
+    """
+    from scivo_harness import repl as repl_mod
+    monkeypatch.setattr(repl_mod, "TASK_TMP", tmp_path)
+    me = "a2d62845-99d9-4bca-9096-e53dbcec4d76"
+    stub = _repl(FakeLine(), session_id=me)
+    assert stub._task_on_disk("bnowhere") is False
+    assert stub._task_ownership("bnowhere", me, "") == "unknown"   # not "foreign"
+    # And a file under SOMEBODY ELSE's session says nothing about ours either.
+    _plant(tmp_path, "11111111-2222-3333-4444-555555555555", "btheirs")
+    assert stub._task_on_disk("btheirs") is False
+    assert stub._task_ownership("btheirs", me, "") == "unknown"
+
+
+def test_the_disk_lookup_needs_a_session_id(monkeypatch, tmp_path):
+    from scivo_harness import repl as repl_mod
+    monkeypatch.setattr(repl_mod, "TASK_TMP", tmp_path)
+    stub = _repl(FakeLine(), session_id="")
+    _plant(tmp_path, "", "banything")
+    assert stub._task_on_disk("banything") is False
 
 
 def test_an_output_path_under_another_session_is_foreign(capsys):
