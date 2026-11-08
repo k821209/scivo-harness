@@ -114,6 +114,11 @@ class Session:
     scivo_tools: tuple[str, ...] = ()
     resumed: str | None = None
     lean_tools: int | None = None
+    # `project_guide()` verbatim, kept because a profile switch has to rebuild
+    # the system prompt: the append names the profile and its tool counts, so
+    # leaving it alone would tell the model it is running a kit it is not
+    # (and `/profile none` has to drop the guide entirely).
+    guide: str | None = None
 
     def options_for(self, provider: Provider, **changes: Any) -> ClaudeAgentOptions:
         """Options for `provider`: the full session, or the lean one for a small model."""
@@ -272,6 +277,7 @@ async def build(
                       config=config, provider=chosen, model=model, approver=approver,
                       endpoint=endpoint, full_options=options,
                       lean_append=prompt.build(briefing, plan, guide=None),
+                      guide=guide,
                       scivo_tools=tuple(tool_names), resumed=resume)
     session.options = session.options_for(chosen)
     if chosen.lean_profile:

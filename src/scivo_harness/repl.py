@@ -1479,7 +1479,11 @@ class Repl:
                                      read_only=self.session.plan.read_only_session)
             except ValueError:
                 continue
-            rows.append((name, len(plan.kept), ", ".join(toolsets.PROFILES[name])))
+            domains = ", ".join(toolsets.PROFILES[name])
+            # An empty column reads as a rendering gap rather than as the
+            # profile's whole point.
+            rows.append((name, len(plan.kept),
+                         domains or "nothing — the host's own tools only"))
         return rows
 
     async def _profile(self, argument: str) -> None:
@@ -1492,6 +1496,7 @@ class Repl:
         cannot take, and the point of switching mid-session is to keep going
         with a different kit (user, 2026-11-08).
         """
+        from . import prompt as prompt_mod
         from . import toolsets
         from .session import AUTO_APPROVED_HOST_TOOLS
 
@@ -1537,8 +1542,18 @@ class Repl:
         # new plan has to be in place before the options are built — and put
         # back if the new client will not start.
         self.session.plan = plan
+        # The append names the profile and counts its tools, so it is rebuilt
+        # too — left alone it would tell the model it is running the kit it had
+        # a moment ago. The guide is handed over unconditionally and `build`
+        # decides: it drops both guides when nothing is loaded, since each is
+        # instructions for calling tools that are now absent. Deciding it here
+        # as well was a second copy of the rule that no test could see.
+        append = prompt_mod.build(self.session.briefing, plan,
+                                  guide=self.session.guide)
         options = self.session.options_for(
             self.session.provider,
+            system_prompt={"type": "preset", "preset": "claude_code",
+                           "append": append},
             allowed_tools=plan.auto_approved + AUTO_APPROVED_HOST_TOOLS,
             disallowed_tools=plan.disallowed,
             resume=self.session_id,

@@ -27,10 +27,43 @@ def test_paper_profile_keeps_paper_and_study_and_page_tools():
     assert "add_video" not in kept and "youtube_check" not in kept
 
 
-def test_a_tool_no_domain_claims_is_carried_by_every_profile():
-    for profile in toolsets.PROFILES:
+def test_a_tool_no_domain_claims_is_carried_by_every_profile_that_carries_any():
+    # `none` is the one exception and it is the point of it, so the invariant
+    # says which profiles it is about rather than being quietly weakened.
+    for profile, domains in toolsets.PROFILES.items():
+        if not domains:
+            continue
         kept = set(toolsets.plan(NAMES, profile).kept)
         assert {"build_tracked_changes", "lint_results_grid", "whoami"} <= kept, profile
+
+
+def test_the_none_profile_carries_nothing_at_all():
+    """"완전 프리한걸로" (user, 2026-11-08) — including the core.
+
+    Going through the ordinary path would have kept `ALWAYS` and every tool
+    whose domain falls through to `core`: whoami, memory, todos, decisions,
+    feedback. Around forty tools, which is not what "no tools" means.
+    """
+    plan = toolsets.plan(NAMES, "none")
+    assert plan.kept == []
+    assert set(plan.dropped) == set(NAMES)
+    assert plan.auto_approved == []
+    assert "whoami" not in plan.kept, "ALWAYS does not survive it"
+    assert all(name.startswith("mcp__scivo__") for name in plan.disallowed)
+
+
+def test_an_empty_profile_is_the_rule_not_the_name():
+    """A second empty profile must behave the same, not silently differently."""
+    try:
+        toolsets.PROFILES["blank-for-test"] = ()
+        assert toolsets.plan(NAMES, "blank-for-test").kept == []
+    finally:
+        del toolsets.PROFILES["blank-for-test"]
+
+
+def test_a_read_only_none_session_is_still_nothing():
+    plan = toolsets.plan(NAMES, "none", read_only=True)
+    assert plan.kept == [] and plan.read_only_session is True
 
 
 def test_secrets_are_never_auto_approved():
@@ -95,3 +128,25 @@ def test_the_cache_note_reads_per_model_figures_then_the_flat_usage():
     flat = SimpleNamespace(model_usage=None, usage={"cache_read_input_tokens": 0, "cache_creation_input_tokens": 1200})
     assert cache_note(flat) == "cache 0 read · 1.2k new"
     assert cache_note(SimpleNamespace(model_usage=None, usage=None)) == ""
+
+
+def test_a_toolless_session_gets_neither_guide():
+    """Both guides are instructions for calling tools, so neither belongs.
+
+    The full guide is dropped when a project guide was fetched; LOCAL_GUIDE is
+    the one a lean session gets INSTEAD, and that path has its own branch — a
+    small-model session switching to `none` would otherwise be handed a page of
+    tool conventions for tools it does not have.
+    """
+    from scivo_harness import prompt
+    from scivo_harness.preflight import Briefing
+
+    empty = toolsets.plan(NAMES, "none")
+    assert prompt.LOCAL_GUIDE not in prompt.build(Briefing(), empty, guide=None)
+    assert "PROJECT GUIDE" not in prompt.build(Briefing(), empty,
+                                               guide="PROJECT GUIDE TEXT")
+    # And a profile that DOES carry tools still gets one.
+    narrow = toolsets.plan(NAMES, "writing")
+    assert prompt.LOCAL_GUIDE in prompt.build(Briefing(), narrow, guide=None)
+    assert "PROJECT GUIDE TEXT" in prompt.build(Briefing(), narrow,
+                                                guide="PROJECT GUIDE TEXT")

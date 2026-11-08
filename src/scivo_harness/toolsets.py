@@ -68,6 +68,11 @@ PROFILES: dict[str, tuple[str, ...]] = {
     # or upload a video.
     "deck": ("deck", "materials"),
     "video": ("video", "materials"),
+    # No scivo surface at all — asked for as "완전 프리한걸로" (user,
+    # 2026-11-08): the harness's charter, the briefing and the host's own
+    # tools, and nothing of this server. An EMPTY domain list is the rule,
+    # not the name: see plan().
+    "none": (),
 }
 
 
@@ -141,6 +146,16 @@ def plan(all_tools: list[str], profile: str = "full", read_only: bool = False) -
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; choose from {', '.join(PROFILES)}")
     wanted = set(PROFILES[profile])
+    if not wanted:
+        # Nothing, and that includes ALWAYS and the `core` domain — which is
+        # the whole difference between this and a narrow profile. Everything
+        # below keeps core unconditionally, so an empty profile that went
+        # through it would still carry whoami, memory, todos, decisions and
+        # feedback: ~40 tools, which is not what "no tools" means. Derived
+        # from the empty list rather than from the name, so a second empty
+        # profile behaves the same way instead of silently differently.
+        return ToolPlan(kept=[], dropped=list(all_tools), read_only=[],
+                        profile=profile, read_only_session=read_only)
     kept, dropped = [], []
     for name in all_tools:
         keep = (name in ALWAYS or _domain_of(name) in wanted or _domain_of(name) == "core"

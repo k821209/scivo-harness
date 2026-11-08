@@ -230,6 +230,23 @@ def _order_note(plan: ToolPlan, guide: str | None) -> str:
 def _tool_note(plan: ToolPlan) -> str:
     if not plan.dropped:
         return ""
+    if not plan.kept:
+        # Nothing of this server is loaded, so the usual note — "N of M are
+        # loaded, do not plan around the rest" — would be describing a surface
+        # that is not there at all. Say the one true thing and how to get it
+        # back.
+        return (
+            "## This session carries no scivo tools\n\n"
+            f"The `{plan.profile}` profile loads none of the "
+            f"{len(plan.dropped)} scivo tools. Nothing of the project's "
+            "dashboard — the manuscript, runs, memory, decisions — can be "
+            "read or written from here, and the project guide is not loaded "
+            "either, so do not describe its conventions as if they applied.\n\n"
+            "The briefing below is what was already gathered before the tools "
+            "were dropped; treat it as a snapshot, not something you can "
+            "refresh. If a task needs any of it, say so and tell the user to "
+            "run `/profile full`."
+        )
     lines = [
         "## Your tool surface is narrowed",
         "",
@@ -262,14 +279,16 @@ def build(
     if note:
         parts.append(note)
 
-    if guide is None:
+    # No tools, no guide: both guides are instructions for calling tools this
+    # session does not have.
+    if guide is None and plan.kept:
         parts.append(LOCAL_GUIDE)
 
     order = _order_note(plan, guide)
     if order:
         parts.append(order)
 
-    if guide:
+    if guide and plan.kept:
         parts.append(
             "# Project guide (the authoritative conventions — already fetched)\n\n"
             "This is `project_guide()` verbatim. You do not need to call it.\n\n"

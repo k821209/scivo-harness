@@ -54,8 +54,14 @@ def _repl(profile="full", session_id="sess-1", read_only=False, fail_connect=Fal
         built.append(dict(changes))
         return types.SimpleNamespace(permission_mode="default", **changes)
 
+    from scivo_harness.preflight import Briefing
+
     session = types.SimpleNamespace(
         plan=plan, options=options, full_options=options, scivo_tools=TOOLS,
+        # The append is rebuilt on every switch, so the switch needs both of
+        # these — the briefing to build from and the guide to put back.
+        briefing=Briefing(),
+        guide="PROJECT GUIDE TEXT",
         provider=types.SimpleNamespace(name="anthropic", lean_profile=False),
         model="claude-opus-5", options_for=options_for,
     )
@@ -187,3 +193,58 @@ def test_a_client_that_will_not_start_puts_the_old_profile_back():
     assert stub.session.plan.profile == "full", "the plan was left lying"
     said = _text(stub)
     assert "could not switch profile" in said and "still on full" in said
+
+
+def _append_of(stub) -> str:
+    return stub.built[-1]["system_prompt"]["append"]
+
+
+def test_the_system_prompt_follows_the_profile():
+    """The append names the profile and counts its tools.
+
+    Left alone across a switch it would tell the model it is running the kit
+    it had a moment ago — the model's own description of its tools would be
+    wrong while the tools themselves were right.
+    """
+    stub = _repl(profile="full")
+    asyncio.run(stub._profile("analysis"))
+    append = _append_of(stub)
+    assert "`analysis` profile" in append
+    assert "`full` profile" not in append
+
+
+def test_none_drops_the_guide_as_well_as_the_tools():
+    """Both guides are instructions for calling tools that are now absent."""
+    stub = _repl(profile="full")
+    asyncio.run(stub._profile("none"))
+    append = _append_of(stub)
+    assert "PROJECT GUIDE TEXT" not in append
+    assert "carries no scivo tools" in append
+    assert "/profile full" in append, "it has to say how to get them back"
+    assert stub.built[-1]["disallowed_tools"], "and every tool is gone"
+    assert stub.built[-1]["allowed_tools"] == [
+        *__import__("scivo_harness.session", fromlist=["x"]).AUTO_APPROVED_HOST_TOOLS,
+    ], "only the host's own tools remain approved"
+
+
+def test_switching_back_from_none_restores_the_guide():
+    stub = _repl(profile="none")
+    asyncio.run(stub._profile("full"))
+    append = _append_of(stub)
+    assert "PROJECT GUIDE TEXT" in append
+    assert "carries no scivo tools" not in append
+
+
+def test_none_keeps_the_conversation_too():
+    stub = _repl(profile="full", session_id="sess-9")
+    asyncio.run(stub._profile("none"))
+    assert stub.built[-1]["resume"] == "sess-9"
+    assert "the conversation continues" in _text(stub)
+
+
+def test_none_is_in_the_menu_and_says_it_carries_nothing():
+    stub = _repl(profile="full")
+    asyncio.run(stub._profile(""))
+    said = _text(stub)
+    assert "none" in said
+    assert "  0 tools" in said
