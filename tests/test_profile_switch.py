@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import types
+from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
@@ -44,30 +46,59 @@ class FakeClient:
         self.mode = mode
 
 
-def _repl(profile="full", session_id="sess-1", read_only=False, fail_connect=False):
-    plan = toolsets.plan(list(TOOLS), profile=profile, read_only=read_only)
-    options = types.SimpleNamespace(permission_mode="default", allowed_tools=[],
-                                    disallowed_tools=[], resume=None)
-    built: list[dict] = []
+@dataclass
+class Opts:
+    """Enough of ClaudeAgentOptions to be `dataclasses.replace`d.
 
-    def options_for(provider, **changes):
-        built.append(dict(changes))
-        return types.SimpleNamespace(permission_mode="default", **changes)
+    A real dataclass on purpose: `options_rekitted` works by replacing fields
+    on the options THIS session runs, and the property under test is that
+    `env` and `model` come through untouched.
+    """
+    env: dict
+    model: str
+    system_prompt: Any = None
+    allowed_tools: list = field(default_factory=list)
+    disallowed_tools: list = field(default_factory=list)
+    resume: str | None = None
+    continue_conversation: bool = False
+    tools: list | None = None
+    permission_mode: str = "default"
 
+
+LOCAL_ENV = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8099",
+             "ANTHROPIC_AUTH_TOKEN": "local-token"}
+
+
+def _repl(profile="full", session_id="sess-1", read_only=False, fail_connect=False,
+          local=False, lean=False):
     from scivo_harness.preflight import Briefing
+    from scivo_harness.session import Session
+
+    plan = toolsets.plan(list(TOOLS), profile=profile, read_only=read_only)
+    # What the session is RUNNING: the local endpoint when asked for.
+    options = Opts(env=dict(LOCAL_ENV) if local else {"MCP_DISCOVERY_CACHE": "false"},
+                   model="qwen3-27b" if local else "claude-opus-5")
+    # What `full_options` is: the Claude-shaped snapshot from launch, which
+    # `/model` deliberately does not update when it switches to a local
+    # endpoint. Building a profile from it is the bug.
+    full_options = Opts(env={"MCP_DISCOVERY_CACHE": "false"}, model="claude-opus-5")
 
     session = types.SimpleNamespace(
-        plan=plan, options=options, full_options=options, scivo_tools=TOOLS,
-        # The append is rebuilt on every switch, so the switch needs both of
-        # these — the briefing to build from and the guide to put back.
-        briefing=Briefing(),
-        guide="PROJECT GUIDE TEXT",
-        provider=types.SimpleNamespace(name="anthropic", lean_profile=False),
-        model="claude-opus-5", options_for=options_for,
+        plan=plan, options=options, full_options=full_options, scivo_tools=TOOLS,
+        briefing=Briefing(), guide="PROJECT GUIDE TEXT", lean_append="LAUNCH LEAN APPEND",
+        provider=types.SimpleNamespace(name="local" if local else "anthropic",
+                                       lean_profile=lean),
+        model=options.model,
     )
+    # The REAL methods, both of them, so a falsification that swaps one for
+    # the other fails on what it actually got wrong — the endpoint and the
+    # model — rather than on a stub that happens to be missing a name.
+    session.options_rekitted = Session.options_rekitted.__get__(session)
+    session.options_for = Session.options_for.__get__(session)
+
     stub = types.SimpleNamespace(session=session, session_id=session_id,
                                  mode="default", control=None, said=[],
-                                 built=built, clients=[])
+                                 clients=[])
     stub.client = FakeClient(options)
     stub._say = stub.said.append
     stub._stop_pump = lambda: asyncio.sleep(0)
@@ -75,16 +106,20 @@ def _repl(profile="full", session_id="sess-1", read_only=False, fail_connect=Fal
     for name in ("_profile", "_profile_rows"):
         setattr(stub, name, getattr(Repl, name).__get__(stub))
     import scivo_harness.repl as repl_mod
-    # Only the FIRST new client fails. The fallback — the one that puts the old
-    # options back — has to be able to connect, or the test is measuring a
-    # session that cannot reconnect at all rather than the restore path.
     remaining = [fail_connect]
 
     def factory(options=None):
         fail = bool(remaining and remaining.pop(0))
-        return FakeClient(options, fail=fail)
+        client = FakeClient(options, fail=fail)
+        stub.clients.append(client)
+        return client
     repl_mod.ClaudeSDKClient = factory
     return stub
+
+
+def _built(stub):
+    """The options the new client was constructed with."""
+    return stub.clients[-1].options
 
 
 def _text(stub) -> str:
@@ -121,9 +156,9 @@ def test_a_number_picks_from_the_list_that_printed():
 def test_switching_resumes_the_same_conversation():
     stub = _repl(profile="full", session_id="sess-1")
     asyncio.run(stub._profile("analysis"))
-    assert stub.built, "the options were never rebuilt"
-    assert stub.built[-1]["resume"] == "sess-1"
-    assert stub.built[-1]["continue_conversation"] is False
+    assert stub.clients, "the client was never rebuilt"
+    assert _built(stub).resume == "sess-1"
+    assert _built(stub).continue_conversation is False
     assert "the conversation continues" in _text(stub)
 
 
@@ -131,14 +166,14 @@ def test_it_says_so_when_there_is_no_conversation_to_resume():
     """Worth knowing BEFORE typing the next message into an empty one."""
     stub = _repl(profile="full", session_id=None)
     asyncio.run(stub._profile("analysis"))
-    assert stub.built[-1]["resume"] is None
+    assert _built(stub).resume is None
     assert "NEW conversation" in _text(stub)
 
 
 def test_the_new_kit_is_what_the_profile_asks_for():
     stub = _repl(profile="full")
     asyncio.run(stub._profile("deck"))
-    disallowed = stub.built[-1]["disallowed_tools"]
+    disallowed = _built(stub).disallowed_tools
     # A deck session keeps deck + materials and drops the paper tools.
     assert any(name.endswith("create_deck") for name in
                stub.session.plan.disallowed) is False
@@ -151,7 +186,7 @@ def test_the_host_tools_stay_approved_across_a_switch():
 
     stub = _repl(profile="full")
     asyncio.run(stub._profile("analysis"))
-    allowed = stub.built[-1]["allowed_tools"]
+    allowed = _built(stub).allowed_tools
     for tool in AUTO_APPROVED_HOST_TOOLS:
         assert tool in allowed, tool
 
@@ -167,7 +202,7 @@ def test_the_same_profile_is_a_no_op():
     stub = _repl(profile="paper")
     asyncio.run(stub._profile("paper"))
     assert "already on paper" in _text(stub)
-    assert not stub.built, "it must not rebuild the client for nothing"
+    assert not stub.clients, "it must not rebuild the client for nothing"
 
 
 def test_an_unknown_name_lists_the_real_ones_and_changes_nothing():
@@ -175,7 +210,7 @@ def test_an_unknown_name_lists_the_real_ones_and_changes_nothing():
     asyncio.run(stub._profile("nonsense"))
     assert "no profile called" in _text(stub)
     assert stub.session.plan.profile == "full"
-    assert not stub.built
+    assert not stub.clients
 
 
 def test_a_number_out_of_range_changes_nothing():
@@ -196,7 +231,7 @@ def test_a_client_that_will_not_start_puts_the_old_profile_back():
 
 
 def _append_of(stub) -> str:
-    return stub.built[-1]["system_prompt"]["append"]
+    return _built(stub).system_prompt["append"]
 
 
 def test_the_system_prompt_follows_the_profile():
@@ -221,8 +256,8 @@ def test_none_drops_the_guide_as_well_as_the_tools():
     assert "PROJECT GUIDE TEXT" not in append
     assert "carries no scivo tools" in append
     assert "/profile full" in append, "it has to say how to get them back"
-    assert stub.built[-1]["disallowed_tools"], "and every tool is gone"
-    assert stub.built[-1]["allowed_tools"] == [
+    assert _built(stub).disallowed_tools, "and every tool is gone"
+    assert _built(stub).allowed_tools == [
         *__import__("scivo_harness.session", fromlist=["x"]).AUTO_APPROVED_HOST_TOOLS,
     ], "only the host's own tools remain approved"
 
@@ -238,7 +273,7 @@ def test_switching_back_from_none_restores_the_guide():
 def test_none_keeps_the_conversation_too():
     stub = _repl(profile="full", session_id="sess-9")
     asyncio.run(stub._profile("none"))
-    assert stub.built[-1]["resume"] == "sess-9"
+    assert _built(stub).resume == "sess-9"
     assert "the conversation continues" in _text(stub)
 
 
@@ -248,3 +283,49 @@ def test_none_is_in_the_menu_and_says_it_carries_nothing():
     said = _text(stub)
     assert "none" in said
     assert "  0 tools" in said
+
+
+def test_a_local_session_stays_local_across_a_profile_switch():
+    """The reported fallback (user, 2026-11-08).
+
+    `/model` switches to a local endpoint by rebuilding the client, and
+    deliberately leaves `full_options` as the Claude-shaped snapshot from
+    launch — that is what a switch BACK restores. A profile rebuilt from that
+    snapshot therefore dropped `ANTHROPIC_BASE_URL` and the local model, and
+    the next turn went to Claude with nothing said about it.
+    """
+    stub = _repl(profile="full", local=True)
+    asyncio.run(stub._profile("analysis"))
+    options = _built(stub)
+    assert options.env.get("ANTHROPIC_BASE_URL") == LOCAL_ENV["ANTHROPIC_BASE_URL"]
+    assert options.env.get("ANTHROPIC_AUTH_TOKEN") == LOCAL_ENV["ANTHROPIC_AUTH_TOKEN"]
+    assert options.model == "qwen3-27b", "the local model, not Claude's"
+
+
+def test_the_claude_shaped_snapshot_is_not_what_gets_rebuilt():
+    """Named directly, because the two option sets look alike at the call site
+    and only one of them says where the request goes."""
+    stub = _repl(profile="full", local=True)
+    asyncio.run(stub._profile("deck"))
+    assert _built(stub).env != stub.session.full_options.env
+    assert _built(stub).model != stub.session.full_options.model
+
+
+def test_a_lean_session_gets_the_lean_append_for_the_NEW_profile():
+    """`session.lean_append` was built at launch and names the profile this
+    session has just stopped running."""
+    stub = _repl(profile="full", local=True, lean=True)
+    asyncio.run(stub._profile("writing"))
+    append = _append_of(stub)
+    assert "LAUNCH LEAN APPEND" not in append, "the launch-time append is stale"
+    assert "`writing` profile" in append
+    # And it is the LEAN one: no project guide in a small model's prompt.
+    assert "PROJECT GUIDE TEXT" not in append
+
+
+def test_a_lean_session_keeps_its_narrowed_host_tools():
+    from scivo_harness.session import LOCAL_HOST_TOOLS
+
+    stub = _repl(profile="full", local=True, lean=True)
+    asyncio.run(stub._profile("writing"))
+    assert _built(stub).tools == list(LOCAL_HOST_TOOLS)

@@ -121,11 +121,47 @@ class Session:
     guide: str | None = None
 
     def options_for(self, provider: Provider, **changes: Any) -> ClaudeAgentOptions:
-        """Options for `provider`: the full session, or the lean one for a small model."""
+        """Options for `provider`: the full session, or the lean one for a small model.
+
+        Built from `full_options`, which is the CLAUDE-shaped snapshot taken at
+        launch — so every caller must pass whatever is provider-specific
+        (`env`, `model`) explicitly. For changing the tool surface without
+        changing where the request goes, use `options_rekitted`.
+        """
         base = replace(self.full_options, **changes)
         if not provider.lean_profile:
             return base
         return lean(base, self.lean_append, self.scivo_tools, self.plan.profile)
+
+    def options_rekitted(self, plan: ToolPlan, *, full_append: str,
+                         lean_append: str, resume: str | None) -> ClaudeAgentOptions:
+        """A new tool surface on the options THIS session is running.
+
+        Not `options_for`: that rebuilds from `full_options`, the Claude-shaped
+        snapshot taken at launch, and `/model` deliberately leaves it alone
+        when it switches to a local endpoint (it is what a switch BACK
+        restores). Rebuilding a profile from it therefore dropped
+        `ANTHROPIC_BASE_URL` and the local model, and the session silently
+        went back to Claude — reported as "모델이 클로드로 돌아가는 현상도
+        있는거 같음. 분명 로컬을 쓰고 있었는데" (user, 2026-11-08). The
+        endpoint and the model are not this operation's business, so they are
+        carried over untouched by building on `self.options`.
+        """
+        base = replace(
+            self.options,
+            system_prompt={"type": "preset", "preset": "claude_code",
+                           "append": full_append},
+            allowed_tools=plan.auto_approved + AUTO_APPROVED_HOST_TOOLS,
+            disallowed_tools=plan.disallowed,
+            resume=resume,
+            continue_conversation=False,
+        )
+        if not self.provider.lean_profile:
+            return base
+        # The lean append for the NEW plan, not `self.lean_append`: that one
+        # was built at launch and names the profile this session has just
+        # stopped running.
+        return lean(base, lean_append, self.scivo_tools, plan.profile)
 
 
 def local_kit(scivo_tools: tuple[str, ...], profile: str) -> set[str]:

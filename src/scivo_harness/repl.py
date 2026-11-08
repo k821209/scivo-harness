@@ -1498,7 +1498,6 @@ class Repl:
         """
         from . import prompt as prompt_mod
         from . import toolsets
-        from .session import AUTO_APPROVED_HOST_TOOLS
 
         rows = self._profile_rows()
         current = self.session.plan.profile
@@ -1548,16 +1547,12 @@ class Repl:
         # decides: it drops both guides when nothing is loaded, since each is
         # instructions for calling tools that are now absent. Deciding it here
         # as well was a second copy of the rule that no test could see.
-        append = prompt_mod.build(self.session.briefing, plan,
-                                  guide=self.session.guide)
-        options = self.session.options_for(
-            self.session.provider,
-            system_prompt={"type": "preset", "preset": "claude_code",
-                           "append": append},
-            allowed_tools=plan.auto_approved + AUTO_APPROVED_HOST_TOOLS,
-            disallowed_tools=plan.disallowed,
+        options = self.session.options_rekitted(
+            plan,
+            full_append=prompt_mod.build(self.session.briefing, plan,
+                                         guide=self.session.guide),
+            lean_append=prompt_mod.build(self.session.briefing, plan, guide=None),
             resume=self.session_id,
-            continue_conversation=False,
         )
         self._say(ui.dim(f"\n  switching to {wanted} — {plan.summary()}…"))
         await self._stop_pump()
