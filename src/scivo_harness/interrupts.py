@@ -42,6 +42,39 @@ def paused() -> Iterator[None]:
         watcher.resume()
 
 
+def restore_terminal() -> bool:
+    """Put the terminal back into a state a shell prompt can use.
+
+    Absolute, not a snapshot — and that is the point. `quiet_echo()` holds ECHO
+    off for the whole session and restores whatever it found; `os.execv`
+    replaces the process without unwinding a single `with`, so that restore
+    never runs, and the NEW process then saves the already-quiet terminal as
+    its baseline and faithfully restores ECHO-off when the user finally leaves.
+    One `/update` relaunch therefore left every later exit handing back a shell
+    that types invisibly (user, 2026-11-08: "글이 안써지는게 아니라 숨겨짐").
+
+    Returns True if it had to change something — so a caller can say so rather
+    than fixing a terminal silently.
+    """
+    if not sys.stdin.isatty():
+        return False
+    try:
+        import termios
+    except Exception:  # noqa: BLE001 - not a termios platform
+        return False
+    try:
+        fd = sys.stdin.fileno()
+        now = termios.tcgetattr(fd)
+        wanted = list(now)
+        wanted[3] |= termios.ECHO | termios.ICANON      # lflag
+        if wanted[3] == now[3]:
+            return False
+        termios.tcsetattr(fd, termios.TCSADRAIN, wanted)
+        return True
+    except Exception:  # noqa: BLE001 - a terminal we cannot change still works
+        return False
+
+
 @contextlib.contextmanager
 def quiet_echo() -> "Iterator[None]":
     """Stop the terminal echoing keys that nothing is reading yet.

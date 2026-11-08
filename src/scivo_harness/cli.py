@@ -633,6 +633,8 @@ def _auth(subcommand: str, rest: list[str]) -> int:
     binary = claude_binary()
     argv = [binary, "auth", subcommand, *rest]
     print(ui.dim(f"→ {' '.join(argv)}"), flush=True)
+    from .interrupts import restore_terminal
+    restore_terminal()      # same reason as the relaunch: exec unwinds nothing
     os.execv(binary, argv)
     return 0  # not reached
 
@@ -835,11 +837,27 @@ def _update_and_relaunch(args, plan: dict) -> int:
                           permission_mode=plan.get("permission_mode"),
                           model=plan.get("model"))
     print(ui.dim("  scivo " + " ".join(argv)))
+    # An exec unwinds nothing, so the terminal has to be handed back by hand:
+    # `quiet_echo` wraps this whole session and its restore is about to be
+    # skipped, and the process we exec into would then save ECHO-off as its
+    # own baseline.
+    from .interrupts import restore_terminal
+    restore_terminal()
     os.execv(sys.executable, [sys.executable, "-m", "scivo_harness", *argv])
     return 0   # not reached
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Last line of defence for the terminal. Every in-process path already
+    # restores what it changed, but a crash, a hard SystemExit or an exec skips
+    # context managers, and what gets left behind is a shell that types
+    # invisibly — the one breakage a user cannot debug from inside, because
+    # they cannot see what they are typing. atexit does not run on exec or
+    # SIGKILL either, which is why the exec sites call it directly too.
+    import atexit
+
+    from .interrupts import restore_terminal
+    atexit.register(restore_terminal)
     raw = sys.argv[1:] if argv is None else argv
     if raw[:1] in (["login"], ["logout"]):
         return _auth(raw[0], raw[1:])
