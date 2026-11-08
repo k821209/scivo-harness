@@ -79,6 +79,63 @@ def test_the_pip_call_keeps_no_deps(monkeypatch):
     assert "--force-reinstall" not in pip
 
 
+def test_the_pip_output_is_streamed_so_a_long_download_is_visible(monkeypatch, tmp_path):
+    """144 MB with captured output is minutes of silence, and silence reads as
+    a hang — which is how it was reported (user, 2026-11-08)."""
+    seen: list[str] = []
+    monkeypatch.setattr(update, "_run", _fake_run([
+        {"sdk": "0.2.100", "cli": "2.1.274", "bundled": True},
+        {"sdk": "0.2.179", "cli": "2.1.319", "bundled": True},
+    ]))
+
+    def fake_stream(argv, *, on_line, timeout):
+        assert "--no-deps" in argv, "the streamed call is still the right one"
+        assert timeout >= 1800, "a 144 MB wheel needs more than 15 minutes"
+        on_line("Collecting claude-agent-sdk")
+        on_line("Downloading claude_agent_sdk-0.2.179-...aarch64.whl (144.0 MB)")
+        return 0, "Successfully installed"
+    monkeypatch.setattr(update, "_run_streaming", fake_stream)
+
+    state, _ = update.upgrade_sdk("/x/python", on_line=seen.append)
+    assert state == "moved"
+    assert any("144.0 MB" in line for line in seen), seen
+
+
+def test_without_a_line_sink_it_still_works_captured(monkeypatch):
+    """`upgrade_sdk` is called from tests and other code paths with no sink."""
+    monkeypatch.setattr(update, "_run", _fake_run([
+        {"sdk": "0.2.179", "cli": "2.1.319", "bundled": True},
+        {"sdk": "0.2.179", "cli": "2.1.319", "bundled": True},
+    ]))
+    def explode(*_a, **_k):
+        raise AssertionError("must not stream when no sink was given")
+    monkeypatch.setattr(update, "_run_streaming", explode)
+    state, _ = update.upgrade_sdk("/x/python")
+    assert state == "current"
+
+
+def test_a_stream_that_overruns_is_a_timeout_not_a_success(monkeypatch):
+    import subprocess as sp
+
+    class Slow:
+        returncode = None
+        stdout = iter(["Collecting claude-agent-sdk\n"])
+        def kill(self): self.killed = True
+        def wait(self, timeout=None): raise sp.TimeoutExpired("pip", 1)
+
+    monkeypatch.setattr(update.subprocess, "Popen", lambda *a, **k: Slow())
+    code, out = update._run_streaming(["pip"], on_line=lambda _l: None, timeout=0.01)
+    assert code == 124 and "timed out" in out
+
+
+def test_a_stream_that_cannot_start_says_so(monkeypatch):
+    def refuse(*_a, **_k):
+        raise FileNotFoundError("no pip here")
+    monkeypatch.setattr(update.subprocess, "Popen", refuse)
+    code, out = update._run_streaming(["pip"], on_line=lambda _l: None, timeout=5)
+    assert code == 1 and "could not start" in out
+
+
 def test_already_current_says_so_with_the_version_it_checked(monkeypatch):
     monkeypatch.setattr(update, "_run", _fake_run([
         {"sdk": "0.2.176", "cli": "2.1.316", "bundled": True},

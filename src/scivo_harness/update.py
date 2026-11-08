@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -258,7 +259,39 @@ def _sdk_state(interpreter: str) -> dict | None:
         return None
 
 
-def upgrade_sdk(interpreter: str) -> tuple[str, str]:
+def _run_streaming(argv: list[str], *, on_line, timeout: float) -> tuple[int, str]:
+    """Like `_run`, but the caller sees each line as it arrives.
+
+    For the one step that moves ~144 MB: captured output meant several minutes
+    of total silence, which reads as a hang and was reported as one (user,
+    2026-11-08: "저기서 멈춰있네"). Returns the tail, so a failure still has
+    its words.
+    """
+    tail: list[str] = []
+    try:
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+    except Exception as exc:  # noqa: BLE001
+        return 1, f"could not start {argv[0]}: {exc}"
+    deadline = time.monotonic() + timeout
+    try:
+        for line in proc.stdout or ():
+            line = line.rstrip()
+            if line:
+                tail.append(line)
+                del tail[:-40]
+                on_line(line)
+            if time.monotonic() > deadline:
+                proc.kill()
+                return 124, "\n".join(tail + [f"timed out after {timeout:.0f}s"])
+        proc.wait(timeout=max(1.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return 124, "\n".join(tail + [f"timed out after {timeout:.0f}s"])
+    return proc.returncode or 0, "\n".join(tail)
+
+
+def upgrade_sdk(interpreter: str, on_line=None) -> tuple[str, str]:
     """Move `claude-agent-sdk`, because the Claude Code it carries IS the CLI.
 
     The SDK spawns the copy bundled in its own package before anything on
@@ -283,8 +316,15 @@ def upgrade_sdk(interpreter: str) -> tuple[str, str]:
         return ("unknown", f"could not read {SDK_DIST} under {interpreter}")
     if before.get("sdk") is None:
         return ("absent", f"{SDK_DIST} is not installed under {interpreter}")
-    code, output = _run([interpreter, "-m", "pip", "install", "--upgrade",
-                         "--no-deps", SDK_DIST], timeout=900)
+    argv = [interpreter, "-m", "pip", "install", "--upgrade", "--no-deps",
+            SDK_DIST]
+    # 1800s, not 900: the wheel carries the Claude Code binary (144 MB for
+    # linux-aarch64, 313 MB unpacked), and 15 minutes assumed a link faster
+    # than some of these machines have.
+    if on_line is not None:
+        code, output = _run_streaming(argv, on_line=on_line, timeout=1800)
+    else:
+        code, output = _run(argv, timeout=1800)
     if code != 0:
         return ("failed", output[-400:])
     after = _sdk_state(interpreter)

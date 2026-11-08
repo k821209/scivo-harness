@@ -488,14 +488,25 @@ async def _update(args) -> int:
             print(ui.dim(f"  {'claude-agent-sdk':20} would run: pip install --upgrade "
                          f"--no-deps claude-agent-sdk"))
         else:
-            state, detail = upgrade_sdk(sys.executable)
+            # The label FIRST, like every other step, and a warning about the
+            # size. This step moves the wheel that carries the Claude Code
+            # binary — 144 MB on linux-aarch64 — and printing only the result
+            # left minutes of silence that read as a hang, which is how it was
+            # reported (user, 2026-11-08: "저기서 멈춰있네").
+            print(f"  {'claude-agent-sdk':20} "
+                  + ui.dim("checking… the wheel carries the Claude Code binary "
+                           "(~144 MB), so an upgrade takes a while"), flush=True)
+            state, detail = upgrade_sdk(
+                sys.executable,
+                on_line=lambda line: print(ui.dim(f"  {'':20} {line[:100]}"),
+                                           flush=True))
             paint = {"moved": ui.green, "current": ui.dim, "absent": ui.dim,
                      "failed": ui.red, "unknown": ui.yellow}[state]
             # Every state says which it was. "unknown" is printed, not
             # swallowed: a check that goes quiet when it could not run reads
             # exactly like one that passed.
             label = "could not verify: " if state == "unknown" else ""
-            print(f"  {'claude-agent-sdk':20} {paint(label + detail[:160])}")
+            print(f"  {'':20} {paint(label + detail[:160])}")
             sdk_moved = state == "moved"
             failed = failed or state == "failed"
 
