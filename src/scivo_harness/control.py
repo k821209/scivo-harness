@@ -757,6 +757,7 @@ class Control:
         deltas keep piling into `_dirty` and never reach the page.
         """
         last_beat = time.monotonic()
+        stalls = 0
         while True:
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=BEAT_EVERY)
@@ -764,11 +765,21 @@ class Control:
                 pass
             self._wake.clear()
             await asyncio.sleep(FLUSH_EVERY)  # let a burst of deltas coalesce
+            failed = False
             try:
                 await self._flush()
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"flush: {type(exc).__name__}: {exc}")
-                await asyncio.sleep(0.5)   # do not spin on the same failure
+                failed = True
+            # A flush that left work behind has not got through either, even
+            # though it raised nothing — that is what a refused or timed-out
+            # chunk write looks like now that `_call` is bounded.
+            stalls = (stalls + 1) if (failed or self._dirty) else 0
+            if stalls:
+                # Doubling, capped at half a minute. The link being away is
+                # precisely when retrying at full cadence costs the most, and
+                # a session can have ten of these loops open beside it.
+                await asyncio.sleep(min(30.0, 0.5 * 2 ** min(stalls, 8)))
             self._say_if_stuck()
             # Drain anything that arrived while we were flushing, without
             # waiting again — otherwise the tail of a burst waits a full cycle.
@@ -910,10 +921,24 @@ class Control:
                 if failures == 3:
                     self.status("the page cannot reach this session's inbox — messages from "
                                 "the web are not arriving", level="error")
-                await asyncio.sleep(min(5.0, 0.5 * failures))
+                # Doubling, capped: a network that is away stays away for
+                # minutes, and eleven of these loops at a fixed half-second
+                # was traffic spent on nothing during the one event where the
+                # link is already in trouble.
+                await asyncio.sleep(min(30.0, 0.5 * 2 ** failures))
                 continue
             if not outcome.ok:
+                # Counted and backed off, exactly like an exception. A refused
+                # outcome used to fall through to `continue` with neither, and
+                # bounding `_call` at 45s made that the COMMON path during an
+                # outage: every session kept polling at full cadence and
+                # nothing ever said the inbox was unreachable.
+                failures += 1
                 self.errors.append(f"poll: {outcome.error}")
+                if failures == 3:
+                    self.status("the page cannot reach this session's inbox — messages from "
+                                "the web are not arriving", level="error")
+                await asyncio.sleep(min(30.0, 0.5 * 2 ** failures))
                 continue
             failures = 0
             await self._intake(outcome.items)

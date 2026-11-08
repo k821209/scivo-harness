@@ -192,3 +192,103 @@ def test_an_empty_conversation_claims_no_activity_time():
     c.events = []
     asyncio.run(c._write_head(state="live"))
     assert written["last_event_at"] is None
+
+
+def test_a_writer_that_cannot_get_through_backs_off(monkeypatch):
+    """The traffic question, asked after a server dropped during an update.
+
+    Bounding `_call` turned a hang (which sent nothing, forever) into a
+    refusal that the loop retries — so the change that stopped the page
+    freezing also spent bandwidth during exactly the event where the link is
+    already in trouble, and a session can have ten of these loops open beside
+    it (user, 2026-11-08: "업데이트 하자마자 서버가 접속이 끊겼는데").
+
+    Driven through the REAL loop: the first version of this test re-did the
+    arithmetic itself and passed with the backoff deleted.
+    """
+    slept: list[float] = []
+    calls = {"n": 0}
+
+    async def refuse(*_a, **_k):
+        calls["n"] += 1
+        return ToolOutcome(ok=False, error="no answer in 45s")
+
+    c = _control(_client=types.SimpleNamespace(call=refuse), _dirty={0})
+    c.events = [{"i": 0}]
+    c._head_chunks = 0
+
+    real_sleep = asyncio.sleep
+
+    passes = {"n": 0}
+
+    async def fake_sleep(delay, *a, **k):
+        # FLUSH_EVERY is the coalescing pause, not a backoff; the ones that
+        # matter are the waits after a flush that got nothing through.
+        if delay > control_mod.FLUSH_EVERY:
+            slept.append(delay)
+            if len(slept) >= 5:
+                raise asyncio.CancelledError
+        passes["n"] += 1
+        # Bounded by passes as well, so a MISSING backoff fails here instead
+        # of spinning this loop until the suite is killed — which is how the
+        # first version of this test behaved, and a hang teaches nothing.
+        if passes["n"] > 400:
+            raise asyncio.CancelledError
+        await real_sleep(0)
+    monkeypatch.setattr(control_mod.asyncio, "sleep", fake_sleep)
+
+    async def drive():
+        c._wake.set()
+        with pytest.raises(asyncio.CancelledError):
+            await c._writer()
+    asyncio.run(drive())
+
+    assert slept == [1.0, 2.0, 4.0, 8.0, 16.0], (
+        f"expected a doubling backoff, got {slept} after {passes['n']} passes")
+    assert c._dirty == {0}, "and the work is still queued, not dropped"
+    assert calls["n"] >= 5, "it did keep trying, just not at full cadence"
+
+
+def test_the_backoff_is_capped_so_a_long_outage_still_recovers(monkeypatch):
+    slept: list[float] = []
+
+    async def refuse(*_a, **_k):
+        return ToolOutcome(ok=False, error="gone")
+
+    c = _control(_client=types.SimpleNamespace(call=refuse), _dirty={0})
+    c.events = [{"i": 0}]
+    c._head_chunks = 0
+    real_sleep = asyncio.sleep
+
+    passes = {"n": 0}
+
+    async def fake_sleep(delay, *a, **k):
+        if delay > control_mod.FLUSH_EVERY:
+            slept.append(delay)
+            if len(slept) >= 12:
+                raise asyncio.CancelledError
+        passes["n"] += 1
+        if passes["n"] > 400:
+            raise asyncio.CancelledError
+        await real_sleep(0)
+    monkeypatch.setattr(control_mod.asyncio, "sleep", fake_sleep)
+
+    async def drive():
+        c._wake.set()
+        with pytest.raises(asyncio.CancelledError):
+            await c._writer()
+    asyncio.run(drive())
+
+    assert slept, f"no backoff at all after {passes['n']} passes"
+    assert max(slept) == 30.0, slept
+    assert slept[-1] == 30.0, "it stops growing instead of drifting into hours"
+
+
+def test_a_flush_that_gets_through_resets_the_backoff():
+    async def accept(*_a, **_k):
+        return ToolOutcome(ok=True)
+
+    c = _control(_client=types.SimpleNamespace(call=accept), _dirty={0})
+    c.events = [{"i": 0}]
+    asyncio.run(c._flush())
+    assert not c._dirty, "nothing left behind means the next pass waits normally"
