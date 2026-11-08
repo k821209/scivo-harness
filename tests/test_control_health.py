@@ -134,3 +134,61 @@ def test_a_short_burst_behind_is_not_called_stuck(capsys):
     c = _control(_dirty={0}, _last_flush=time.monotonic() - 1)
     c._say_if_stuck()
     assert capsys.readouterr().out == ""
+
+
+def test_the_head_carries_when_the_conversation_last_had_anything_in_it():
+    """`beat` is the heartbeat loop's clock, not the conversation's.
+
+    It moves every few seconds for as long as the process lives, so a session
+    idle since September and one being typed into right now carry beats
+    seconds apart — and a list sorted by it cannot separate them, which is
+    what was reported (user, 2026-11-08: "소팅은 안되네"). Measured at the
+    time: eleven sessions, beats all inside one 6-second window, started
+    anywhere from 09-30 to 11-08.
+    """
+    import asyncio
+
+    from scivo_harness.scivo_mcp import ToolOutcome
+
+    written = {}
+
+    async def capture(name, **kwargs):
+        written.update(kwargs.get("data") or {})
+        return ToolOutcome(ok=True)
+
+    c = _control(_client=types.SimpleNamespace(call=capture))
+    c._rev = 0
+    c._started = 1
+    c.project_name = "p"
+    c.project_id = "pid"
+    c.model = "m"
+    c.events = [{"i": 0, "t": 1_700_000_000_000},
+                {"i": 1, "t": 1_700_000_123_456}]
+    asyncio.run(c._write_head(state="live"))
+    assert written["last_event_at"] == 1_700_000_123_456, written
+    # And it is NOT the heartbeat: the two must be separable.
+    assert written["beat"] != written["last_event_at"]
+
+
+def test_an_empty_conversation_claims_no_activity_time():
+    """None, not the heartbeat: a page with nothing said in it must not sort
+    as though it had just been used."""
+    import asyncio
+
+    from scivo_harness.scivo_mcp import ToolOutcome
+
+    written = {}
+
+    async def capture(name, **kwargs):
+        written.update(kwargs.get("data") or {})
+        return ToolOutcome(ok=True)
+
+    c = _control(_client=types.SimpleNamespace(call=capture))
+    c._rev = 0
+    c._started = 1
+    c.project_name = "p"
+    c.project_id = "pid"
+    c.model = "m"
+    c.events = []
+    asyncio.run(c._write_head(state="live"))
+    assert written["last_event_at"] is None

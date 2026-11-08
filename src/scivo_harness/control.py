@@ -694,6 +694,18 @@ class Control:
                              "sid": self.sid, "rev": self._rev, "state": state,
                              "events": len(self.events), "chunk": CHUNK,
                              "beat": _now_ms(), "started": self._started,
+                             # WHEN THIS CONVERSATION LAST HAD ANYTHING IN IT,
+                             # which is not what `beat` says. `beat` is the
+                             # heartbeat loop's own clock: it moves every few
+                             # seconds for as long as the process lives, so a
+                             # session idle since September and one being typed
+                             # into right now carry beats seconds apart, and a
+                             # list sorted by it cannot tell them apart (user,
+                             # 2026-11-08: "소팅은 안되네"). The last event's
+                             # timestamp is the thing a person means by "the
+                             # most recent conversation".
+                             "last_event_at": (self.events[-1].get("t")
+                                               if self.events else None),
                              "project": self.project_name, "project_id": self.project_id,
                              "model": self.model,
                          })
