@@ -66,6 +66,7 @@ LOCAL_COMMANDS = {
     "/permissions": "show or change: default · acceptEdits · auto · plan · always <tool> · always -<tool>",
     "/dangerously-skip-permissions": "stop asking for anything (`off` to ask again); guardrails still apply",
     "/tools": "which scivo tools this profile loaded",
+    "/profile": "narrow or widen the scivo tools this session carries — on its own it lists them, numbered",
     "/context": "how much of the context window is in use, and what fills it",
     "/paste": "attach the image on the clipboard to your next message",
     "/img": "attach an image file to your next message: /img <path>  (a bare image path does too)",
@@ -1465,6 +1466,109 @@ class Repl:
         hint = ""
         self._say(ui.green(f"  now on {target_name} · {model}") + ui.dim(f"\n{hint}\n" if hint else "\n"))
 
+    # -------------------------------------------------------------- profile
+
+    def _profile_rows(self) -> list[tuple[str, int, str]]:
+        """Each profile, with how many of THIS server's tools it would keep."""
+        from . import toolsets
+
+        rows = []
+        for name in toolsets.PROFILES:
+            try:
+                plan = toolsets.plan(list(self.session.scivo_tools), profile=name,
+                                     read_only=self.session.plan.read_only_session)
+            except ValueError:
+                continue
+            rows.append((name, len(plan.kept), ", ".join(toolsets.PROFILES[name])))
+        return rows
+
+    async def _profile(self, argument: str) -> None:
+        """Switch the tool surface without losing the conversation.
+
+        The profile is `allowed_tools` / `disallowed_tools` on the options, and
+        those are read when the CLI starts — so this rebuilds the client, the
+        way a provider switch does. Unlike that one it RESUMES: same endpoint,
+        same model, so there is nothing about the history the new process
+        cannot take, and the point of switching mid-session is to keep going
+        with a different kit (user, 2026-11-08).
+        """
+        from . import toolsets
+        from .session import AUTO_APPROVED_HOST_TOOLS
+
+        rows = self._profile_rows()
+        current = self.session.plan.profile
+        if not argument:
+            width = max(len(name) for name, _, _ in rows)
+            listing = []
+            for index, (name, kept, domains) in enumerate(rows, start=1):
+                here = name == current
+                listing.append(
+                    f"\n  {index:>2}. " + ui.bold(name.ljust(width))
+                    + (ui.green(f"  {kept:>3} tools") if here else f"  {kept:>3} tools")
+                    + ui.dim(f"  {domains}")
+                    + (ui.green("  ← this session") if here else ""))
+            self._say(f"\n  {self.session.plan.summary()}"
+                      + "".join(listing)
+                      + ui.dim("\n\n  /profile <number or name>"
+                               "\n  this scopes the scivo TOOLS; skills stay available in every"
+                               " profile, and /tools lists what is loaded now\n"))
+            return
+
+        wanted = argument.split()[0].lower()
+        if wanted.isdigit():
+            choice = int(wanted)
+            if not 1 <= choice <= len(rows):
+                self._say(ui.red(f"\n  there is no choice {choice}")
+                          + ui.dim(f" — /profile lists {len(rows)}\n"))
+                return
+            wanted = rows[choice - 1][0]
+        if wanted not in toolsets.PROFILES:
+            self._say(ui.red(f"\n  no profile called {wanted!r}")
+                      + ui.dim(f" — {', '.join(toolsets.PROFILES)}\n"))
+            return
+        if wanted == current:
+            self._say(ui.dim(f"\n  already on {wanted} — {self.session.plan.summary()}\n"))
+            return
+
+        plan = toolsets.plan(list(self.session.scivo_tools), profile=wanted,
+                             read_only=self.session.plan.read_only_session)
+        before_plan, before_options = self.session.plan, self.session.options
+        # `options_for` consults `session.plan.profile` on the lean path, so the
+        # new plan has to be in place before the options are built — and put
+        # back if the new client will not start.
+        self.session.plan = plan
+        options = self.session.options_for(
+            self.session.provider,
+            allowed_tools=plan.auto_approved + AUTO_APPROVED_HOST_TOOLS,
+            disallowed_tools=plan.disallowed,
+            resume=self.session_id,
+            continue_conversation=False,
+        )
+        self._say(ui.dim(f"\n  switching to {wanted} — {plan.summary()}…"))
+        await self._stop_pump()
+        await self.client.disconnect()
+        self.client = ClaudeSDKClient(options=options)
+        try:
+            await self.client.connect()
+        except Exception as exc:  # noqa: BLE001
+            self.session.plan = before_plan
+            self._say(ui.red(f"  could not switch profile: {exc}"))
+            self.client = ClaudeSDKClient(options=before_options)
+            await self.client.connect()
+            await self._start_pump()
+            self._say(ui.dim(f"  still on {before_plan.profile}\n"))
+            return
+        await self._start_pump()
+        if self.mode != (options.permission_mode or "default"):
+            await self.client.set_permission_mode(self.mode)
+        self.session.options = options
+        kept = ("the conversation continues" if self.session_id
+                # Said plainly rather than discovered: without an id to resume,
+                # the rebuilt process starts empty, and that is worth knowing
+                # BEFORE typing the next message into it.
+                else "a NEW conversation — this session had no id to resume")
+        self._say(ui.green(f"  {plan.summary()}") + ui.dim(f" — {kept}\n"))
+
     # ---------------------------------------------------------- permissions
 
     def _say(self, text: str) -> None:
@@ -1796,6 +1900,11 @@ class Repl:
                     if command in {"/paste", "/img"} or (
                             via == "terminal" and _attachments.image_path_in(line)):
                         self._attach(command, argument.strip() if command in {"/paste", "/img"} else line)
+                        continue
+                    if command == "/profile":
+                        if self.control and self.control.active and via != "web":
+                            self.control.user(line, via)
+                        await self._profile(argument.strip())
                         continue
                     if command == "/scivo-control":
                         await self._control(argument.strip())
