@@ -1132,6 +1132,32 @@ class Repl:
 
     # ------------------------------------------------------- scivo-control
 
+    def _print_control_health(self) -> None:
+        """Whether the page is actually keeping up — the question that had no
+        answer when the page froze and the terminal carried on (2026-11-08)."""
+        if not (self.control and self.control.active):
+            return
+        state = self.control.health()
+        behind, errors = state["pending_chunks"], state["errors"]
+        ago = state["last_flush_ago"]
+        if not behind and not errors:
+            when = "never" if ago is None else f"{ago:.0f}s ago"
+            print(ui.dim(f"  page up to date ({state['events']} events, last "
+                         f"write {when})\n"))
+            return
+        if behind:
+            print(ui.yellow(f"  the page is BEHIND: {behind} chunk(s) written "
+                            f"here and not yet on the page"))
+        if ago is None:
+            print(ui.yellow("  nothing has ever reached the page"))
+        elif ago > 60:
+            print(ui.yellow(f"  last successful write {ago:.0f}s ago"))
+        if errors:
+            print(ui.red(f"  {errors} error(s) from the page's own machinery; "
+                         f"most recent:"))
+            print(ui.dim(f"    {state['last_error']}"))
+        print()
+
     async def _control(self, argument: str) -> None:
         if argument == "off":
             if self.control and self.control.active:
@@ -1143,6 +1169,7 @@ class Repl:
 
         if self.control and self.control.active:
             self._print_link()
+            self._print_control_health()
             return
 
         briefing = self.session.briefing

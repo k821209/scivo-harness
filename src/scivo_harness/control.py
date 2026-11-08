@@ -225,6 +225,16 @@ POLL_ACTIVE = 0.15         # seconds between reads of web input while the sessio
 POLL_IDLE = 0.5            # … and once it has been quiet for ACTIVE_WINDOW
 ACTIVE_WINDOW = 60.0       # seconds of quiet before polling slows down
 BEAT_EVERY = 5.0           # seconds; the page shows "disconnected" past a few misses
+# Every call the page makes is bounded. `_call` holds `self._lock`, so one that
+# never returns used to hold it forever: the writer stopped flushing, the
+# poller stopped reading, the heartbeat stopped — the page froze solid while
+# the terminal carried on as if nothing were wrong (user, 2026-11-08: "scivo
+# 웹채팅에서는 멈춰있고 cmd에서는 [정상]"). A hang is now an error, which is a
+# thing that can be reported, instead of silence.
+CALL_TIMEOUT = 45.0
+# How long the page may be behind before the terminal is told. Longer than a
+# couple of write cycles, so an ordinary burst does not raise it.
+STUCK_AFTER = 60.0
 STATE_FILE = Path(".scivo") / "control.json"
 
 
@@ -322,6 +332,11 @@ class Control:
     _dirty: set[int] = field(default_factory=set)
     _rev: int = 0
     _wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # When a flush last got everything through. None until the first one: a
+    # page that never wrote and a page that stopped writing are not the same
+    # state and must not read the same.
+    _last_flush: float | None = None
+    _stuck_said: bool = False
     _tasks: list[asyncio.Task] = field(default_factory=list)
     _assistant: int | None = None
     _approvals: dict[str, _Approval] = field(default_factory=dict)
@@ -505,8 +520,32 @@ class Control:
         self._remember(link, state_path)
 
     async def _call(self, name: str, **arguments: Any):
-        async with self._lock:
-            return await self._client.call(name, **arguments)
+        from .scivo_mcp import ToolOutcome
+        try:
+            async with self._lock:
+                return await asyncio.wait_for(
+                    self._client.call(name, **arguments), timeout=CALL_TIMEOUT)
+        except asyncio.TimeoutError:
+            note = f"{name}: no answer in {CALL_TIMEOUT:.0f}s"
+            self.errors.append(note)
+            return ToolOutcome(ok=False, error=note)
+
+    def health(self) -> dict:
+        """What the page's own machinery is doing — for a human to read.
+
+        `errors` had six writers and no readers: a page that stopped updating
+        said nothing anywhere, and the session it belongs to could not be asked
+        why. This is the reader.
+        """
+        return {
+            "active": self.active,
+            "pending_chunks": len(self._dirty),
+            "events": len(self.events),
+            "errors": len(self.errors),
+            "last_error": self.errors[-1] if self.errors else None,
+            "last_flush_ago": (None if self._last_flush is None
+                               else round(time.monotonic() - self._last_flush, 1)),
+        }
 
     # ------------------------------------------------------- outbound events
 
@@ -672,7 +711,31 @@ class Control:
             if not outcome.ok:
                 self.errors.append(f"write chunk {k}: {outcome.error}")
                 self._dirty.add(k)  # try again next round
+        if not self._dirty:
+            self._last_flush = time.monotonic()
         return True
+
+    def _say_if_stuck(self) -> None:
+        """Tell the TERMINAL when the page stops keeping up, once per spell.
+
+        The terminal is the surface that still works when this one does not, so
+        it is where the complaint belongs. Printed on the way in and on the way
+        out: a warning with no all-clear trains people to ignore it.
+        """
+        stuck = bool(self._dirty) and (
+            self._last_flush is None
+            or time.monotonic() - self._last_flush > STUCK_AFTER)
+        if stuck and not self._stuck_said:
+            self._stuck_said = True
+            last = self.errors[-1] if self.errors else "no error reported"
+            print(f"\n  [scivo-control] the web page is not keeping up — "
+                  f"{len(self._dirty)} chunk(s) waiting. Last: {last}\n"
+                  f"  The terminal is unaffected. `/scivo-control` shows the "
+                  f"detail; `/scivo-control off` then on republishes it.\n",
+                  flush=True)
+        elif self._stuck_said and not stuck:
+            self._stuck_said = False
+            print("\n  [scivo-control] the web page caught up.\n", flush=True)
 
     async def _writer(self) -> None:
         """Flush dirty chunks and keep the head's heartbeat alive.
@@ -694,6 +757,7 @@ class Control:
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"flush: {type(exc).__name__}: {exc}")
                 await asyncio.sleep(0.5)   # do not spin on the same failure
+            self._say_if_stuck()
             # Drain anything that arrived while we were flushing, without
             # waiting again — otherwise the tail of a burst waits a full cycle.
             if self._dirty:
