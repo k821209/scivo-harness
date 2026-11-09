@@ -75,6 +75,99 @@ REMOTE_SELF_MATCH = re.compile(
     r"\bssh\b.*?\b(pgrep|pkill)\s+(?:-{1,2}[\w-]+\s+)*(?:-\w*f\w*|--full)(?=\s|$)",
     re.IGNORECASE | re.DOTALL,
 )
+# The LOCAL form of the same mistake, and the one that actually happened. The
+# guard above requires the remote prefix, so a pattern kill on THIS machine
+# went straight through — and that command sends SIGTERM by default, which is
+# exit 143, which is how a session died with "Cannot write to terminated
+# process" (user, 2026-11-09, asking whether the model had done it to itself).
+# The reasoning in the remote comment applies more directly here: the pattern
+# matches the session's OWN command lines, so the kill lands on the thing
+# issuing it.
+LOCAL_PATTERN_KILL = re.compile(
+    r"\b(pkill|killall)\s+(?P<args>[^|;&\n]*)", re.IGNORECASE)
+
+
+def _own_cmdlines() -> list[str]:
+    """This session's own command lines: the harness, the CLI, the MCP.
+
+    Read from /proc rather than compared with names somebody guessed, so the
+    question asked is the real one — would this pattern hit something of
+    ours? — and a rename upstream cannot quietly make the guard useless.
+    Empty off Linux, where the caller falls back to a narrower rule.
+    """
+    import os
+    import pathlib
+
+    try:
+        mine = {os.getpid()}
+        # Our descendants: the CLI and the MCP are children of the harness.
+        for _ in range(3):           # bounded: parent, child, grandchild
+            for entry in pathlib.Path("/proc").iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    stat = (entry / "stat").read_text()
+                    parent = int(stat.rsplit(")", 1)[1].split()[1])
+                except (OSError, IndexError, ValueError):
+                    continue
+                if parent in mine:
+                    mine.add(int(entry.name))
+        out = []
+        for pid in mine:
+            try:
+                raw = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
+            except OSError:
+                continue
+            argv = [a for a in raw.decode("utf-8", "replace").split("\0") if a]
+            program = _program_of(argv)
+            if program:
+                out.append(program)
+        return [c for c in out if c]
+    except OSError:
+        return []
+
+
+def _program_of(argv: list[str]) -> str:
+    """The program and at most two arguments — NOT the whole command line.
+
+    The CLI is started with `--append-system-prompt <the whole system
+    prompt>`: tens of thousands of characters containing words like "python",
+    "analysis" and "train". Comparing a user's pattern against that would
+    block almost every legitimate kill while claiming to protect the session.
+    """
+    return " ".join(argv[:3])
+
+
+# Shorter than this is not a pattern, it is a coincidence: "is" matched
+# `co_scientist_local` and turned `echo pkill is a command` into a refusal.
+MIN_PATTERN = 3
+
+
+# When /proc is not there to ask, these are the words that cannot be a
+# pattern: each appears in a command line this session depends on.
+LETHAL_WORDS = ("claude", "scivo", "co_scientist")
+
+
+def kills_this_session(command: str) -> str | None:
+    """The process of ours such a pattern would hit, or None."""
+    for match in LOCAL_PATTERN_KILL.finditer(command):
+        words = [w for w in match.group("args").split() if not w.startswith("-")]
+        if not words:
+            continue
+        needle = words[0].strip("\"\'")
+        if len(needle) < MIN_PATTERN:
+            continue
+        ours = _own_cmdlines()
+        for line in ours:
+            if needle in line:
+                return line[:120]
+        if not ours:
+            for word in LETHAL_WORDS:
+                if word in needle.lower():
+                    return f"a process matching {needle!r}"
+    return None
+
+
 # Host tools that write. A read after one of these may return something new,
 # exactly as after a scivo write.
 HOST_WRITES = ("Edit", "Write", "NotebookEdit", "MultiEdit")
@@ -386,6 +479,19 @@ class Guardrails:
                 "over-counts, so a finished job reads as still running.\n"
                 "Count with a bracketed pattern: ssh <host> \"ps -eo args | grep '[w]get'\"\n"
                 "Kill through the PID: ssh <host> \"kill \\$(pgrep -f <pattern>)\""
+            )
+
+        if (hit := kills_this_session(command)) is not None:
+            self.blocked.append("pattern kill matching this session")
+            return _deny(
+                "Blocked: that pattern matches this session's own process —\n"
+                f"  {hit}\n"
+                "These commands send SIGTERM by default, so this would stop the "
+                "Claude Code process running this conversation (exit 143) rather "
+                "than the job you meant.\n"
+                "Name the PID instead: `ps -eo pid,etime,args | grep '[p]attern'` "
+                "to find it, then `kill <pid>`. For a job this session launched, "
+                "`mcp__scivo__kill_remote_job` closes the run record too."
             )
 
         if ANALYSIS_SHAPED.search(command):
