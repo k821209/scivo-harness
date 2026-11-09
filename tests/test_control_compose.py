@@ -73,3 +73,27 @@ def test_it_appends_rather_than_replacing_what_was_typed():
     """Two passages in a row, or a half-typed instruction, must not be lost."""
     body = _listener()
     assert "input.value.trim()" in body, "it has to look before overwriting"
+
+
+def test_it_acknowledges_so_a_stale_page_is_not_mistaken_for_success():
+    """postMessage never fails.
+
+    A page published before this listener existed ignores the message in
+    silence, and the dashboard button that sent it would still report success
+    — which is exactly what happened: every one of the 24 live control pages
+    predated the listener, the button said nothing, and the passage went
+    nowhere (user, 2026-11-09).
+    """
+    body = _listener()
+    assert "scivo-control:composed" in body
+    assert "e.source.postMessage" in body
+    # Back to where it came from, at that origin — not "*".
+    assert "e.origin" in body
+    assert '"*"' not in body
+
+
+def test_the_acknowledgement_cannot_break_the_compose():
+    """A frame that has gone away must not stop the text being put in."""
+    body = _listener()
+    ack = body[body.index("scivo-control:composed") - 120:]
+    assert "try {" in ack and "catch" in ack

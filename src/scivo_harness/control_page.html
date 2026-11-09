@@ -606,6 +606,13 @@
     autosize();
     input.focus();
     try { input.setSelectionRange(input.value.length, input.value.length); } catch (_) {}
+    // Acknowledged, because postMessage never fails: a page published before
+    // this listener existed ignores the message silently, and the button that
+    // sent it would still say it went. The dashboard waits for this and tells
+    // the user to restart the session when it does not come (user,
+    // 2026-11-09: "ask claude 는 생겼는데, scivo chat으로 안넘어가네" — all 24
+    // live pages predated the listener).
+    try { e.source.postMessage({ type: "scivo-control:composed" }, e.origin); } catch (_) {}
   });
 
   // ----------------------------------------------------------------- input
