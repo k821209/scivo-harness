@@ -26,7 +26,13 @@
 #                      Use this for anything real.
 #   supports_effort    false for non-Anthropic models — effort/thinking are
 #                      Anthropic-model features and a proxy may 400 on them.
-#   max_output_tokens  caps the CLI's output request.
+#   max_output_tokens  the length of ONE ANSWER, not the context size. It
+#                      caps the CLI's output request AND is subtracted from
+#                      the server's context window to leave room for the
+#                      reply, because the error counts the prompt and the
+#                      generation together. 4096 is usual. Setting it to the
+#                      server's own `-c` leaves nothing for the prompt — the
+#                      harness says so at startup and reserves 4096 instead.
 #   size               "small" or "large" — how big the model behind the
 #                      endpoint is, which decides nothing but the session it
 #                      gets. A small model gets the lean session: short guide,
@@ -54,7 +60,7 @@ small_model = "REPLACE-ME"
 auth_token = "unused"                 # not a secret; the CLI just requires a value
 supports_effort = false
 size = "small"                        # the lean session — also the default here
-max_output_tokens = 8192
+max_output_tokens = 4096              # one answer's length, taken OUT of the window
 note = "local llama-server"
 
 # ── a remote gateway that needs a real token ────────────────────────────────

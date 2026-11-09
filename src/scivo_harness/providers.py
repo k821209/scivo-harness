@@ -435,6 +435,56 @@ class Endpoint:
             self.stop()
 
 
+# The smallest context budget worth starting a session with, and the reply
+# room assumed when a provider does not say.
+CONTEXT_FLOOR = 8192
+DEFAULT_REPLY_ROOM = 4096
+
+
+def context_budget(window: int, max_output: int | None) -> tuple[int, str | None]:
+    """The budget to give Claude Code, and anything the user has to be told.
+
+    `max_output_tokens` is reply room, and it is SUBTRACTED from the window —
+    the error counts the prompt and the generation together, so compacting at
+    the window itself is already too late.
+
+    The bug this exists for: the subtraction used to be wrapped in
+    `max(8192, …)` and nothing else. A provider that set
+    `max_output_tokens` equal to its server's `-c` therefore got
+    `max(8192, 0)` = 8192, which is a plausible number — a common context
+    size, and in that report also the port the server was on — so the user and
+    the session both read it as "the server is running at 8k" and spent ten
+    minutes looking at the server (feedback f484ae1a9364). A floor that can
+    produce a value indistinguishable from a real one is the shape this
+    project keeps removing.
+
+    So: a contradiction does not use the contradictory value, and both the
+    contradiction and a plain clamp are returned as something to say. Not an
+    error — the reporter's own session processed a 19,656-token prompt, so the
+    combination is misconfigured rather than unusable, and refusing would stop
+    a session that works.
+    """
+    room = max_output or DEFAULT_REPLY_ROOM
+    if room >= window:
+        budget = max(CONTEXT_FLOOR, window - DEFAULT_REPLY_ROOM)
+        return budget, (
+            f"max_output_tokens ({room:,}) is not smaller than this server's "
+            f"context ({window:,}), so no prompt would fit beside a reply. "
+            f"That value is the length of ONE ANSWER, not the context size — "
+            f"the harness subtracts it from the window. Ignoring it and "
+            f"reserving {DEFAULT_REPLY_ROOM:,}: context budget "
+            f"{budget:,}. Set max_output_tokens to what a reply may be "
+            f"(4096 is usual), or raise the server's -c.")
+    budget = window - room
+    if budget < CONTEXT_FLOOR:
+        return CONTEXT_FLOOR, (
+            f"context budget would be {budget:,} ({window:,} window less "
+            f"{room:,} of reply room), below the {CONTEXT_FLOOR:,} floor — "
+            f"using the floor. A turn may not fit; lower max_output_tokens or "
+            f"use a server with a larger context.")
+    return budget, None
+
+
 def context_window(provider: Provider, timeout: float = 5.0) -> int | None:
     """The server's real context size, from its own /props.
 
@@ -487,14 +537,15 @@ def prepare(provider: Provider, timeout: float = 30.0, *, api_billing: bool = Fa
         return Endpoint(env)
     reachable(provider)
     window = context_window(provider)
+    budget_note: str | None = None
     if window:
-        # Leave the reply room inside the window: the error counts the prompt
-        # and the generation together, so compacting at the window itself is
-        # already too late.
-        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(max(8192, window - (provider.max_output_tokens or 4096)))
+        budget, budget_note = context_budget(window, provider.max_output_tokens)
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(budget)
     verdict = system_messages_ok(provider.base_url, provider, timeout)
     if verdict is not False:
-        return Endpoint(env)
+        # The budget note rides out on the endpoint, which the session prints
+        # at startup — the one place the user is already looking.
+        return Endpoint(env, note=budget_note)
 
     from .shim import start_background
 
