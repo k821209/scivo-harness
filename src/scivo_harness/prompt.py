@@ -227,6 +227,20 @@ def _order_note(plan: ToolPlan, guide: str | None) -> str:
     return ORDERS.get(plan.profile, "")
 
 
+# The calls the project guide prescribes at session start. A narrow profile
+# drops some of them, and the guide text — which is in this same prompt,
+# verbatim — still says to run them: two instructions, one of them impossible,
+# and the session spends calls finding out which (feedback e6f480b9fbe8, a
+# `video` profile in a project with no papers).
+SESSION_START_TOOLS = (
+    "whoami", "project_guide", "get_project_memory", "get_project_skills",
+    "list_papers", "count_open_user_comments", "list_reviews",
+    "review_triage_summary", "check_requirements", "list_servers",
+    "list_datasets", "list_decisions", "count_open_study_questions",
+    "list_verification_findings", "list_materials",
+)
+
+
 def _tool_note(plan: ToolPlan) -> str:
     if not plan.dropped:
         return ""
@@ -258,6 +272,18 @@ def _tool_note(plan: ToolPlan) -> str:
         lines.append(
             "\nThis is a **read-only session** — every writing tool is absent. "
             "Describe what you would change; do not claim to have changed it."
+        )
+    missing_start = [n for n in SESSION_START_TOOLS if n in plan.dropped]
+    if missing_start:
+        lines.append(
+            "\nThe project guide below prescribes a session-start protocol, and "
+            "this profile does not carry all of it. ABSENT here: "
+            + ", ".join(f"`{n}`" for n in missing_start)
+            + ". Do not call them and do not work around them — the briefing at "
+            "the end of this prompt already holds what that protocol gathers, "
+            "collected before the tools were narrowed. Read the guide's "
+            "session-start section as describing what has been done, not what "
+            "to do."
         )
     lines.append(
         "\nIf a task needs a domain that is missing (decks, video, analysis runs), "

@@ -467,7 +467,10 @@ class Guardrails:
                 "Runs tab cannot say which machine, command and parameters produced the result.\n"
                 "Use `mcp__scivo__submit_remote_job(...)` instead — it creates the record "
                 "(host, command, env_name, log_path, pid) as it launches.\n"
-                "If this really is not a result-producing analysis (a one-off copy, a cleanup), "
+                "No paper in this project (a video or tooling project)? Pass "
+                "`slug=\"_project\"` — the run record is the point, and it does not need "
+                "a manuscript to hang from. A one-off render or image generation counts.\n"
+                "If this really is not a result-producing command (a copy, a cleanup), "
                 "say so to the user and run it in the foreground."
             )
 
