@@ -34,10 +34,39 @@ def _row(extra: dict) -> dict:
     return {"doc": "questions", "reviewer": OWNER, "sid": "s1", **extra}
 
 
+class _Unawaited:
+    """Stands in for the pending future: holds a result, awaits nothing.
+
+    `asyncio.Future()` asks for the CURRENT event loop, and there is none once
+    any earlier test has called `asyncio.run` — so this file passed alone and
+    failed in a full run, four tests at a time, with "There is no current
+    event loop in thread 'MainThread'" and nothing to do with what it tests.
+
+    The router DOES resolve it, which is the behaviour under test; a first
+    version of this raised on `set_result` and turned three of those tests
+    into failures of its own making.
+    """
+
+    def __init__(self) -> None:
+        self._result: object = None
+        self._done = False
+
+    def done(self) -> bool:
+        return self._done
+
+    def set_result(self, value: object) -> None:
+        self._result, self._done = value, True
+
+    def result(self) -> object:
+        if not self._done:
+            raise AssertionError("nothing resolved this")
+        return self._result
+
+
 def _control_with(questions: list[dict]) -> tuple[Control, _Question]:
     control = Control.__new__(Control)          # no network, no Firestore
     control.events = [{"kind": "question", "rid": "r1", "questions": questions}]
-    return control, _Question("r1", 0, asyncio.Future())
+    return control, _Question("r1", 0, _Unawaited())
 
 
 def test_indices_come_back_as_the_question_text():
@@ -65,7 +94,7 @@ def test_an_index_with_no_question_behind_it_does_not_crash():
 def test_answers_survive_an_event_with_no_questions_on_it():
     control = Control.__new__(Control)
     control.events = [{"kind": "question", "rid": "r1"}]
-    pending = _Question("r1", 0, asyncio.Future())
+    pending = _Question("r1", 0, _Unawaited())
     assert control._name_answers(pending, {"0": "A"}) == {"0": "A"}
 
 

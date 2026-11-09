@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import (
+    CLIConnectionError,
     ConversationResetMessage,
     AssistantMessage,
     ClaudeSDKClient,
@@ -34,7 +35,7 @@ from .prompt import HANDOFF_ASK
 from .pump import MessagePump, PumpClosed
 from .control import Control, merge_web_messages
 from .preflight import to_markdown
-from .failures import explain
+from .failures import _why_it_stopped, explain
 from .interrupts import KeyWatcher
 from . import attachments as _attachments
 from .prompt_line import Line
@@ -1483,6 +1484,46 @@ class Repl:
         hint = ""
         self._say(ui.green(f"  now on {target_name} · {model}") + ui.dim(f"\n{hint}\n" if hint else "\n"))
 
+    async def _reconnect(self, exc: Exception) -> bool:
+        """Start a new CLI on the same conversation. False means give up.
+
+        The transcript lives on disk, so a terminated process costs the
+        process and not the session — provided there is a session id to resume
+        from. Without one there is nothing to come back to, and saying so
+        beats reconnecting into an empty conversation.
+        """
+        self._say("\n" + ui.red(f"  the Claude Code process stopped: {exc}"))
+        self._say(ui.dim("  " + _why_it_stopped(str(exc))))
+        if not self.session_id:
+            self._say(ui.dim("  this session had no id to resume — nothing to "
+                             "reconnect to. Start again with `scivo`.\n"))
+            return False
+        self._say(ui.dim(f"  reconnecting to {self.session_id[:8]}…"))
+        await self._stop_pump()
+        with contextlib.suppress(Exception):
+            await self.client.disconnect()
+        from dataclasses import replace
+
+        options = replace(self.session.options, resume=self.session_id,
+                          continue_conversation=False)
+        self.client = ClaudeSDKClient(options=options)
+        try:
+            await self.client.connect()
+        except Exception as again:  # noqa: BLE001
+            self._say(ui.red(f"  could not reconnect: {again}"))
+            self._say(ui.dim(f"  the conversation is kept — "
+                             f"`scivo resume {self.session_id[:8]}`\n"))
+            return False
+        await self._start_pump()
+        if self.mode != (options.permission_mode or "default"):
+            with contextlib.suppress(Exception):
+                await self.client.set_permission_mode(self.mode)
+        self.session.options = options
+        self._say(ui.green("  reconnected") + ui.dim(" — the conversation continues. "
+                                                     "The turn that was running did not finish; "
+                                                     "say it again.\n"))
+        return True
+
     # -------------------------------------------------------------- profile
 
     def _profile_rows(self) -> list[tuple[str, int, str]]:
@@ -1973,7 +2014,19 @@ class Repl:
                     except EOFError:
                         break
 
-                    await self._turn(self.client, line)
+                    try:
+                        await self._turn(self.client, line)
+                    except CLIConnectionError as exc:
+                        # The CLI went away under us — killed from outside, or
+                        # gone with the machine's memory. Writing to it then
+                        # raised out of run(), out of main, and printed a
+                        # traceback ending in "Cannot write to terminated
+                        # process", which is the least useful thing a person
+                        # can be shown: the conversation is safe on disk and
+                        # the remedy is one line (user, 2026-11-09, exit 143
+                        # on spark-a404).
+                        if not await self._reconnect(exc):
+                            break
         finally:
             if self.control and self.control.active:
                 await self.control.stop()

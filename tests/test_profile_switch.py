@@ -69,8 +69,8 @@ LOCAL_ENV = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8099",
              "ANTHROPIC_AUTH_TOKEN": "local-token"}
 
 
-def _repl(profile="full", session_id="sess-1", read_only=False, fail_connect=False,
-          local=False, lean=False):
+def _repl(monkeypatch, profile="full", session_id="sess-1", read_only=False,
+          fail_connect=False, local=False, lean=False):
     from scivo_harness.preflight import Briefing
     from scivo_harness.session import Session
 
@@ -113,7 +113,10 @@ def _repl(profile="full", session_id="sess-1", read_only=False, fail_connect=Fal
         client = FakeClient(options, fail=fail)
         stub.clients.append(client)
         return client
-    repl_mod.ClaudeSDKClient = factory
+    # Through monkeypatch, so it is put back: assigning the module attribute
+    # directly leaks this factory into every later test module that builds a
+    # client, and the damage shows up only in a full run.
+    monkeypatch.setattr(repl_mod, "ClaudeSDKClient", factory)
     return stub
 
 
@@ -126,8 +129,8 @@ def _text(stub) -> str:
     return ANSI.sub("", "\n".join(stub.said))
 
 
-def test_the_menu_numbers_every_profile_and_marks_the_current_one():
-    stub = _repl(profile="writing")
+def test_the_menu_numbers_every_profile_and_marks_the_current_one(monkeypatch):
+    stub = _repl(monkeypatch, profile="writing")
     asyncio.run(stub._profile(""))
     said = _text(stub)
     for name in toolsets.PROFILES:
@@ -138,23 +141,23 @@ def test_the_menu_numbers_every_profile_and_marks_the_current_one():
     assert f"{kept} tools" in said
 
 
-def test_the_menu_says_skills_are_not_scoped_by_it():
+def test_the_menu_says_skills_are_not_scoped_by_it(monkeypatch):
     """Asked as "mcp 나 스킬 쓰는 범위", and only one of the two is true."""
-    stub = _repl()
+    stub = _repl(monkeypatch, )
     asyncio.run(stub._profile(""))
     assert "skills stay available in every profile" in _text(stub)
 
 
-def test_a_number_picks_from_the_list_that_printed():
-    stub = _repl(profile="full")
+def test_a_number_picks_from_the_list_that_printed(monkeypatch):
+    stub = _repl(monkeypatch, profile="full")
     rows = stub._profile_rows()
     target = next(i for i, (name, _, _) in enumerate(rows, start=1) if name == "deck")
     asyncio.run(stub._profile(str(target)))
     assert stub.session.plan.profile == "deck"
 
 
-def test_switching_resumes_the_same_conversation():
-    stub = _repl(profile="full", session_id="sess-1")
+def test_switching_resumes_the_same_conversation(monkeypatch):
+    stub = _repl(monkeypatch, profile="full", session_id="sess-1")
     asyncio.run(stub._profile("analysis"))
     assert stub.clients, "the client was never rebuilt"
     assert _built(stub).resume == "sess-1"
@@ -162,16 +165,16 @@ def test_switching_resumes_the_same_conversation():
     assert "the conversation continues" in _text(stub)
 
 
-def test_it_says_so_when_there_is_no_conversation_to_resume():
+def test_it_says_so_when_there_is_no_conversation_to_resume(monkeypatch):
     """Worth knowing BEFORE typing the next message into an empty one."""
-    stub = _repl(profile="full", session_id=None)
+    stub = _repl(monkeypatch, profile="full", session_id=None)
     asyncio.run(stub._profile("analysis"))
     assert _built(stub).resume is None
     assert "NEW conversation" in _text(stub)
 
 
-def test_the_new_kit_is_what_the_profile_asks_for():
-    stub = _repl(profile="full")
+def test_the_new_kit_is_what_the_profile_asks_for(monkeypatch):
+    stub = _repl(monkeypatch, profile="full")
     asyncio.run(stub._profile("deck"))
     disallowed = _built(stub).disallowed_tools
     # A deck session keeps deck + materials and drops the paper tools.
@@ -181,49 +184,49 @@ def test_the_new_kit_is_what_the_profile_asks_for():
     assert all(not name.endswith("add_slide") for name in disallowed)
 
 
-def test_the_host_tools_stay_approved_across_a_switch():
+def test_the_host_tools_stay_approved_across_a_switch(monkeypatch):
     from scivo_harness.session import AUTO_APPROVED_HOST_TOOLS
 
-    stub = _repl(profile="full")
+    stub = _repl(monkeypatch, profile="full")
     asyncio.run(stub._profile("analysis"))
     allowed = _built(stub).allowed_tools
     for tool in AUTO_APPROVED_HOST_TOOLS:
         assert tool in allowed, tool
 
 
-def test_a_read_only_session_stays_read_only():
-    stub = _repl(profile="full", read_only=True)
+def test_a_read_only_session_stays_read_only(monkeypatch):
+    stub = _repl(monkeypatch, profile="full", read_only=True)
     asyncio.run(stub._profile("paper"))
     assert stub.session.plan.read_only_session is True
     assert "read-only session" in _text(stub)
 
 
-def test_the_same_profile_is_a_no_op():
-    stub = _repl(profile="paper")
+def test_the_same_profile_is_a_no_op(monkeypatch):
+    stub = _repl(monkeypatch, profile="paper")
     asyncio.run(stub._profile("paper"))
     assert "already on paper" in _text(stub)
     assert not stub.clients, "it must not rebuild the client for nothing"
 
 
-def test_an_unknown_name_lists_the_real_ones_and_changes_nothing():
-    stub = _repl(profile="full")
+def test_an_unknown_name_lists_the_real_ones_and_changes_nothing(monkeypatch):
+    stub = _repl(monkeypatch, profile="full")
     asyncio.run(stub._profile("nonsense"))
     assert "no profile called" in _text(stub)
     assert stub.session.plan.profile == "full"
     assert not stub.clients
 
 
-def test_a_number_out_of_range_changes_nothing():
-    stub = _repl(profile="full")
+def test_a_number_out_of_range_changes_nothing(monkeypatch):
+    stub = _repl(monkeypatch, profile="full")
     asyncio.run(stub._profile("99"))
     assert "there is no choice 99" in _text(stub)
     assert stub.session.plan.profile == "full"
 
 
-def test_a_client_that_will_not_start_puts_the_old_profile_back():
+def test_a_client_that_will_not_start_puts_the_old_profile_back(monkeypatch):
     """The plan is set before the options are built, so a failed connect must
     restore it — otherwise the session reports a kit it is not running."""
-    stub = _repl(profile="full", fail_connect=True)
+    stub = _repl(monkeypatch, profile="full", fail_connect=True)
     asyncio.run(stub._profile("analysis"))
     assert stub.session.plan.profile == "full", "the plan was left lying"
     said = _text(stub)
@@ -234,23 +237,23 @@ def _append_of(stub) -> str:
     return _built(stub).system_prompt["append"]
 
 
-def test_the_system_prompt_follows_the_profile():
+def test_the_system_prompt_follows_the_profile(monkeypatch):
     """The append names the profile and counts its tools.
 
     Left alone across a switch it would tell the model it is running the kit
     it had a moment ago — the model's own description of its tools would be
     wrong while the tools themselves were right.
     """
-    stub = _repl(profile="full")
+    stub = _repl(monkeypatch, profile="full")
     asyncio.run(stub._profile("analysis"))
     append = _append_of(stub)
     assert "`analysis` profile" in append
     assert "`full` profile" not in append
 
 
-def test_none_drops_the_guide_as_well_as_the_tools():
+def test_none_drops_the_guide_as_well_as_the_tools(monkeypatch):
     """Both guides are instructions for calling tools that are now absent."""
-    stub = _repl(profile="full")
+    stub = _repl(monkeypatch, profile="full")
     asyncio.run(stub._profile("none"))
     append = _append_of(stub)
     assert "PROJECT GUIDE TEXT" not in append
@@ -262,30 +265,30 @@ def test_none_drops_the_guide_as_well_as_the_tools():
     ], "only the host's own tools remain approved"
 
 
-def test_switching_back_from_none_restores_the_guide():
-    stub = _repl(profile="none")
+def test_switching_back_from_none_restores_the_guide(monkeypatch):
+    stub = _repl(monkeypatch, profile="none")
     asyncio.run(stub._profile("full"))
     append = _append_of(stub)
     assert "PROJECT GUIDE TEXT" in append
     assert "carries no scivo tools" not in append
 
 
-def test_none_keeps_the_conversation_too():
-    stub = _repl(profile="full", session_id="sess-9")
+def test_none_keeps_the_conversation_too(monkeypatch):
+    stub = _repl(monkeypatch, profile="full", session_id="sess-9")
     asyncio.run(stub._profile("none"))
     assert _built(stub).resume == "sess-9"
     assert "the conversation continues" in _text(stub)
 
 
-def test_none_is_in_the_menu_and_says_it_carries_nothing():
-    stub = _repl(profile="full")
+def test_none_is_in_the_menu_and_says_it_carries_nothing(monkeypatch):
+    stub = _repl(monkeypatch, profile="full")
     asyncio.run(stub._profile(""))
     said = _text(stub)
     assert "none" in said
     assert "  0 tools" in said
 
 
-def test_a_local_session_stays_local_across_a_profile_switch():
+def test_a_local_session_stays_local_across_a_profile_switch(monkeypatch):
     """The reported fallback (user, 2026-11-08).
 
     `/model` switches to a local endpoint by rebuilding the client, and
@@ -294,7 +297,7 @@ def test_a_local_session_stays_local_across_a_profile_switch():
     snapshot therefore dropped `ANTHROPIC_BASE_URL` and the local model, and
     the next turn went to Claude with nothing said about it.
     """
-    stub = _repl(profile="full", local=True)
+    stub = _repl(monkeypatch, profile="full", local=True)
     asyncio.run(stub._profile("analysis"))
     options = _built(stub)
     assert options.env.get("ANTHROPIC_BASE_URL") == LOCAL_ENV["ANTHROPIC_BASE_URL"]
@@ -302,19 +305,19 @@ def test_a_local_session_stays_local_across_a_profile_switch():
     assert options.model == "qwen3-27b", "the local model, not Claude's"
 
 
-def test_the_claude_shaped_snapshot_is_not_what_gets_rebuilt():
+def test_the_claude_shaped_snapshot_is_not_what_gets_rebuilt(monkeypatch):
     """Named directly, because the two option sets look alike at the call site
     and only one of them says where the request goes."""
-    stub = _repl(profile="full", local=True)
+    stub = _repl(monkeypatch, profile="full", local=True)
     asyncio.run(stub._profile("deck"))
     assert _built(stub).env != stub.session.full_options.env
     assert _built(stub).model != stub.session.full_options.model
 
 
-def test_a_lean_session_gets_the_lean_append_for_the_NEW_profile():
+def test_a_lean_session_gets_the_lean_append_for_the_NEW_profile(monkeypatch):
     """`session.lean_append` was built at launch and names the profile this
     session has just stopped running."""
-    stub = _repl(profile="full", local=True, lean=True)
+    stub = _repl(monkeypatch, profile="full", local=True, lean=True)
     asyncio.run(stub._profile("writing"))
     append = _append_of(stub)
     assert "LAUNCH LEAN APPEND" not in append, "the launch-time append is stale"
@@ -323,9 +326,9 @@ def test_a_lean_session_gets_the_lean_append_for_the_NEW_profile():
     assert "PROJECT GUIDE TEXT" not in append
 
 
-def test_a_lean_session_keeps_its_narrowed_host_tools():
+def test_a_lean_session_keeps_its_narrowed_host_tools(monkeypatch):
     from scivo_harness.session import LOCAL_HOST_TOOLS
 
-    stub = _repl(profile="full", local=True, lean=True)
+    stub = _repl(monkeypatch, profile="full", local=True, lean=True)
     asyncio.run(stub._profile("writing"))
     assert _built(stub).tools == list(LOCAL_HOST_TOOLS)

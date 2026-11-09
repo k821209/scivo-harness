@@ -120,6 +120,39 @@ def claude_binary() -> str:
     return str(bundled) if bundled.exists() else "claude"
 
 
+# `exit code: N` on a dead CLI. The number is the whole diagnosis and it was
+# being shown without being read (user, 2026-11-09: exit 143 on a loaded
+# machine, as a traceback).
+SIGNALS = {
+    143: "SIGTERM — something stopped it from outside: a `kill`, a shutdown, "
+         "or systemd's out-of-memory manager, which asks politely first.",
+    137: "SIGKILL — almost always the kernel's OOM killer. Check free memory; "
+         "a training job or a big export beside the session is the usual cause.",
+    139: "SIGSEGV — the CLI itself crashed. Worth reporting with the version "
+         "from `scivo doctor`.",
+    129: "SIGHUP — the terminal went away. A session started over ssh needs "
+         "tmux or screen to outlive the connection.",
+    130: "SIGINT — Ctrl-C reached the CLI rather than the prompt.",
+}
+
+
+def _why_it_stopped(text: str) -> str:
+    """What the exit code in a transport error means, in one sentence."""
+    found = re.search(r"exit code:?\s*(\d+)", text)
+    if not found:
+        return ("No exit code was reported, so why it stopped cannot be said "
+                "from here — `scivo doctor` and the system log are next.")
+    code = int(found.group(1))
+    known = SIGNALS.get(code)
+    if known:
+        return f"exit {code}: {known}"
+    if code > 128:
+        return (f"exit {code}: killed by signal {code - 128}. Not one this "
+                f"harness has a sentence for; `kill -l {code - 128}` names it.")
+    return (f"exit {code}: the CLI exited on its own. `scivo doctor` reports "
+            f"its version and where it came from.")
+
+
 def explain(error: Exception) -> str | None:
     """A better message for the failures worth explaining, else None."""
     text = str(error).lower()
@@ -211,6 +244,12 @@ def explain(error: Exception) -> str | None:
             "started with. Or pick a model the current CLI supports with "
             "`/model`."
         )
+
+    if "terminated process" in text or "cannot write to" in text:
+        return ("The Claude Code process is gone, so this session cannot send "
+                "anything more.\n" + _why_it_stopped(str(error))
+                + "\nThe conversation itself is on disk: `scivo resume <id>`, "
+                  "or `scivo -c` for the most recent one.")
 
     if "not found" in text and "claude" in text:
         return ("The Claude Code binary could not be found. It normally ships inside "
