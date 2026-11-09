@@ -585,6 +585,29 @@
     if (evName === "drop") [...e.dataTransfer.files].forEach(addImage);
   });
 
+  // The dashboard, when this page is embedded in its control dock, hands the
+  // input a passage to work on: the Paper tab's "Edit with Claude" on a
+  // selection. It COMPOSES rather than sends — the passage alone is not a
+  // request, and a message that left on its own would be one nobody wrote.
+  // The user adds the instruction and presses Enter, which is also what makes
+  // the dock open and visible before anything is spent.
+  //
+  // Same origin only, and only from the frame that embedded us. The page runs
+  // in the dashboard's origin, so a message from anywhere else is not the
+  // dashboard; accepting one would let any page that can embed this one type
+  // into the session.
+  window.addEventListener("message", (e) => {
+    if (e.origin !== location.origin) return;
+    if (e.source !== window.parent || window.parent === window) return;
+    const d = e.data;
+    if (!d || d.type !== "scivo-control:compose" || typeof d.text !== "string") return;
+    const text = d.text.slice(0, 8000);
+    input.value = input.value.trim() ? input.value.replace(/\s*$/, "\n\n") + text : text;
+    autosize();
+    input.focus();
+    try { input.setSelectionRange(input.value.length, input.value.length); } catch (_) {}
+  });
+
   // ----------------------------------------------------------------- input
   async function send() {
     const text = input.value.replace(/\s+$/, "");
