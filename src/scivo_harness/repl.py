@@ -104,6 +104,15 @@ TASK_TMP = Path("/tmp")
 # already stripped by `scivo_tool_label`).
 RUN_CREATING_TOOLS = frozenset({"submit_remote_job", "launch_local_job",
                                 "record_analysis_run"})
+
+# Tools that edit one place in a manuscript. The dashboard draws a marker on
+# it while the session works there — the one thing another editor had that
+# ours did not: you could see where the agent was (user, 2026-11-09). Named
+# rather than pattern-matched: `add_figure` also takes a slug and edits
+# nothing a reader is looking at, and a marker on the wrong paragraph is worse
+# than none.
+EDITING_TOOLS = frozenset({"update_section", "replace_in_section", "add_section",
+                           "resolve_paper_comment", "update_review"})
 # Long enough to cost nothing next to an 11-minute job, short enough that the
 # answer arrives while the person is still thinking about it.
 RUN_POLL_SECONDS = 30.0
@@ -434,6 +443,14 @@ class Repl:
                     self.control.tool(f"#{self.tool_calls} {stamp} {label}", detail)
                 if label in RUN_CREATING_TOOLS:
                     self._watch_runs()
+                if label in EDITING_TOOLS and self.control:
+                    args = block.input or {}
+                    self.control.focus(
+                        slug=str(args.get("slug") or args.get("paper") or ""),
+                        # `key` on a section tool, `section` on a comment one.
+                        section=str(args.get("key") or args.get("section") or ""),
+                        block_id=str(args.get("block_id") or "") or None,
+                        tool=label)
         self._streamed = ""
         if self.control:
             self.control.end_assistant()

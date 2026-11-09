@@ -337,6 +337,12 @@ class Control:
     # state and must not read the same.
     _last_flush: float | None = None
     _stuck_said: bool = False
+    # Where the session is editing right now, for the dashboard to draw a
+    # caret on. Written through the writer loop rather than as its own task:
+    # that loop is already bounded and backed off, and a caret is not worth a
+    # second path to the network.
+    _focus: dict[str, Any] | None = None
+    _focus_dirty: bool = False
     _tasks: list[asyncio.Task] = field(default_factory=list)
     _assistant: int | None = None
     _approvals: dict[str, _Approval] = field(default_factory=dict)
@@ -398,6 +404,24 @@ class Control:
         """The slash commands the page offers in its menu, once per session."""
         await self._call("put_page_data", pub_id=self.link.pub_id, collection="content",
                          doc_id=f"commands-{self.sid}", data={"sid": self.sid, "list": commands})
+
+    def focus(self, slug: str, section: str, block_id: str | None,
+              tool: str) -> None:
+        """Say which paragraph the session is working on.
+
+        The dashboard's Paper tab draws a marker on it — the one thing another
+        editor had that ours did not: you could see where the agent was
+        (user, 2026-11-09). Carries `at` so the reader can decide it is stale
+        rather than needing a second write to clear it; a session that dies
+        mid-edit would never send that clear.
+        """
+        if not self.active or not slug:
+            return
+        self._focus = {"doc": "focus", "sid": self.sid, "slug": slug,
+                       "section": section or "", "block_id": block_id or "",
+                       "tool": tool, "at": _now_ms()}
+        self._focus_dirty = True
+        self._wake.set()
 
     def note(self, markdown: str) -> None:
         """Output of a local command, shown on the page as rendered markdown."""
@@ -711,8 +735,17 @@ class Control:
                          })
 
     async def _flush(self) -> bool:
-        if not self._dirty:
+        if not self._dirty and not self._focus_dirty:
             return False
+        if self._focus_dirty and self._focus is not None:
+            # Before the chunks: the marker is only useful while the edit is
+            # happening, and a burst of deltas must not put it behind them.
+            self._focus_dirty = False
+            outcome = await self._call("put_page_data", pub_id=self.link.pub_id,
+                                       collection="content", doc_id="focus",
+                                       data=self._focus)
+            if not outcome.ok:
+                self.errors.append(f"focus: {outcome.error}")
         chunks, self._dirty = sorted(self._dirty), set()
         for k in chunks:
             outcome = await self._call(
