@@ -96,4 +96,6 @@ def test_both_paths_send_one_text():
     # everything.
     import pathlib
     source = (pathlib.Path(repl_mod.__file__)).read_text(encoding="utf-8")
-    assert "await self._turn(self.client, HANDOFF_ASK)" in source
+    # Through the guarded turn since 2026-11-10: `/handoff` on a session whose
+    # CLI had gone used to raise out of the loop instead of reconnecting.
+    assert "await self._guarded_turn(HANDOFF_ASK)" in source

@@ -32,7 +32,7 @@ from claude_agent_sdk import (
 
 from . import guardrails, ui
 from .prompt import HANDOFF_ASK
-from .pump import MessagePump, PumpClosed
+from .pump import MessagePump, PumpClosed, StreamEnded
 from .control import Control, merge_web_messages
 from .preflight import to_markdown
 from .failures import _why_it_stopped, explain
@@ -1492,8 +1492,17 @@ class Repl:
         from. Without one there is nothing to come back to, and saying so
         beats reconnecting into an empty conversation.
         """
-        self._say("\n" + ui.red(f"  the Claude Code process stopped: {exc}"))
-        self._say(ui.dim("  " + _why_it_stopped(str(exc))))
+        if isinstance(exc, StreamEnded):
+            # The process may well be alive; what is gone is our reading of
+            # it. Saying "the process stopped" would send someone to look for
+            # a kill that did not happen.
+            self._say("\n" + ui.red(f"  stopped hearing from Claude Code: {exc}"))
+            self._say(ui.dim("  Its output stream ended on this side, so nothing "
+                             "it says can be read. Starting a new one on the "
+                             "same conversation."))
+        else:
+            self._say("\n" + ui.red(f"  the Claude Code process stopped: {exc}"))
+            self._say(ui.dim("  " + _why_it_stopped(str(exc))))
         if not self.session_id:
             self._say(ui.dim("  this session had no id to resume — nothing to "
                              "reconnect to. Start again with `scivo`.\n"))
@@ -1771,7 +1780,33 @@ class Repl:
                 self._say(ui.dim(f"    {str(name):<20} {tokens:>8,}"))
         self._say("")
 
+    async def _guarded_turn(self, line: str) -> bool:
+        """One turn, and a new CLI if this one is gone. False: give up.
+
+        Both ways a session loses its CLI end here. `CLIConnectionError` is
+        the process having exited — writing to it raised out of run(), out of
+        main, and printed a traceback ending in "Cannot write to terminated
+        process", the least useful thing a person can be shown when the
+        conversation is safe on disk and the remedy is one line (user,
+        2026-11-09, exit 143 on spark-a404). `StreamEnded` is the quieter
+        one: the process is still there and nothing it says reaches us.
+        `/handoff` runs a turn too and used to do it outside this, so the one
+        command meant for a session in trouble was the one that crashed.
+        """
+        try:
+            await self._turn(self.client, line)
+        except StreamEnded as exc:
+            return await self._reconnect(exc)
+        except CLIConnectionError as exc:
+            return await self._reconnect(exc)
+        return True
+
     async def _turn(self, client: ClaudeSDKClient, line: str) -> None:
+        pump = getattr(self, "pump", None)
+        if pump is not None and pump.ended:
+            # Before the query, not after: a prompt sent to a CLI we cannot
+            # hear is a turn that runs — tools and all — with nobody watching.
+            raise StreamEnded(pump.why_ended())
         self.session.rails.new_turn()
         if self.attachments:
             images, self.attachments = list(self.attachments), []
@@ -1811,9 +1846,9 @@ class Repl:
                 while True:
                     message = await queue.get()
                     if isinstance(message, PumpClosed):
-                        raise RuntimeError(
-                            "the CLI stream ended mid-turn"
-                            + (f": {type(message.error).__name__}: {message.error}" if message.error else ""))
+                        raise StreamEnded(
+                            "mid-turn"
+                            + (f" — {type(message.error).__name__}: {message.error}" if message.error else ""))
                     if isinstance(message, StreamEvent):
                         self._on_stream(message)
                     elif isinstance(message, SystemMessage) and message.subtype == "api_retry":
@@ -1859,6 +1894,9 @@ class Repl:
             print(ui.yellow("\n  interrupted\n"))
             if self.control:
                 self.control.status("interrupted from the terminal", level="warn")
+        except StreamEnded:
+            # Not a failed turn to report and move on from — see the class.
+            raise
         except Exception as exc:  # noqa: BLE001
             # One failed turn should not end the session: the briefing
             # and the conversation so far are worth more than the turn.
@@ -2004,7 +2042,8 @@ class Repl:
                         # definition: two copies of an instruction drift, and
                         # the drift is invisible — one path would quietly ask
                         # for something else.
-                        await self._turn(self.client, HANDOFF_ASK)
+                        if not await self._guarded_turn(HANDOFF_ASK):
+                            break
                         continue
                     if self.control and self.control.active and via != "web":
                         self.control.user(line, via)
@@ -2014,19 +2053,8 @@ class Repl:
                     except EOFError:
                         break
 
-                    try:
-                        await self._turn(self.client, line)
-                    except CLIConnectionError as exc:
-                        # The CLI went away under us — killed from outside, or
-                        # gone with the machine's memory. Writing to it then
-                        # raised out of run(), out of main, and printed a
-                        # traceback ending in "Cannot write to terminated
-                        # process", which is the least useful thing a person
-                        # can be shown: the conversation is safe on disk and
-                        # the remedy is one line (user, 2026-11-09, exit 143
-                        # on spark-a404).
-                        if not await self._reconnect(exc):
-                            break
+                    if not await self._guarded_turn(line):
+                        break
         finally:
             if self.control and self.control.active:
                 await self.control.stop()

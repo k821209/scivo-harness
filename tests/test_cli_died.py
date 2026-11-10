@@ -139,3 +139,103 @@ def test_the_explainer_covers_this_failure_too():
         "Cannot write to terminated process (exit code: 143)"))
     assert said and "143" in said and "SIGTERM" in said
     assert "scivo resume" in said
+
+
+# ── the quieter way to lose the CLI: it is alive and we cannot hear it ──────
+
+def _turn_stub(monkeypatch, pump, session_id="sess-1"):
+    from scivo_harness.repl import Repl
+    stub = _repl(monkeypatch, session_id=session_id)
+    stub.pump = pump
+    stub.queries = []
+
+    class Client(DeadClient):
+        async def query(self, line):
+            stub.queries.append(line)
+
+    stub.client = Client()
+    stub.session.rails = types.SimpleNamespace(new_turn=lambda: None, looping=None)
+    stub.attachments = []
+    stub._turn = Repl._turn.__get__(stub)
+    stub._guarded_turn = Repl._guarded_turn.__get__(stub)
+    return stub
+
+
+def test_a_turn_is_not_sent_to_a_cli_nobody_can_hear(monkeypatch):
+    """A prompt sent to a CLI whose output we cannot read is a turn that runs
+    — tools and all — with nobody watching. Refused BEFORE the query."""
+    from scivo_harness.pump import StreamEnded
+
+    pump = types.SimpleNamespace(ended=True, why_ended=lambda: "MessageParseError: bad frame")
+    stub = _turn_stub(monkeypatch, pump)
+    with pytest.raises(StreamEnded) as caught:
+        asyncio.run(stub._turn(stub.client, "carry on"))
+    assert "bad frame" in str(caught.value)
+    assert stub.queries == []
+
+
+def test_a_dead_stream_reconnects_instead_of_reporting_a_failed_turn(monkeypatch):
+    """Reporting it as one failed turn and carrying on would fail every later
+    turn the same way; the session needs a new reader."""
+    pump = types.SimpleNamespace(ended=True, why_ended=lambda: "the stream closed")
+    stub = _turn_stub(monkeypatch, pump)
+    assert asyncio.run(stub._guarded_turn("carry on")) is True
+    said = _text(stub)
+    assert "stopped hearing from Claude Code" in said and "reconnected" in said
+    # Not the wording for a killed process: nothing was killed.
+    assert "process stopped" not in said
+    assert stub.session.options.resume == "sess-1"
+
+
+def test_a_dead_stream_with_no_session_to_resume_ends_the_session(monkeypatch):
+    pump = types.SimpleNamespace(ended=True, why_ended=lambda: "the stream closed")
+    stub = _turn_stub(monkeypatch, pump, session_id=None)
+    assert asyncio.run(stub._guarded_turn("carry on")) is False
+    assert "nothing to reconnect to" in _text(stub)
+
+
+def test_a_stream_that_ends_mid_turn_reaches_the_reconnect(monkeypatch):
+    """Through the real `_turn` loop with a real pump: the turn's own
+    `except Exception` used to take this as an ordinary failed turn, print it
+    and return — after which the session looked alive and was not."""
+    from scivo_harness.pump import MessagePump
+    from scivo_harness.repl import Repl
+
+    async def main():
+        feed: asyncio.Queue = asyncio.Queue()
+
+        class Source:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                item = await feed.get()
+                if isinstance(item, Exception):
+                    raise item
+                return item
+
+        pump = MessagePump(Source(), lambda m: None)
+        await pump.start()
+        stub = _turn_stub(monkeypatch, pump)
+        stub.control = None
+        stub._stopping = False
+        stub._last_output = 0.0
+        stub._typed_ahead = ""
+        stub._heartbeat = lambda: asyncio.sleep(3600)
+        stub._clear_activity = lambda: None
+        stub._context = lambda client, brief: asyncio.sleep(0)
+
+        async def query(line):
+            stub.queries.append(line)
+            feed.put_nowait(RuntimeError("JSON message exceeded maximum buffer size"))
+
+        stub.client.query = query
+        went_on = await stub._guarded_turn("show me the slide")
+        return stub, went_on
+
+    stub, went_on = asyncio.run(main())
+    assert stub.queries == ["show me the slide"]
+    assert went_on is True
+    said = _text(stub)
+    assert "stopped hearing from Claude Code" in said and "buffer size" in said
+    assert "reconnected" in said

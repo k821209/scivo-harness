@@ -27,6 +27,15 @@ class PumpClosed:
         return f"PumpClosed({self.error!r})"
 
 
+class StreamEnded(RuntimeError):
+    """The reader is gone, so nothing sent from here on can be answered.
+
+    Its own type because the remedy is not "report the failed turn and carry
+    on": every later turn would fail the same way. The session has to get a
+    new reader — which means a new CLI on the same conversation.
+    """
+
+
 class MessagePump:
     def __init__(self, source: AsyncIterator[Any], on_idle: Callable[[Any], None]) -> None:
         self._source = source
@@ -34,6 +43,14 @@ class MessagePump:
         self._turn: asyncio.Queue | None = None
         self._task: asyncio.Task | None = None
         self.idle_count = 0
+        # Remembered, not only delivered. The reader told an OPEN turn that it
+        # had ended and told nobody otherwise, so one that died between turns
+        # — a message the SDK could not parse, while the CLI itself was fine —
+        # left the next turn waiting on a queue nothing would ever fill: a
+        # spinner counting minutes, and Esc could not end it either, since the
+        # interrupt's answer arrives through the same dead reader.
+        self.ended = False
+        self.error: BaseException | None = None
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._reader(), name="scivo-message-pump")
@@ -48,6 +65,8 @@ class MessagePump:
         except Exception as exc:  # noqa: BLE001 — the reason reaches the turn
             error = exc
         finally:
+            self.ended = True
+            self.error = error
             if self._turn is not None:
                 self._turn.put_nowait(PumpClosed(error))
 
@@ -64,7 +83,16 @@ class MessagePump:
     def open_turn(self) -> asyncio.Queue:
         """Messages go to the returned queue until close_turn()."""
         self._turn = asyncio.Queue()
+        if self.ended:
+            # Nothing will ever arrive; say so now rather than never.
+            self._turn.put_nowait(PumpClosed(self.error))
         return self._turn
+
+    def why_ended(self) -> str:
+        """One line for a person: what the reader last said, if anything."""
+        if self.error is None:
+            return "the stream closed"
+        return f"{type(self.error).__name__}: {self.error}"
 
     def close_turn(self) -> None:
         """Anything still queued after the turn's result belongs to idle time."""

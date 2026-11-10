@@ -112,7 +112,17 @@ def test_an_older_mcp_is_detected_from_its_own_error():
 # as JPEG appeared (user, 2026-10-10). The format was chosen from the
 # filename, so a photo named .png was re-encoded as PNG and stayed huge.
 
-pytest.importorskip("PIL", reason="Pillow is optional; the shrink path needs it")
+# A MARK on the three tests that need it, not `importorskip` at module level.
+# That call skips the whole FILE from wherever it stands — including every
+# test above it — so without Pillow all sixteen tests here, the reader's own
+# among them, were reported as "1 skipped" and a suite that had never run
+# them read as green (found 2026-11-10 by breaking the pump and watching
+# nothing fail).
+import importlib.util   # noqa: E402
+
+needs_pillow = pytest.mark.skipif(
+    importlib.util.find_spec("PIL") is None,
+    reason="Pillow is optional; the shrink path needs it")
 
 
 def _noise_photo(w=2000, h=1400):
@@ -141,6 +151,7 @@ def _encode(img, fmt):
     return buf.getvalue()
 
 
+@needs_pillow
 def test_a_photograph_fits_whatever_its_filename_says():
     data = _encode(_noise_photo(), "PNG")
     assert len(data) > _control.MAX_IMG_BYTES          # the case that failed
@@ -150,6 +161,7 @@ def test_a_photograph_fits_whatever_its_filename_says():
     assert note is None
 
 
+@needs_pillow
 def test_transparency_is_kept_when_the_image_fits():
     from PIL import Image
     logo = Image.new("RGBA", (1800, 1200), (0, 0, 0, 0))
@@ -161,6 +173,7 @@ def test_transparency_is_kept_when_the_image_fits():
     assert len(out) <= _control.MAX_IMG_BYTES
 
 
+@needs_pillow
 def test_transparency_is_given_up_rather_than_the_picture():
     """A half-transparent photograph cannot fit as PNG at any step on the ladder.
     Flattened onto white it fits — and a picture that shows beats one that
@@ -220,3 +233,50 @@ def test_images_accumulate_across_the_merged_messages():
 
 def test_an_empty_line_does_not_leave_a_gap():
     assert merge_web_messages(["first", "   ", "second"]) == "first\n\nsecond"
+
+
+def test_a_reader_that_died_between_turns_fails_the_next_turn_at_once():
+    """It told an OPEN turn that it had ended and told nobody otherwise.
+
+    So a reader that died while the prompt sat idle — a message the SDK could
+    not parse, the CLI itself fine — left the next turn waiting on a queue
+    nothing would fill: a spinner counting minutes, with no error anywhere
+    (review 2026-11-10, reproduced before this was written).
+    """
+    async def main():
+        src = _Source(); pump = MessagePump(src, lambda m: None)
+        await pump.start()
+        src.q.put_nowait(RuntimeError("could not parse a message"))
+        await _settle()
+        assert pump.ended and not pump.alive
+        queue = pump.open_turn()
+        closed = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert isinstance(closed, PumpClosed)
+        assert "could not parse" in pump.why_ended()
+    asyncio.run(main())
+
+
+def test_a_reader_that_simply_finished_says_so_too():
+    """No exception is still an ending: the stream closed."""
+    async def main():
+        src = _Source(); pump = MessagePump(src, lambda m: None)
+        await pump.start()
+        src.q.put_nowait(StopAsyncIteration)
+        await _settle()
+        queue = pump.open_turn()
+        closed = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert isinstance(closed, PumpClosed) and closed.error is None
+        assert pump.why_ended() == "the stream closed"
+    asyncio.run(main())
+
+
+def test_a_live_reader_opens_an_empty_turn():
+    """The other direction: a healthy pump must not start a turn with a
+    PumpClosed in it, or every turn would end before it began."""
+    async def main():
+        src = _Source(); pump = MessagePump(src, lambda m: None)
+        await pump.start(); await _settle()
+        queue = pump.open_turn()
+        assert queue.empty() and not pump.ended
+        await pump.stop()
+    asyncio.run(main())
