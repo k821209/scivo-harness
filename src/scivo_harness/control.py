@@ -268,6 +268,53 @@ FLUSH_EVERY = 0.03         # seconds; streaming deltas coalesce into one write
 POLL_ACTIVE = 0.15         # seconds between reads of web input while the session is busy
 POLL_IDLE = 0.5            # … and once it has been quiet for ACTIVE_WINDOW
 ACTIVE_WINDOW = 60.0       # seconds of quiet before polling slows down
+# How often the inbox is read, by how long NOTHING has happened in the session.
+#
+# It used to stop at the second rung: half a second, for as long as the
+# process lived. Measured on 2026-11-10 (Cloud Monitoring, 24 h): 34.1 million
+# Firestore reads a day, and 22 control pages live — their median uptime a
+# WEEK, the oldest 41 days — each asking twice a second whether anyone had
+# typed. A poll is six billed reads (the publication, four fixed documents
+# whether or not they exist, and a query that is charged one read for
+# returning nothing), so an idle session cost a million reads a day to learn
+# nothing. Cost has to follow use, and what an unattended session uses is
+# none.
+#
+# The price of the lower rungs is latency on the FIRST web message after a
+# long quiet: up to the interval. Typing in the terminal is activity and
+# resets it at once; someone opening the page announces themselves (see
+# VIEWER_FLOOR) so the wait is spent while they are still reading; and the
+# page is told the interval, so "sending…" can say what it is waiting for.
+POLL_LADDER = (
+    (0.0, POLL_ACTIVE),
+    (ACTIVE_WINDOW, POLL_IDLE),
+    (600.0, 2.0),
+    (3600.0, 15.0),
+)
+# While an approval or a question is waiting, never slower than this. It used
+# to be the FASTEST state — 0.15 s for as long as the card sat there — so a
+# card left overnight was the most expensive thing a session could do: forty
+# reads a second, waiting for a person.
+PENDING_FLOOR = 5.0
+# Someone has the page open and is using it (the page says so, see `viewer`
+# in the control document): not slower than this, so their message is not the
+# thing that pays the wait. Not POLL_ACTIVE — a tab left open would otherwise
+# hold a session at full cadence, which is the bill this ladder exists to stop.
+VIEWER_FLOOR = 1.0
+VIEWER_WINDOW = 90.0       # seconds a viewer's last sign of life counts for
+
+
+def poll_interval(quiet: float, *, pending: bool = False, viewer: bool = False) -> float:
+    """Seconds until the next read of the inbox."""
+    interval = POLL_LADDER[0][1]
+    for after, seconds in POLL_LADDER:
+        if quiet >= after:
+            interval = seconds
+    if pending:
+        interval = min(interval, PENDING_FLOOR)
+    if viewer:
+        interval = min(interval, VIEWER_FLOOR)
+    return interval
 BEAT_EVERY = 5.0           # seconds; the page shows "disconnected" past a few misses
 # Every call the page makes is bounded. `_call` holds `self._lock`, so one that
 # never returns used to hold it forever: the writer stopped flushing, the
@@ -406,6 +453,18 @@ class Control:
     # Detected once, from the first failure, and never sent again.
     _since_seq_supported: bool = True
     _interrupt_seen: int = 0
+    # The page's own "someone is here" mark, and when (on OUR clock) it last
+    # changed. Compared for change, never against the wall clock: it is
+    # stamped by a browser, and a phone whose clock is a minute out must not
+    # read as absent — or as permanently present.
+    _viewer_mark: Any = None
+    _viewer_at: float = 0.0
+    _poll_s: float = POLL_ACTIVE
+    # Set when something happens HERE while the poller is in one of its long
+    # sleeps, so a session that has just woken — a line typed in the terminal,
+    # an approval card posted — is not deaf to the page for the rest of a
+    # fifteen-second nap it began while idle.
+    _poll_wake: asyncio.Event = field(default_factory=asyncio.Event)
     _started: int = 0
     # Set by the REPL: True while a turn is running, so a message arriving now
     # is queued rather than answered.
@@ -435,6 +494,9 @@ class Control:
         self._inbox_watermark = 0
         self._since_seq_supported = True
         self._interrupt_seen = 0
+        self._viewer_mark = None
+        self._viewer_at = 0.0
+        self._last_activity = time.monotonic()     # a session that just started is not idle
         self.interrupt_requested.clear()
         await self._write_head(state="live")
         self._tasks = [
@@ -630,6 +692,11 @@ class Control:
         self._dirty.add(index // CHUNK)
         self._last_activity = time.monotonic()
         self._wake.set()
+        if self._poll_s > POLL_IDLE:
+            # Only out of a long sleep: at the short intervals the next read
+            # is at most half a second away, and every streamed delta comes
+            # through here.
+            self._poll_wake.set()
 
     def user(self, text: str, via: str, images: list[str] | None = None) -> None:
         if self.active:
@@ -777,6 +844,11 @@ class Control:
                                                if self.events else None),
                              "project": self.project_name, "project_id": self.project_id,
                              "model": self.model,
+                             # How long a message typed on the page may wait
+                             # before this side reads it, so the page can say
+                             # so instead of showing "sending…" at a session
+                             # that is deliberately asleep.
+                             "poll_s": self._poll_s,
                          })
 
     async def _flush(self) -> bool:
@@ -1032,14 +1104,48 @@ class Control:
                 if seq > self._interrupt_seen:
                     self._interrupt_seen = seq
                     self.interrupt_requested.set()
+                mark = doc.get("viewer")
+                if mark is not None and mark != self._viewer_mark:
+                    self._viewer_mark = mark
+                    self._viewer_at = time.monotonic()
+
+    def _next_poll(self) -> float:
+        """The interval to wait now, from what this session is doing."""
+        now = time.monotonic()
+        pending = (any(not a.future.done() for a in self._approvals.values())
+                   or any(not q.future.done() for q in self._questions_pending.values()))
+        viewer = self._viewer_at > 0 and now - self._viewer_at < VIEWER_WINDOW
+        # Kept for the head, which the page reads on the next heartbeat. Not
+        # written now: it is a hint, and a write per change of cadence would
+        # be traffic spent announcing that traffic had stopped.
+        self._poll_s = poll_interval(now - self._last_activity,
+                                     pending=pending, viewer=viewer)
+        return self._poll_s
+
+    async def _wait_for_next_poll(self, last: float) -> None:
+        """Sleep until the next read is due — re-deciding if this side wakes.
+
+        The interval is decided when the sleep starts, and a long one would
+        then outlast the idleness it was chosen for. `_touch` sets
+        `_poll_wake`; each time it does, the due time is worked out again
+        from what the session is doing NOW, against when it last read.
+        """
+        while True:
+            remaining = last + self._next_poll() - time.monotonic()
+            if remaining <= 0:
+                return
+            self._poll_wake.clear()
+            try:
+                await asyncio.wait_for(self._poll_wake.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return
 
     async def _poller(self) -> None:
         failures = 0
+        last = time.monotonic()
         while True:
-            busy = (time.monotonic() - self._last_activity < ACTIVE_WINDOW
-                    or any(not a.future.done() for a in self._approvals.values())
-                    or any(not q.future.done() for q in self._questions_pending.values()))
-            await asyncio.sleep(POLL_ACTIVE if busy else POLL_IDLE)
+            await self._wait_for_next_poll(last)
+            last = time.monotonic()
             # Guarded like _writer: one transport error here used to end the
             # task, and nothing awaited it — the heartbeat kept saying "live"
             # while messages, approvals and Stop were ignored for the rest of

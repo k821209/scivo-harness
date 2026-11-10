@@ -386,6 +386,7 @@
     S.sid = head.sid; S.events = []; S.nodes.clear(); S.json.clear(); S.oldest = undefined;
     log.innerHTML = ""; log.prepend(earlier); earlier.hidden = true;
     S.seq = 0; S.msgs = []; S.interrupt = 0;
+    S.marked = 0; markPresent();      // a new session has not heard from this tab yet
     try {  // resume the interrupt counter if this tab reloads mid-session
       for (const r of await C.list("responses")) {
         if (r.sid !== head.sid) continue;
@@ -522,7 +523,35 @@
     catch (e) { setDot("stale", e.message); }
   }
 
+  // ------------------------------------------------------------ presence
+  // The session reads its inbox less and less often the longer nothing
+  // happens (twice a second for ever was 34 million Firestore reads a day
+  // across 22 idle sessions, 2026-11-10), so a message typed after a quiet
+  // hour could wait fifteen seconds. Saying "someone is here" when the page
+  // is actually being USED lets the session speed up while the person is
+  // still reading, so the wait is not spent on their message.
+  //
+  // Used, not merely open: a mark on every timer tick would hold a session
+  // awake for as long as a tab sat in the background of somebody's browser,
+  // which is how the old cadence was paid for by nobody looking.
+  const VIEWER_EVERY = 30000, VIEWER_FRESH = 120000;
+  S.touched = 0; S.marked = 0;
+  async function markPresent() {
+    if (!S.sid || document.visibilityState !== "visible") return;
+    const now = Date.now();
+    if (now - S.touched > VIEWER_FRESH || now - S.marked < VIEWER_EVERY) return;
+    S.marked = now;
+    // Merged into the control document, so `interrupt` beside it is kept.
+    try { await C.put("responses", "control", { doc: "control", sid: S.sid, viewer: now }); }
+    catch (_) { S.marked = 0; }       // not worth an alert; the next touch tries again
+  }
+  function touched() { S.touched = Date.now(); markPresent(); }
+
   function start() {
+    for (const kind of ["pointerdown", "keydown"]) document.addEventListener(kind, touched, { passive: true });
+    window.addEventListener("focus", touched);
+    setInterval(markPresent, VIEWER_EVERY);
+    touched();                        // opening the page is a person being here
     setInterval(refreshDot, 2000);  // the heartbeat can go quiet without any write to notice
     document.addEventListener("visibilitychange", resume);
     window.addEventListener("focus", resume);
@@ -632,7 +661,11 @@
     // Shown at once; replaced by the session's own echo when it takes the message.
     const pending = document.createElement("div");
     pending.className = "sc-user sc-pending"; pending.dataset.text = text;
-    const via = document.createElement("span"); via.className = "sc-via"; via.textContent = "you · web · sending…";
+    const via = document.createElement("span"); via.className = "sc-via";
+    // An idle session reads its inbox at long intervals, and "sending…" with
+    // nothing after it reads as a lost message. Say what it is waiting for.
+    const wait = Math.round((S.lastHead && S.lastHead.poll_s) || 0);
+    via.textContent = "you · web · sending…" + (wait >= 2 ? " the session was idle — it looks about every " + wait + " s" : "");
     pending.append(via, document.createTextNode(text));
     if (images.length) pending.append(thumbs(images));
     log.append(pending); log.scrollTop = log.scrollHeight;
