@@ -171,7 +171,11 @@ other tool:
     shim.add_argument("--port", type=int, default=8191,
                       help="where the shim listens; point a provider's base_url here (default: %(default)s)")
     shim.add_argument("--verbose", action="store_true", help="log each request it forwards")
-    run = sub.add_parser("run", help="one prompt, non-interactive")
+    run = sub.add_parser(
+        "run", help="one prompt, non-interactive",
+        description="One prompt, non-interactive. Exit status: 0 the turn finished; "
+                    "1 it ended in an error; 3 it finished but tool calls it needed "
+                    "were refused, because a one-shot has nobody to ask.")
     run.add_argument("prompt", nargs="+")
     return parser
 
@@ -768,17 +772,7 @@ async def _build_and_run(args, prompt_text: str | None) -> int:
     if session.resumed is None and continue_last:
         session.resumed = resumed_id
     if prompt_text is not None:
-        from claude_agent_sdk import AssistantMessage, TextBlock, query
-
-        if session.endpoint is not None and session.endpoint.note:
-            print(ui.dim(f"· {session.endpoint.note}"), file=sys.stderr)
-        async for message in query(prompt=prompt_text, options=session.options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        print(block.text, end="", flush=True)
-        print()
-        return 0
+        return await _run_once(session, prompt_text)
 
     from .repl import Repl
 
@@ -787,6 +781,61 @@ async def _build_and_run(args, prompt_text: str | None) -> int:
     if repl.relaunch:
         return _update_and_relaunch(args, repl.relaunch)
     return 0
+
+
+# What `scivo run` exits with. A one-shot is what a script calls, and a script
+# reads the exit code, not the prose: this returned 0 whatever happened — a
+# turn that ended in an API error, a budget that ran out, every write denied
+# because nobody was there to approve it — so the caller carried on as if the
+# work had been done (review 2026-11-10).
+RUN_OK = 0
+RUN_FAILED = 1        # the turn itself ended in an error
+RUN_DENIED = 3        # it finished, but tool calls it needed were refused
+
+
+async def _run_once(session, prompt_text: str) -> int:
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, query
+
+    if session.endpoint is not None and session.endpoint.note:
+        print(ui.dim(f"· {session.endpoint.note}"), file=sys.stderr)
+    failed = None
+    finished = False
+    try:
+        async for message in query(prompt=prompt_text, options=session.options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        print(block.text, end="", flush=True)
+            elif isinstance(message, ResultMessage):
+                finished = True
+                if getattr(message, "is_error", False):
+                    failed = message
+    finally:
+        if session.endpoint is not None:
+            session.endpoint.close()
+    print()
+    if failed is not None:
+        reason = getattr(failed, "stop_reason", None) or getattr(failed, "subtype", None) or "error"
+        detail = str(getattr(failed, "result", "") or "").strip()
+        print(ui.red(f"scivo run: the turn ended in an error — {reason}"
+                     + (f": {detail[:300]}" if detail else "")), file=sys.stderr)
+        return RUN_FAILED
+    if not finished:
+        # No result at all is not a success either: the stream stopped before
+        # the CLI said how the turn went.
+        print(ui.red("scivo run: the session ended without reporting a result"),
+              file=sys.stderr)
+        return RUN_FAILED
+    denied = list(getattr(session.approver, "denied", None) or [])
+    if denied:
+        from .session import scivo_tool_label
+        names = sorted({scivo_tool_label(name) for name in denied})
+        print(ui.yellow(f"scivo run: {len(denied)} tool call(s) were refused, with nobody "
+                        f"to ask — {', '.join(names)}.\n"
+                        "  The reply above says what it could not do. Re-run in `scivo` "
+                        "to be asked, or pass --permission-mode."), file=sys.stderr)
+        return RUN_DENIED
+    return RUN_OK
 
 
 def _relaunch_argv(argv: list[str], resume: str | None, control: bool,
