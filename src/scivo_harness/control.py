@@ -51,6 +51,12 @@ IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
 # Steps tried in order until one fits the cap. A single 1400 px pass was the
 # whole ladder, so anything that did not fit after it was dropped.
 SHRINK_LADDER = ((1400, 85), (1100, 80), (900, 75), (700, 70))
+# Further steps, taken only when the image has to fit what is LEFT of a
+# document rather than the per-image cap. Not part of the ladder above: with
+# these in it, a half-transparent photograph found a 500 px PNG that "fit" and
+# kept its alpha at a third of the size, where flattening it at 1400 px is the
+# better picture.
+TIGHT_RUNGS = ((500, 65), (360, 60))
 MAX_IMG_DIMENSION = SHRINK_LADDER[0][0]
 # Per image, after downscale. Base64 inflates by a third and the result is
 # written inside a transcript chunk document, which Firestore caps at 1 MB —
@@ -58,12 +64,24 @@ MAX_IMG_DIMENSION = SHRINK_LADDER[0][0]
 # same document. 800 KB did not: 800 KB of image is 1.07 MB of base64.
 MAX_IMG_BYTES = 500_000
 MAX_INLINE_BYTES = 1_500_000 # per assistant message
+# What ONE transcript chunk document may weigh, serialized. Firestore refuses a
+# document over 1,048,576 bytes, and the caps above are per image and per
+# message while the thing with the limit is the DOCUMENT: twenty events that
+# share it. Two pictures in one reply — each under its own cap — made a
+# 1.2 MB chunk that could never be written; it was retried for the rest of the
+# session, everything else in it never reached the page, and the writer's
+# backoff, which only resets when nothing is waiting, pinned every later
+# update to a 30-second cadence (review 2026-11-10, reproduced). Under the
+# limit by a margin, because JSON bytes only approximate Firestore's count.
+CHUNK_DOC_BUDGET = 900_000
+_DATA_IMG = None           # compiled lazily, once
 _PIL_MISSING_NOTED = False
 _MD_IMG = None             # compiled lazily, once
 
 
 def _inline_local_images(text: str, project_root: Path,
-                         extra_roots: tuple[str, ...] = ()) -> str:
+                         extra_roots: tuple[str, ...] = (),
+                         room: int | None = None) -> str:
     """Rewrite `![alt](local/path.png)` to a data URI so the page can show it.
 
     The page runs on an https origin and cannot fetch file:// paths, so
@@ -76,6 +94,11 @@ def _inline_local_images(text: str, project_root: Path,
     was the one that stayed a broken reference. The containment rule itself
     stays: these are directories the USER named on the command line, not paths
     taken from model text.
+
+    `room` is how many bytes of data URI this text may gain — what is left in
+    the document it will be written into. Each image is shrunk to fit what
+    remains, so a second picture arrives smaller rather than not at all; one
+    that cannot be made to fit keeps its plain reference and says why.
     """
     global _MD_IMG
     if _MD_IMG is None:
@@ -85,6 +108,7 @@ def _inline_local_images(text: str, project_root: Path,
         return text
     import base64
     added = 0
+    spent = 0
     roots = []
     for candidate in (project_root, *extra_roots):
         try:
@@ -93,7 +117,7 @@ def _inline_local_images(text: str, project_root: Path,
             continue
 
     def sub(match):
-        nonlocal added
+        nonlocal added, spent
         alt, ref = match.group(1), match.group(2).strip()
         if "://" in ref or ref.startswith("data:") or ref.startswith("#"):
             return match.group(0)
@@ -120,14 +144,26 @@ def _inline_local_images(text: str, project_root: Path,
         except OSError:
             return match.group(0)
         original = len(data)
-        data, mime, note = _shrink_for_web(data, mime, path.suffix.lower())
-        if len(data) > MAX_IMG_BYTES or added + len(data) > MAX_INLINE_BYTES:
+        cap = MAX_IMG_BYTES
+        if room is not None:
+            # Base64 is 4 bytes for every 3; 120 is the markdown around it.
+            cap = min(cap, max(0, (room - spent - 120) * 3 // 4))
+        data, mime, note = _shrink_for_web(data, mime, path.suffix.lower(), cap)
+        if len(data) > cap or added + len(data) > MAX_INLINE_BYTES:
             hint = "" if note is None else f" — {note}"
+            if cap < MAX_IMG_BYTES and len(data) <= MAX_IMG_BYTES:
+                # It would have fitted on its own: say what took the room, or
+                # this reads as the image being too big, which it is not.
+                hint += (" — this stretch of the conversation already holds "
+                         "as much as one page document can; ask for it again "
+                         "to see it")
             return (f"{match.group(0)}\n\n_[{path.name}: {original // 1024} KB — "
                     f"not inlined for the web view{hint}]_")
         added += len(data)
         caption = f"{alt}" if alt else path.name
-        return f"![{caption}](data:{mime};base64,{base64.b64encode(data).decode('ascii')})"
+        uri = f"![{caption}](data:{mime};base64,{base64.b64encode(data).decode('ascii')})"
+        spent += len(uri)
+        return uri
 
     return _MD_IMG.sub(sub, text)
 
@@ -140,7 +176,8 @@ def _within(path: Path, root: Path) -> bool:
     return True
 
 
-def _shrink_for_web(data: bytes, mime: str, suffix: str) -> tuple[bytes, str, str | None]:
+def _shrink_for_web(data: bytes, mime: str, suffix: str,
+                    cap: int = MAX_IMG_BYTES) -> tuple[bytes, str, str | None]:
     """Downscale a big image so it fits the chat, using Pillow when installed.
 
     A camera-sized JPG blew past every cap and came back to the user as a
@@ -158,10 +195,16 @@ def _shrink_for_web(data: bytes, mime: str, suffix: str) -> tuple[bytes, str, st
       actually carries transparency, which is the thing JPEG cannot do.
     - **One pass is not an answer.** If 1400 px still does not fit, step down
       and try again instead of giving up.
+
+    `cap` is what "fits" means for this call. The default is the per-image
+    ceiling; a caller writing into a document that is already partly full
+    passes what is left of it.
     """
     global _PIL_MISSING_NOTED
     if mime == "image/svg+xml":
         return data, mime, None
+    if len(data) <= cap and cap < MAX_IMG_BYTES:
+        return data, mime, None      # already fits the room there is
     try:
         from PIL import Image
         import io as _io
@@ -205,11 +248,12 @@ def _shrink_for_web(data: bytes, mime: str, suffix: str) -> tuple[bytes, str, st
         # the same ladder flattened onto white.
         passes = (True, False) if keeps_alpha else (False,)
         for alpha in passes:
-            for dimension, quality in SHRINK_LADDER:
+            ladder = SHRINK_LADDER if cap >= MAX_IMG_BYTES else SHRINK_LADDER + TIGHT_RUNGS
+            for dimension, quality in ladder:
                 candidate, out_mime = encode(dimension, quality, alpha)
                 if best is None or len(candidate) < len(best):
                     best, best_mime = candidate, out_mime
-                if len(candidate) <= MAX_IMG_BYTES:
+                if len(candidate) <= cap:
                     return candidate, out_mime, None
     except Exception:  # noqa: BLE001 - a corrupt or exotic image should not break the turn
         return data, mime, None
@@ -608,8 +652,9 @@ class Control:
     def end_assistant(self) -> None:
         if self._assistant is not None:
             event = self.events[self._assistant]
-            event["text"] = _inline_local_images(event["text"], self.config.root,
-                                                 self.extra_roots)
+            event["text"] = _inline_local_images(
+                event["text"], self.config.root, self.extra_roots,
+                room=CHUNK_DOC_BUDGET - self._chunk_bytes(self._assistant // CHUNK))
             event["done"] = True
             self._touch(self._assistant)
             self._assistant = None
@@ -748,10 +793,11 @@ class Control:
                 self.errors.append(f"focus: {outcome.error}")
         chunks, self._dirty = sorted(self._dirty), set()
         for k in chunks:
+            self._fit_chunk(k)
             outcome = await self._call(
                 "put_page_data", pub_id=self.link.pub_id, collection="content",
                 doc_id=f"log-{self.sid}-{k:04d}",
-                data={"sid": self.sid, "k": k, "events": self.events[k * CHUNK:(k + 1) * CHUNK]},
+                data=self._chunk_doc(k),
             )
             if not outcome.ok:
                 self.errors.append(f"write chunk {k}: {outcome.error}")
@@ -759,6 +805,71 @@ class Control:
         if not self._dirty:
             self._last_flush = time.monotonic()
         return True
+
+    def _chunk_doc(self, k: int) -> dict[str, Any]:
+        return {"sid": self.sid, "k": k, "events": self.events[k * CHUNK:(k + 1) * CHUNK]}
+
+    def _chunk_bytes(self, k: int) -> int:
+        return len(json.dumps(self._chunk_doc(k), ensure_ascii=False).encode("utf-8"))
+
+    def _fit_chunk(self, k: int) -> list[str]:
+        """Make chunk `k` writable, whatever went into it. Returns what it cut.
+
+        The invariant that was missing: a chunk handed to the network is under
+        the document limit, ALWAYS. Inlining leaves room (`end_assistant`),
+        but room is spent by whatever comes next into the same twenty events —
+        a long reply, a picture pasted from the page — so the last word is
+        here, at the one place every chunk passes through.
+
+        Largest picture first, because one picture is what usually tips it and
+        its reference text stays behind; then the longest text. Everything cut
+        says so IN the event, since a page that silently shows less than the
+        terminal did is the failure this file keeps having.
+        """
+        global _DATA_IMG
+        if _DATA_IMG is None:
+            import re
+            _DATA_IMG = re.compile(r"!\[([^\]]*)\]\(data:image/[^)]+\)")
+        cut: list[str] = []
+        for _ in range(4 * CHUNK):                 # every step shrinks; bounded anyway
+            over = self._chunk_bytes(k) - CHUNK_DOC_BUDGET
+            if over <= 0:
+                break
+            events = self.events[k * CHUNK:(k + 1) * CHUNK]
+            pictures = [(len(m.group(0)), event, m)
+                        for event in events if isinstance(event.get("text"), str)
+                        for m in _DATA_IMG.finditer(event["text"])]
+            pasted = [(len(url), event, url) for event in events
+                      for url in (event.get("images") or []) if isinstance(url, str)]
+            if pictures and (not pasted or max(pictures)[0] >= max(pasted)[0]):
+                size, event, m = max(pictures, key=lambda item: item[0])
+                name = m.group(1) or "image"
+                event["text"] = (event["text"][:m.start()]
+                                 + f"_[{name}: not shown on the web view — this stretch "
+                                   f"of the conversation outgrew one page document "
+                                   f"({size // 1024} KB cut); ask for it again to see it]_"
+                                 + event["text"][m.end():])
+                cut.append(f"picture {name} ({size // 1024} KB)")
+            elif pasted:
+                size, event, url = max(pasted, key=lambda item: item[0])
+                event["images"] = [u for u in event["images"] if u is not url]
+                event["text"] = (str(event.get("text") or "")
+                                 + f"\n\n_[a pasted image is not shown here "
+                                   f"({size // 1024} KB) — the session still received it]_")
+                cut.append(f"pasted image ({size // 1024} KB)")
+            else:
+                texts = [(len(event["text"].encode("utf-8")), event) for event in events
+                         if isinstance(event.get("text"), str)]
+                if not texts:
+                    break                           # nothing here we know how to cut
+                size, event = max(texts, key=lambda item: item[0])
+                keep = max(0, size - over - 200)
+                clipped = event["text"].encode("utf-8")[:keep].decode("utf-8", "ignore")
+                event["text"] = clipped + "\n\n…[truncated for the web view]"
+                cut.append(f"text ({(size - keep) // 1024} KB)")
+        if cut:
+            self.errors.append(f"chunk {k} was over one page document; cut: " + ", ".join(cut))
+        return cut
 
     def _say_if_stuck(self) -> None:
         """Tell the TERMINAL when the page stops keeping up, once per spell.
