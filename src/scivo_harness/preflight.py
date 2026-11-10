@@ -20,6 +20,14 @@ from .scivo_mcp import ScivoClient, ToolOutcome
 
 MEMORY_BUDGET = 6000  # chars; memory is a curated digest, not a log
 NOTE_BUDGET = 400
+# How many of each list the briefing carries. A cut is always SAID, with the
+# call that returns the rest: the briefing also tells the model not to repeat
+# the session-start calls, so a list cut in silence is a list the model
+# believes it has read whole. Thirty decisions came through as twelve with
+# "re-opening one of these is the most expensive thing you can do" under
+# them, and nothing to say eighteen more were settled (review 2026-11-10).
+DECISIONS_SHOWN = 12
+TODOS_SHOWN = 15
 
 
 class ProjectMismatch(RuntimeError):
@@ -243,7 +251,7 @@ def to_markdown(brief: Briefing) -> str:
 
     out += ["", "## Decisions already settled", ""]
     if brief.decisions:
-        for decision in brief.decisions[:12]:
+        for decision in brief.decisions[:DECISIONS_SHOWN]:
             text = _get(decision, "text", decision)
             why = _get(decision, "rationale")
             line = f"- {text}"
@@ -252,6 +260,13 @@ def to_markdown(brief: Briefing) -> str:
             if _get(decision, "superseded_by"):
                 line += " **(superseded)**"
             out.append(line)
+        older = len(brief.decisions) - DECISIONS_SHOWN
+        if older > 0:
+            out.append(
+                f"- **…and {older} older decision(s) NOT shown here.** These are the "
+                f"{DECISIONS_SHOWN} most recent only — call `list_decisions()` before "
+                "proposing anything they do not cover; this is the one session-start "
+                "call the briefing does not replace.")
         out.append("")
         out.append("Re-opening one of these is the most expensive thing you can do here.")
     else:
@@ -329,7 +344,11 @@ def to_markdown(brief: Briefing) -> str:
 
     if brief.todos:
         out += ["", "## Open to-dos", ""]
-        out += [f"- [{_get(t, 'status', 'todo')}] {_get(t, 'text', t)}" for t in brief.todos[:15]]
+        out += [f"- [{_get(t, 'status', 'todo')}] {_get(t, 'text', t)}"
+                for t in brief.todos[:TODOS_SHOWN]]
+        more = len(brief.todos) - TODOS_SHOWN
+        if more > 0:
+            out.append(f"- …and {more} more open to-do(s) not shown — `list_todos()`.")
 
     if brief.errors:
         out += ["", "## Preflight could not read", ""]
