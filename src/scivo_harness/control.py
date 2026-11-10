@@ -344,6 +344,16 @@ def poll_interval(quiet: float, *, pending: bool = False, viewer: bool = False) 
         interval = min(interval, VIEWER_FLOOR)
     return interval
 BEAT_EVERY = 5.0           # seconds; the page shows "disconnected" past a few misses
+# …while someone can see it. The heartbeat exists so a session that DIED
+# (killed, the machine gone — it cannot say goodbye) stops looking alive, and
+# five seconds is how fast a person watching should find out. Nobody is
+# watching a session that has sat idle for a week, and it was writing 17,280
+# heartbeats a day regardless: 22 sessions, 420,000 writes a day, and each
+# one a billed read for every browser tab subscribed to the head (measured
+# 2026-11-10). Unwatched and idle, it now beats this often — and the head
+# says which, so the dashboard judges "connected" against the interval the
+# session is actually keeping rather than one it has stopped keeping.
+BEAT_IDLE = 300.0
 # Every call the page makes is bounded. `_call` holds `self._lock`, so one that
 # never returns used to hold it forever: the writer stopped flushing, the
 # poller stopped reading, the heartbeat stopped — the page froze solid while
@@ -507,6 +517,11 @@ class Control:
     # is queued rather than answered.
     waiting: bool = False
     _head_chunks: int = -1
+    # What the head last told the page about our own rhythm. A change in
+    # either is written at once: a head still promising a beat every five
+    # seconds, from a session that has gone to five minutes, reads as dead.
+    _head_beat_every: float = BEAT_EVERY
+    _head_hint: bool = False
     _last_activity: float = 0.0
 
     @property
@@ -879,11 +894,17 @@ class Control:
     async def _write_head(self, state: str) -> None:
         self._rev += 1
         self._head_chunks = (len(self.events) - 1) // CHUNK if self.events else -1
+        beat_every = self._beat_every()
+        self._head_beat_every = beat_every
+        self._head_hint = self._poll_s >= 2
         await self._call("put_page_data", pub_id=self.link.pub_id, collection="content",
                          doc_id="head", data={
                              "sid": self.sid, "rev": self._rev, "state": state,
                              "events": len(self.events), "chunk": CHUNK,
                              "beat": _now_ms(), "started": self._started,
+                             # Seconds until the next beat is due, so a reader
+                             # knows how long silence is still normal.
+                             "beat_every": beat_every,
                              # WHEN THIS CONVERSATION LAST HAD ANYTHING IN IT,
                              # which is not what `beat` says. `beat` is the
                              # heartbeat loop's own clock: it moves every few
@@ -904,6 +925,18 @@ class Control:
                              # that is deliberately asleep.
                              "poll_s": self._poll_s,
                          })
+
+    def _beat_every(self) -> float:
+        """How often the head should beat right now.
+
+        Fast while someone is using the page, or while anything is happening
+        in the session (a turn running prints, and the Connect list sorts by
+        what it last saw); slow otherwise.
+        """
+        now = time.monotonic()
+        watched = self._viewer_at > 0 and now - self._viewer_at < VIEWER_WINDOW
+        busy = now - self._last_activity < ACTIVE_WINDOW
+        return BEAT_EVERY if (watched or busy) else BEAT_IDLE
 
     async def _flush(self) -> bool:
         if not self._dirty and not self._focus_dirty:
@@ -1030,7 +1063,7 @@ class Control:
         stalls = 0
         while True:
             try:
-                await asyncio.wait_for(self._wake.wait(), timeout=BEAT_EVERY)
+                await asyncio.wait_for(self._wake.wait(), timeout=self._beat_every())
             except asyncio.TimeoutError:
                 pass
             self._wake.clear()
@@ -1060,7 +1093,14 @@ class Control:
             # listen to it — or when the heartbeat is due. Writing it on every
             # flush doubled the calls on a server that answers one at a time.
             chunks_now = (len(self.events) - 1) // CHUNK if self.events else -1
-            if chunks_now != self._head_chunks or time.monotonic() - last_beat >= BEAT_EVERY:
+            beat_every = self._beat_every()
+            if (chunks_now != self._head_chunks
+                    or time.monotonic() - last_beat >= beat_every
+                    # Our rhythm changed, either way: slower must be said
+                    # before the old promise runs out, faster is someone who
+                    # has just arrived and is looking at the dot.
+                    or beat_every != self._head_beat_every
+                    or (self._poll_s >= 2) != self._head_hint):
                 try:
                     await self._write_head(state="live")
                 except Exception as exc:  # noqa: BLE001
@@ -1175,6 +1215,7 @@ class Control:
                 if mark is not None and mark != self._viewer_mark:
                     self._viewer_mark = mark
                     self._viewer_at = time.monotonic()
+                    self._wake.set()        # someone arrived: beat now, not in five minutes
         return acted
 
     def _next_poll(self) -> float:

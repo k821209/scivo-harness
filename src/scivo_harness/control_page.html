@@ -491,8 +491,21 @@
     // as "live" forever after the harness died.
     S.beatSeen = S.beatSeen || { beat: null, at: 0 };
     if (S.beatSeen.beat !== head.beat) S.beatSeen = { beat: head.beat, at: Date.now() };
-    const age = Date.now() - S.beatSeen.at;
-    const state = head.state === "ended" ? "ended" : age > STALE_MS ? "stale" : "live";
+    let age = Date.now() - S.beatSeen.at;
+    // How long silence is normal is the session's to say: unwatched and idle
+    // it beats every `beat_every` seconds (five minutes), not every five.
+    let allowed = Math.max(STALE_MS, (head.beat_every || 5) * 2500);
+    // Unless we have just told it someone is here. A live session answers
+    // that with a beat at once, so one that has not — twenty seconds on — is
+    // not there, and the slow rhythm it last promised is no reason to wait
+    // twelve minutes to say so.
+    // "Has not" is the beat being the very one we were looking at when we
+    // said it — not a comparison of two times, which called the first beat
+    // this tab ever SAW an answer to a mark made a millisecond earlier, and
+    // left a dead session looking alive for twelve minutes (caught by
+    // tests/browser/heartbeat.spec.mjs before this shipped).
+    if (S.marked && head.beat === S.markBeat) { age = Date.now() - S.marked; allowed = STALE_MS; }
+    const state = head.state === "ended" ? "ended" : age > allowed ? "stale" : "live";
     setDot(state, { live: "connected", stale: "no heartbeat for " + Math.round(age / 1000) + "s", ended: "session ended — run /scivo-control again" }[state]
       + " · " + (head.model || "") + " · " + head.sid + (LIVE ? "" : " · polling"));
   }
@@ -541,6 +554,7 @@
     const now = Date.now();
     if (now - S.touched > VIEWER_FRESH || now - S.marked < VIEWER_EVERY) return;
     S.marked = now;
+    S.markBeat = S.lastHead ? S.lastHead.beat : undefined;
     // Merged into the control document, so `interrupt` beside it is kept.
     try { await C.put("responses", "control", { doc: "control", sid: S.sid, viewer: now }); }
     catch (_) { S.marked = 0; }       // not worth an alert; the next touch tries again
