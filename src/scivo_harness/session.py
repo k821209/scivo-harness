@@ -21,16 +21,20 @@ from .toolsets import PREFIX, ToolPlan
 # the CURRENT best of its tier, so the ids it replaced are listed too rather
 # than being reachable only by someone who remembers them — `/model` with no
 # argument prints this as a numbered menu. Probed live on 2026-11-02: all seven
-# answer on a subscription credential. It is a MENU, not a gate: repl resolves
-# any `claude-*` id, listed here or not, so a model released tomorrow is usable
-# the day it ships.
+# answer on a subscription credential; claude-fable-5-2 added and probed
+# 2026-11-10. It is a MENU, not a gate: repl resolves any `claude-*` id, listed
+# here or not, so a model released tomorrow is usable the day it ships — but
+# the CLI only knows a new model's context window from its own table, so a new
+# id here goes with an SDK floor whose bundled CLI lists it (pyproject.toml).
+# Below that the CLI says "doesn't recognize the model" and assumes 200k.
 CLAUDE_CATALOG: dict[str, tuple[str, str]] = {
     "opus":      ("claude-opus-5-5",   "current"),
     "sonnet":    ("claude-sonnet-5-5", "current"),
     "haiku":     ("claude-haiku-5-5",  "current"),
-    "fable":     ("claude-fable-5-1",  "current"),
+    "fable":     ("claude-fable-5-2",  "current"),
     "opus-5":    ("claude-opus-5",     "previous"),
     "sonnet-5":  ("claude-sonnet-5",   "previous"),
+    "fable-5-1": ("claude-fable-5-1",  "previous"),
     "haiku-4-5": ("claude-haiku-4-5",  "previous"),
 }
 CLAUDE_MODELS = {alias: model for alias, (model, _) in CLAUDE_CATALOG.items()}

@@ -117,3 +117,14 @@ def test_the_prompt_completes_model_names_after_the_command():
     # An exact id completes too, from the same table.
     ids = [c.text for c in completer.get_completions(Document("/model claude-h"), None)]
     assert "claude-haiku-5-5" in ids
+
+
+def test_fable_names_the_newest_fable_and_the_one_it_replaced_stays_reachable():
+    # Added 2026-11-10 with claude-fable-5-2. An alias moving forward must not
+    # make the old id reachable only by someone who remembers it.
+    stub = _stub()
+    _run(stub, "fable")
+    assert stub.switched == ["claude-fable-5-2"]
+    stub = _stub()
+    _run(stub, "fable-5-1")
+    assert stub.switched == ["claude-fable-5-1"]

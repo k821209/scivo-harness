@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Yang Jae Kang", email = "kangyangjae@plantprofile.net" }]
 requires-python = ">=3.11"
 dependencies = [
-    "claude-agent-sdk>=0.2.153",
+    "claude-agent-sdk>=0.2.180",  # bundled CLI 2.1.321 knows claude-fable-5-2
     # Match co-scientist-local, which pins mcp<2. Our use is ClientSession /
     # stdio_client / call_tool / list_tools, unchanged across both.
     "mcp>=1.2",
