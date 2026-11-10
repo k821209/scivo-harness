@@ -1159,6 +1159,14 @@ class Repl:
         state = self.control.health()
         behind, errors = state["pending_chunks"], state["errors"]
         ago = state["last_flush_ago"]
+        # How the page's messages get here. Said every time, because the two
+        # answers differ by the whole Firestore bill and by how long a message
+        # waits — and nothing else on screen tells them apart.
+        if state.get("inbox") == "listening":
+            print(ui.dim("  inbox     listening — messages arrive as they are written"))
+        elif state.get("inbox"):
+            why = f" ({state['inbox_why']})" if state.get("inbox_why") else ""
+            print(ui.yellow(f"  inbox     {state['inbox']}, not listening{why}"))
         if not behind and not errors:
             when = "never" if ago is None else f"{ago:.0f}s ago"
             print(ui.dim(f"  page up to date ({state['events']} events, last "

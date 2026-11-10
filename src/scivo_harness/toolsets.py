@@ -133,6 +133,13 @@ def _domain_of(name: str) -> str:
     return "core"
 
 
+# Tools the HARNESS calls and the model has no use for. Dropped from every
+# profile: `wait_for_responses` holds a call open for half a minute waiting on
+# the control page, which is the control channel's own plumbing — in the
+# model's hands it is a schema to carry and a way to stall a turn.
+HARNESS_ONLY = ("wait_for_responses",)
+
+
 # Read-only by name, but the value comes back into the transcript: a
 # plaintext account token is not something to hand over without a prompt.
 NEVER_AUTO = ("get_user_secret", "list_user_secrets")
@@ -160,6 +167,8 @@ def plan(all_tools: list[str], profile: str = "full", read_only: bool = False) -
     for name in all_tools:
         keep = (name in ALWAYS or _domain_of(name) in wanted or _domain_of(name) == "core"
                 or bool(wanted & set(ALSO.get(name, ()))))
+        if name in HARNESS_ONLY:
+            keep = False
         if keep and read_only and not is_read_only(name):
             keep = False
         (kept if keep else dropped).append(name)

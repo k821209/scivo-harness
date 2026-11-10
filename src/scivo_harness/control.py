@@ -304,6 +304,34 @@ VIEWER_FLOOR = 1.0
 VIEWER_WINDOW = 90.0       # seconds a viewer's last sign of life counts for
 
 
+# ── being told, instead of asking ───────────────────────────────────────────
+# The ladder above makes asking cheaper. This makes it unnecessary: an MCP
+# from 2026-11-10 on has `wait_for_responses`, which holds a Firestore
+# listener open and answers when the page WRITES — billed for the documents
+# that change, nothing while none do, and delivered in a tenth of a second
+# rather than at the next tick. Measured through the real server: a write
+# reached this side in 67 ms, and an idle wait read nothing.
+LISTEN_WAIT = 25.0         # seconds one call is held open
+# While the listener is delivering, the inbox is still READ this often. Not
+# for speed — as the check on the listener itself: a stream can stop without
+# raising anywhere, and a listener that is trusted because it is quiet is the
+# failure this project keeps finding. Ten minutes is 144 reads of six a day.
+RECONCILE_EVERY = 600.0
+# A healthy listener answers at least once per LISTEN_WAIT. Past this without
+# an answer it is not healthy, whatever it last said.
+LISTEN_STALE = LISTEN_WAIT + 30.0
+# How many times the reconcile read may find something the listener never
+# delivered before the listener is no longer believed.
+LISTEN_MISSES_ALLOWED = 1
+
+
+def _is_unknown_tool(error: Any) -> bool:
+    """The server saying it has no such tool — and nothing else. "publication
+    not found" also arrives as a tool error; reading that as "no such tool"
+    would switch the listener off for good over a page that was unpublished."""
+    return str(error or "").lstrip().lower().startswith("unknown tool")
+
+
 def poll_interval(quiet: float, *, pending: bool = False, viewer: bool = False) -> float:
     """Seconds until the next read of the inbox."""
     interval = POLL_LADDER[0][1]
@@ -465,6 +493,15 @@ class Control:
     # an approval card posted — is not deaf to the page for the rest of a
     # fifteen-second nap it began while idle.
     _poll_wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # The listener: whether this MCP has one, where we are in its stream, and
+    # when it last answered. `_listen_trusted` goes False for the rest of the
+    # session if the reconcile read keeps finding what it never delivered.
+    _listen_supported: bool = True
+    _listen_trusted: bool = True
+    _listen_cursor: str = ""
+    _listen_at: float = 0.0
+    _listen_misses: int = 0
+    _listen_why: str = ""
     _started: int = 0
     # Set by the REPL: True while a turn is running, so a message arriving now
     # is queued rather than answered.
@@ -496,12 +533,19 @@ class Control:
         self._interrupt_seen = 0
         self._viewer_mark = None
         self._viewer_at = 0.0
+        self._listen_supported = True
+        self._listen_trusted = True
+        self._listen_cursor = ""
+        self._listen_at = 0.0
+        self._listen_misses = 0
+        self._listen_why = ""
         self._last_activity = time.monotonic()     # a session that just started is not idle
         self.interrupt_requested.clear()
         await self._write_head(state="live")
         self._tasks = [
             asyncio.create_task(self._writer(), name="scivo-control-writer"),
             asyncio.create_task(self._poller(), name="scivo-control-poller"),
+            asyncio.create_task(self._listener(), name="scivo-control-listener"),
         ]
         self.status("connected — this session is now driven from here as well as the terminal")
         return self.link
@@ -675,7 +719,17 @@ class Control:
             "last_error": self.errors[-1] if self.errors else None,
             "last_flush_ago": (None if self._last_flush is None
                                else round(time.monotonic() - self._last_flush, 1)),
+            # How the page's messages reach this side, and if not by being
+            # told, why not — the difference is the whole Firestore bill.
+            "inbox": "listening" if self.listening else f"read every {self._poll_s:g}s",
+            "inbox_why": "" if self.listening else self._listen_why,
         }
+
+    @property
+    def listening(self) -> bool:
+        """True while the listener is answering AND still believed."""
+        return (self._listen_supported and self._listen_trusted and self._listen_at > 0
+                and time.monotonic() - self._listen_at < LISTEN_STALE)
 
     # ------------------------------------------------------- outbound events
 
@@ -1033,8 +1087,15 @@ class Control:
                 paths.append(attachments.save_inbound(self.config.root, decoded[0], decoded[1], f"web{i}"))
         await self.messages.put({"text": text, "images": paths})
 
-    async def _intake(self, items: list) -> None:
-        """Route what the page wrote: web messages, approvals, answers, Stop."""
+    async def _intake(self, items: list) -> int:
+        """Route what the page wrote: web messages, approvals, answers, Stop.
+
+        Returns how many things it ACTED on — a message taken in, a card
+        answered, a Stop. Zero for documents already dealt with, which is what
+        lets one path (the reconcile read) check the other (the listener):
+        anything it still finds to act on is something that was not delivered.
+        """
+        acted = 0
         # One document per web message (page ≥ 2026-09-28), taken in clock
         # order and deduplicated by id, so two tabs never race a counter.
         # `list_responses` stamps every row with `id` = its document id, so a
@@ -1053,6 +1114,7 @@ class Control:
         for d in fresh:
             self._inbox_ids.add(d["id"])
             await self._take_web_message(str(d.get("text") or ""), d.get("images"))
+            acted += 1
         # Raised from every inbox doc this tick, taken in or not — a message
         # skipped for being another session's, or empty, must not be fetched
         # again for the rest of the session.
@@ -1078,11 +1140,13 @@ class Control:
                     if seq > self._inbox_seen and str(message.get("text", "")).strip():
                         self._inbox_seen = seq
                         await self._take_web_message(str(message["text"]))
+                        acted += 1
             elif kind == "approvals":
                 for rid, decision in (doc.get("decisions") or {}).items():
                     pending = self._approvals.get(rid)
                     if pending and not pending.future.done() and decision in {"allow", "always", "deny"}:
                         pending.future.set_result(decision)
+                        acted += 1
             elif kind == "questions":
                 for rid, answered in (doc.get("answers") or {}).items():
                     pending = self._questions_pending.get(rid)
@@ -1096,18 +1160,22 @@ class Control:
                     # questions are on the event we posted, so map them here.
                     if answered in (None, {}):
                         pending.future.set_result(None)
+                        acted += 1
                     elif isinstance(answered, dict):
                         pending.future.set_result(
                             self._name_answers(pending, answered))
+                        acted += 1
             elif kind == "control":
                 seq = int(doc.get("interrupt") or 0)
                 if seq > self._interrupt_seen:
                     self._interrupt_seen = seq
                     self.interrupt_requested.set()
+                    acted += 1
                 mark = doc.get("viewer")
                 if mark is not None and mark != self._viewer_mark:
                     self._viewer_mark = mark
                     self._viewer_at = time.monotonic()
+        return acted
 
     def _next_poll(self) -> float:
         """The interval to wait now, from what this session is doing."""
@@ -1115,12 +1183,86 @@ class Control:
         pending = (any(not a.future.done() for a in self._approvals.values())
                    or any(not q.future.done() for q in self._questions_pending.values()))
         viewer = self._viewer_at > 0 and now - self._viewer_at < VIEWER_WINDOW
+        if self.listening:
+            # The page is told nothing waits (0): a message is delivered as it
+            # is written. The READ still happens, slowly, as the check.
+            self._poll_s = 0.0
+            return RECONCILE_EVERY
         # Kept for the head, which the page reads on the next heartbeat. Not
         # written now: it is a hint, and a write per change of cadence would
         # be traffic spent announcing that traffic had stopped.
         self._poll_s = poll_interval(now - self._last_activity,
                                      pending=pending, viewer=viewer)
         return self._poll_s
+
+    def _listener_lost(self, why: str) -> None:
+        """Stop believing the listener NOW, and wake the reader that has been
+        sleeping ten minutes at a time on its word."""
+        was = self.listening
+        self._listen_at = 0.0
+        self._listen_why = why
+        self._poll_wake.set()
+        if was:
+            self.errors.append(f"listener: {why} — reading the inbox on a timer meanwhile")
+
+    async def _listener(self) -> None:
+        """Be told when the page writes. Ends only if this MCP cannot do it.
+
+        Runs beside `_poller`, never instead of it: the reader is what the
+        session falls back to the moment this stops answering, and what
+        checks this while it does.
+        """
+        failures = 0
+        while True:
+            try:
+                # Not through `_call`: that holds the lock every other call
+                # here waits on, and this one is MEANT to stay open. The
+                # server answers other calls while it waits.
+                outcome = await asyncio.wait_for(
+                    self._client.call("wait_for_responses", pub_id=self.link.pub_id,
+                                      cursor=self._listen_cursor, timeout_s=LISTEN_WAIT),
+                    timeout=LISTEN_WAIT + 20.0)
+            except asyncio.TimeoutError:
+                outcome = None
+                why = f"no answer in {LISTEN_WAIT + 20:.0f}s"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                outcome = None
+                why = f"{type(exc).__name__}: {exc}"
+            else:
+                why = "" if outcome.ok else str(outcome.error)
+            if outcome is not None and not outcome.ok and _is_unknown_tool(outcome.error):
+                # An MCP from before 2026-11-10. Not an error to retry: said
+                # once, where a person will see it, and the timer carries on.
+                self._listen_supported = False
+                self._listen_why = ("this Scivo MCP has no wait_for_responses "
+                                    "(before 2026-11-10) — `scivo update` adds it")
+                self._poll_wake.set()
+                print(f"\n  [scivo-control] {self._listen_why}.\n"
+                      "  Until then the page's messages are read on a timer, which "
+                      "is slower after a quiet spell and is billed per read.\n",
+                      flush=True)
+                return
+            reply = outcome.first if outcome is not None and outcome.ok else None
+            if not isinstance(reply, dict) or not reply.get("listening"):
+                # `listening: false` is the server saying its stream is not
+                # delivering: an empty answer from it means nothing. Asking
+                # again makes a new stream; until one answers, the timer reads.
+                self._listener_lost(why or str((reply or {}).get("why") or "not listening"))
+                failures += 1
+                await asyncio.sleep(min(60.0, 1.0 * 2 ** min(failures, 6)))
+                continue
+            failures = 0
+            self._listen_cursor = str(reply.get("cursor") or "")
+            regained = not self.listening and self._listen_trusted
+            self._listen_at = time.monotonic()
+            self._listen_why = ""
+            if regained:
+                self._poll_wake.set()       # the reader can go back to its slow check
+            rows = reply.get("rows") or []
+            if rows:
+                await self._intake(rows)
 
     async def _wait_for_next_poll(self, last: float) -> None:
         """Sleep until the next read is due — re-deciding if this side wakes.
@@ -1191,4 +1333,21 @@ class Control:
                 await asyncio.sleep(min(30.0, 0.5 * 2 ** failures))
                 continue
             failures = 0
-            await self._intake(outcome.items)
+            told = self.listening
+            acted = await self._intake(outcome.items)
+            if told and acted:
+                # The listener said it was delivering, and this read found
+                # something it had not delivered. Once can be a write landing
+                # in the same instant as the read; twice is a listener that
+                # cannot be the only thing between the page and the session.
+                self._listen_misses += 1
+                self.errors.append(
+                    f"listener: the reconcile read found {acted} thing(s) it had not "
+                    f"delivered (time {self._listen_misses})")
+                if self._listen_misses > LISTEN_MISSES_ALLOWED:
+                    self._listen_trusted = False
+                    self._listen_why = ("the listener missed changes the timer found — "
+                                        "not relied on for the rest of this session")
+                    self._poll_wake.set()
+                    print(f"\n  [scivo-control] {self._listen_why}. "
+                          "Messages still arrive; they are read on a timer.\n", flush=True)
