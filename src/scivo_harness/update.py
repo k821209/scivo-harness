@@ -420,7 +420,30 @@ def link_skills(config: ScivoConfig) -> tuple[bool, str]:
     code, output = _run([config.command, "-m", "co_scientist_local",
                          "install-skills", "--dir", str(config.root)],
                         env=config.child_env())
+    if code == 0:
+        output = (output + "\n" + link_guard(config)).strip()
     return code == 0, output[-400:]
+
+
+def link_guard(config: ScivoConfig) -> str:
+    """Wire the ssh provenance guard into this project for plain Claude Code.
+
+    A session started here does not need it — these rules are enforced in
+    process, and the guard stands down when it sees SCIVO_HARNESS. But the
+    same project is opened with `claude` too, and there nothing stopped a raw
+    `ssh host nohup …` until the MCP learned to install the guard (2026-11-11).
+    Never fatal: an MCP from before that does not know the host and says so,
+    and the skills were linked either way. What happened is returned, not
+    swallowed.
+    """
+    code, output = _run([config.command, "-m", "co_scientist_local",
+                         "install-hooks", "--host", "claude", "--dir", str(config.root)],
+                        env=config.child_env())
+    if code == 0:
+        return "ssh provenance guard installed for Claude Code (.claude/settings.local.json)"
+    if "invalid choice" in output:
+        return "ssh provenance guard not installed: this MCP is older than the installer"
+    return "ssh provenance guard not installed: " + (output.strip().splitlines() or ["no output"])[-1]
 
 
 def drop_inapplicable_warning(config: ScivoConfig, identity: dict) -> dict:

@@ -313,7 +313,12 @@ async def build(
         # can outlive an MCP update: after `git pull` the server had new
         # parameters and the session still saw the old schema. The CLI reads
         # this switch from its environment; off means every start discovers.
-        env={"MCP_DISCOVERY_CACHE": "false",
+        # SCIVO_HARNESS: a project wired for Claude Code carries the ssh
+        # provenance guard as a file hook (.claude/settings.local.json), and
+        # this session reads that file too. The guard stands down when it
+        # sees this — the rules are enforced here, in process (guardrails),
+        # and one command refused twice in two wordings helps nobody.
+        env={"MCP_DISCOVERY_CACHE": "false", "SCIVO_HARNESS": "1",
              "SCIVO_CLIENT_ID": session_client_id(), **endpoint.env},
         cwd=str(config.root),
         add_dirs=list(add_dirs or []),

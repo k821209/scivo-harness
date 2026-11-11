@@ -289,6 +289,24 @@ def link_skills(root: Path, result: Result, interpreter: str | None = None,
     else:
         result.warn("skill install failed; the MCP re-links them on startup. "
                     + (probe.stdout + probe.stderr).strip()[-200:])
+        return
+    # The ssh provenance guard, for when this project is opened with plain
+    # `claude` (a scivo session enforces the same rules itself). Same
+    # interpreter and env as the skills, for the same reason.
+    guard = subprocess.run(
+        [interpreter or sys.executable, "-m", "co_scientist_local", "install-hooks",
+         "--host", "claude", "--dir", str(root)],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    if guard.returncode == 0:
+        result.did("installed the ssh provenance guard for Claude Code "
+                   "(.claude/settings.local.json)")
+    elif "invalid choice" in guard.stderr + guard.stdout:
+        result.warn("ssh provenance guard not installed: this MCP is older than the "
+                    "installer — `scivo update` installs it")
+    else:
+        result.warn("ssh provenance guard not installed: "
+                    + (guard.stdout + guard.stderr).strip()[-200:])
 
 
 def point_at_checkout(root: Path, interpreter: str | None = None) -> str | None:
