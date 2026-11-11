@@ -260,6 +260,10 @@ def _tool_note(plan: ToolPlan) -> str:
             "were dropped; treat it as a snapshot, not something you can "
             "refresh. If a task needs any of it, say so and tell the user to "
             "run `/profile full`."
+            + ("\n\nThis is also a **read-only session**: the host's file tools "
+               "(Write, Edit, NotebookEdit) are absent too. Bash is here for "
+               "reading and is asked about every time; do not use it to change "
+               "anything." if plan.read_only_session else "")
         )
     lines = [
         "## Your tool surface is narrowed",
@@ -270,8 +274,12 @@ def _tool_note(plan: ToolPlan) -> str:
     ]
     if plan.read_only_session:
         lines.append(
-            "\nThis is a **read-only session** — every writing tool is absent. "
-            "Describe what you would change; do not claim to have changed it."
+            "\nThis is a **read-only session**. Every scivo tool that writes is "
+            "absent, and so are the host's file tools (Write, Edit, NotebookEdit). "
+            "Bash is still here, for reading — logs, listings, a quick count — and "
+            "the user is asked about every command; do not use it to change, move "
+            "or delete anything. Describe what you would change; do not claim to "
+            "have changed it."
         )
     missing_start = [n for n in SESSION_START_TOOLS if n in plan.dropped]
     if missing_start:

@@ -168,6 +168,17 @@ def kills_this_session(command: str) -> str | None:
     return None
 
 
+# An argument that says where a tool should WRITE a file on this machine.
+# Matched by shape rather than listed by tool: `get_asset`, `get_material`,
+# `get_export` and their cousins are named like reads, so they are approved
+# without a prompt — and each takes a destination the MODEL chooses, expands
+# `~`, and overwrites what is there. Nothing scoped them to the project the
+# way Write is scoped: a "read-only" call could replace `~/.bashrc` with the
+# bytes of a project file, unasked (review 2026-11-10). A tool added tomorrow
+# with a `dest_path` is covered the day it ships.
+DESTINATION_ARG = re.compile(r"^(?:dest|out|output|save|target)(?:_[a-z]+)*_(?:path|dir|file)$|^dest$")
+
+
 # Host tools that write. A read after one of these may return something new,
 # exactly as after a scivo write.
 HOST_WRITES = ("Edit", "Write", "NotebookEdit", "MultiEdit")
@@ -308,7 +319,10 @@ def is_scivo_write(tool_name: str) -> bool:
 class Guardrails:
     """Session-scoped state for the rules that need to count."""
 
-    def __init__(self) -> None:
+    def __init__(self, root: Any = None, extra_roots: Any = ()) -> None:
+        # Where this session may write without being asked: the project, and
+        # the directories the USER added on the command line.
+        self.roots = self._resolved([root, *list(extra_roots or ())]) if root else []
         self.adhoc_runs = 0
         self.blocked: list[str] = []
         self.repeats: dict[tuple[str, str], int] = {}
@@ -317,6 +331,74 @@ class Guardrails:
         # new_turn on purpose: a loop that retries once per turn is exactly
         # what the per-turn counters miss.
         self.failures: dict[tuple[str, str], list] = {}
+
+    @staticmethod
+    def _resolved(paths: list) -> list:
+        import pathlib
+
+        out = []
+        for path in paths:
+            try:
+                out.append(pathlib.Path(str(path)).expanduser().resolve())
+            except (OSError, ValueError):
+                continue
+        return out
+
+    def outside_project(self, tool_input: dict) -> list[tuple[str, str]]:
+        """(argument, resolved path) for each destination that leaves the
+        project. Relative paths are the project's own — that is the MCP
+        server's working directory — so only an absolute, `~` or `..` path
+        can be outside."""
+        import pathlib
+
+        if not self.roots:
+            return []
+        found = []
+        for key, value in (tool_input or {}).items():
+            if not isinstance(value, str) or not value or not DESTINATION_ARG.match(key):
+                continue
+            try:
+                path = pathlib.Path(value).expanduser()
+                if not path.is_absolute():
+                    path = self.roots[0] / path
+                path = path.resolve()
+            except (OSError, ValueError):
+                found.append((key, value))       # cannot be placed: not "inside"
+                continue
+            inside = False
+            for root in self.roots:
+                try:
+                    path.relative_to(root)
+                    inside = True
+                    break
+                except ValueError:
+                    continue
+            if not inside:
+                found.append((key, str(path)))
+        return found
+
+    async def on_destination(self, payload: Any, tool_use_id: str | None,
+                             context: Any) -> dict[str, Any]:
+        """Hold a tool that would write a file outside the project.
+
+        An ask, not a deny: saving an export to `~/Downloads` is a reasonable
+        thing to want, and the person is right there. What must not happen is
+        it happening unasked because the tool's name starts with `get_`.
+        """
+        name = str(payload.get("tool_name", ""))
+        if not name.startswith("mcp__"):
+            return {}               # the host's own file tools are scoped by the host
+        outside = self.outside_project(payload.get("tool_input") or {})
+        if not outside:
+            return {}
+        label = name.split("__")[-1]
+        where = "; ".join(f"{key} = {path}" for key, path in outside)
+        self.blocked.append(f"held: {label} writing outside the project")
+        return _ask(
+            f"`{label}` would write a file OUTSIDE this project ({where}). "
+            f"The project is {self.roots[0]}. It overwrites whatever is at that path. "
+            "Inside the project, or a directory added with --add-dir, it is not asked about."
+        )
 
     def new_turn(self) -> None:
         """Repetition is counted per turn: asking again next turn is fine."""
@@ -549,6 +631,7 @@ def build(rails: Guardrails) -> dict[str, list[HookMatcher]]:
                         "|mcp__scivo__update_project_skills",
                 hooks=[rails.on_memory_write],
             ),
+            HookMatcher(hooks=[rails.on_destination]),  # no matcher: every tool
             HookMatcher(hooks=[rails.on_any_tool]),   # no matcher: every tool
         ],
         # A failing command is only visible after it runs, and the loop this

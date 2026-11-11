@@ -1697,8 +1697,12 @@ class Repl:
         words = argument.split()
         if not words:
             always = sorted(scivo_tool_label(name) for name in (approver.always if approver else set()))
+            kinds = sorted(getattr(approver, "shell_rules", None) or ())
             self._say("\n  mode    " + self.mode
                       + "\n  always  " + (", ".join(always) if always else "(none)")
+                      + ("\n  shell   " + ", ".join(f"{kind} …" for kind in kinds) if kinds else "")
+                      + ("\n  shell   read-only session — every command is asked about"
+                         if getattr(approver, "read_only", False) else "")
                       + ui.dim("\n\n  /permissions default | acceptEdits | auto | plan"
                                "\n  /permissions always <tool>     ·   /permissions always -<tool>"
                                "\n  /dangerously-skip-permissions  ·   /dangerously-skip-permissions off\n"))
@@ -1714,7 +1718,14 @@ class Repl:
                 label = scivo_tool_label(name)
                 if remove:
                     approver.always.discard(name)
+                    if name in ("Bash", "Monitor"):
+                        # The kinds remembered by answering `a` go with it:
+                        # "asks again" has to be true of every command.
+                        approver.shell_rules.clear()
                     self._say(ui.dim(f"  {label}: asks again"))
+                elif name in ("Bash", "Monitor") and getattr(approver, "read_only", False):
+                    self._say(ui.yellow(f"  {label} is asked about every time in a read-only "
+                                        "session; restart without --read-only to change that."))
                 elif is_outward(name):
                     self._say(ui.yellow(f"  {label} reaches outside this machine and is approved one call "
                                         "at a time. /dangerously-skip-permissions stops all asking, if that is what you mean."))

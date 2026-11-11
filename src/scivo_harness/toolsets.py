@@ -76,6 +76,14 @@ PROFILES: dict[str, tuple[str, ...]] = {
 }
 
 
+# The host's own tools that change files. `--read-only` promised "no writing
+# tools at all" and removed only the scivo ones: Write and Edit stayed loaded,
+# in a session whose prompt told the model every writing tool was absent
+# (review 2026-11-10). Bash is NOT here — reading a log needs it — so in a
+# read-only session it stays and is asked about every time (permissions.py).
+HOST_FILE_WRITERS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
 @dataclass
 class ToolPlan:
     kept: list[str]
@@ -86,7 +94,13 @@ class ToolPlan:
 
     @property
     def disallowed(self) -> list[str]:
-        return [PREFIX + name for name in self.dropped]
+        """Everything this session must not carry. One list, read wherever
+        options are built — a second place that rebuilt it (a profile switch)
+        would otherwise hand the file tools back to a read-only session."""
+        out = [PREFIX + name for name in self.dropped]
+        if self.read_only_session:
+            out += list(HOST_FILE_WRITERS)
+        return out
 
     @property
     def auto_approved(self) -> list[str]:

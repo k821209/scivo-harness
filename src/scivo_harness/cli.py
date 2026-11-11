@@ -65,7 +65,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", default="full", choices=sorted(PROFILES),
                         help="which domains of the scivo tool surface to load (default: full)")
     parser.add_argument("--read-only", action="store_true",
-                        help="load no writing tools at all")
+                        help="load no scivo tool that writes and none of the host's file "
+                             "tools (Write, Edit). Bash stays, for reading, and asks about "
+                             "every command — unless you also pass a permission mode "
+                             "that stops asking")
     parser.add_argument("--provider", default=None,
                         help="model endpoint for this run (default: the project's choice, else anthropic)")
     parser.add_argument("--model", default=None,
@@ -201,6 +204,10 @@ async def _doctor(args) -> int:
     print(f"provider    {provider.name} → {provider.base_url or 'api.anthropic.com'}"
           f"   {ui.dim(args.provider_reason)}")
     print(f"auth        {auth_source(provider)}")
+    from .providers import routing_note
+    stray = routing_note(provider, api_billing=bool(getattr(args, "api_billing", False)))
+    if stray:
+        print(ui.yellow(f"routing     {stray}"))
     # A provider that silently got the lean session was the whole bug: the
     # profile is a line in the report now, with the reason it was chosen.
     kit = ("lean — short guide, pruned tool kit" if provider.lean_profile

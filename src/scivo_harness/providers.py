@@ -29,6 +29,19 @@ BUILTIN_NAME = "anthropic"
 # not permitted either — so the harness stays out of the way entirely.
 API_KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
+# Variables that decide WHERE the CLI sends a request. The CLI inherits this
+# process's environment and `options.env` only adds to it, so one of these
+# left exported in a shell sent a session somewhere the harness never chose
+# while `scivo doctor` reported "anthropic → api.anthropic.com". Checked
+# against the real CLI (2.1.321, 2026-11-11): a stray ANTHROPIC_BASE_URL made
+# a one-line prompt hang in retries, CLAUDE_CODE_USE_BEDROCK=1 failed it with
+# "Could not load AWS credentials", and each set to "" behaved as unset.
+# Where a session goes is the provider's to say, so these are blanked unless
+# the provider sets them itself — or the user asked for their shell's own
+# billing with `--api-billing`, which is a decision to be driven by the
+# environment.
+ROUTING_VARS = ("ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+
 # How big the model behind an endpoint is, which decides the session profile
 # and nothing else. See Provider.lean_profile.
 SIZES = ("small", "large")
@@ -118,6 +131,8 @@ class Provider:
         if self.base_url or not api_billing:
             for var in API_KEY_VARS:
                 out[var] = ""
+            for var in ROUTING_VARS:
+                out[var] = ""
         if self.base_url:
             out["ANTHROPIC_BASE_URL"] = self.base_url
         token = self.auth_token
@@ -138,6 +153,32 @@ class Provider:
             out["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(self.max_output_tokens)
         out.update(self.env)
         return out
+
+
+def ignored_routing(provider: Provider, *, api_billing: bool = False) -> list[str]:
+    """Routing variables set in this shell that the session will NOT follow.
+
+    Said out loud because the alternative reads as a bug the other way round:
+    someone who exported ANTHROPIC_BASE_URL on purpose, expecting the session
+    to use it, would otherwise find it going to Anthropic with nothing to say
+    why. A provider that sets a variable in its own `env` table is following
+    it, so that one is not listed.
+    """
+    if api_billing and not provider.base_url:
+        return []
+    return [var for var in ROUTING_VARS
+            if os.environ.get(var) and var not in provider.env
+            and not (var == "ANTHROPIC_BASE_URL" and provider.base_url)]
+
+
+def routing_note(provider: Provider, *, api_billing: bool = False) -> str | None:
+    ignored = ignored_routing(provider, api_billing=api_billing)
+    if not ignored:
+        return None
+    where = provider.base_url or "api.anthropic.com"
+    return (f"{', '.join('$' + var for var in ignored)} is set in this shell and is IGNORED: "
+            f"the `{provider.name}` provider goes to {where}. To send a session somewhere "
+            "else, add it to providers.toml (`scivo providers --init`).")
 
 
 def probe_token(provider: Provider) -> str | None:
@@ -534,13 +575,18 @@ def prepare(provider: Provider, timeout: float = 30.0, *, api_billing: bool = Fa
     """
     env = provider.resolve_env(api_billing=api_billing)
     if not provider.base_url:
-        return Endpoint(env)
+        # Printed at session start, which is where someone who exported the
+        # variable on purpose will be looking when it does not take effect.
+        return Endpoint(env, note=routing_note(provider, api_billing=api_billing))
     reachable(provider)
     window = context_window(provider)
     budget_note: str | None = None
     if window:
         budget, budget_note = context_budget(window, provider.max_output_tokens)
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(budget)
+    stray = routing_note(provider, api_billing=api_billing)
+    if stray:
+        budget_note = f"{budget_note} {stray}" if budget_note else stray
     verdict = system_messages_ok(provider.base_url, provider, timeout)
     if verdict is not False:
         # The budget note rides out on the endpoint, which the session prints

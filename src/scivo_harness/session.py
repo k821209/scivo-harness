@@ -248,7 +248,7 @@ async def build(
     endpoint: Endpoint = await asyncio.to_thread(
         lambda: prepare(chosen, api_billing=api_billing))
     plan = toolsets.plan(tool_names, profile=profile, read_only=read_only)
-    rails = guardrails.Guardrails()
+    rails = guardrails.Guardrails(root=config.root, extra_roots=add_dirs or [])
 
     # Without a callback there is no channel to ask on, so anything outside
     # `allowed_tools` is denied with a message nobody can act on. An explicit
@@ -258,7 +258,8 @@ async def build(
     # Always installed, whatever mode the session starts in: the mode can now
     # change mid-session, and a session switched back to "default" with no
     # callback would deny everything with a message nobody can act on.
-    approver = Approvals() if interactive else Explain(permission_mode, str(config.root))
+    approver = (Approvals(read_only=read_only) if interactive
+                else Explain(permission_mode, str(config.root)))
 
     mcp_server: dict[str, Any] = {
         "type": "stdio",
