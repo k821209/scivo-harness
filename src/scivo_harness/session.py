@@ -99,6 +99,9 @@ LOCAL_SCIVO_TOOLS = (
 # in the core list above.
 LOCAL_DOMAIN_LIMIT = 60
 
+# The guide is tens of kilobytes. Anything this short is some other answer.
+GUIDE_FLOOR = 5000
+
 
 @dataclass
 class Session:
@@ -214,9 +217,24 @@ async def survey(config: ScivoConfig, *, with_guide: bool) -> tuple[Briefing, li
         names = [tool.name for tool in tools.tools]
         guide = None
         if with_guide:
-            outcome = await client.call("project_guide")
-            if outcome and isinstance(outcome.first, str):
-                guide = outcome.first
+            # `briefed`: the calls the guide's session-start section lists
+            # are the ones `gather` has just made, so the guide is asked to
+            # say what their results mean rather than to list them again.
+            # An MCP from before 2026-11-11 does not know the argument and
+            # refuses it; that one is asked the old way, and `prompt.build`
+            # sees the protocol in the text and frames it as before.
+            outcome = await client.call("project_guide", briefed=True)
+            if not outcome:
+                outcome = await client.call("project_guide")
+            text = outcome.first if outcome and isinstance(outcome.first, str) else None
+            if text and len(text) >= GUIDE_FLOOR:
+                guide = text
+            elif text:
+                # Something came back and it is not a guide. Said, rather
+                # than put in the prompt under "the authoritative conventions".
+                briefing.errors.append(
+                    f"project_guide returned {len(text)} characters, which is not the guide: "
+                    f"{text[:160]!r}")
             elif not outcome:
                 briefing.errors.append(f"project_guide: {outcome.error}")
         return briefing, names, guide

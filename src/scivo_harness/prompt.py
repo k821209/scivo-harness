@@ -245,7 +245,12 @@ SESSION_START_TOOLS = (
 )
 
 
-def _tool_note(plan: ToolPlan) -> str:
+# How a guide that still PRESCRIBES the protocol can be told from one that
+# was asked for `briefed` and says what the results mean instead.
+PRESCRIBES = "1. Call `mcp__scivo__whoami()`"
+
+
+def _tool_note(plan: ToolPlan, guide: str | None = None) -> str:
     if not plan.dropped:
         return ""
     if not plan.kept:
@@ -286,7 +291,10 @@ def _tool_note(plan: ToolPlan) -> str:
             "have changed it."
         )
     missing_start = [n for n in SESSION_START_TOOLS if n in plan.dropped]
-    if missing_start:
+    # Only when the guide in this prompt actually lists those calls: a briefed
+    # guide does not, and "the guide below prescribes a protocol" would then
+    # be describing a section that is not there.
+    if missing_start and (guide is None or PRESCRIBES in guide):
         lines.append(
             "\nThe project guide below prescribes a session-start protocol, and "
             "this profile does not carry all of it. ABSENT here: "
@@ -313,7 +321,7 @@ def build(
     """The `append` half of the system prompt, stable sections first."""
     parts = [CHARTER]
 
-    note = _tool_note(plan)
+    note = _tool_note(plan, guide)
     if note:
         parts.append(note)
 

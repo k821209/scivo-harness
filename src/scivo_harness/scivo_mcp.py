@@ -101,11 +101,18 @@ class ScivoClient:
             return ToolOutcome(False, error=f"{type(exc).__name__}: {exc}")
 
         blocks = _text_blocks(result)
-        if getattr(result, "isError", False):
+        # mcp 1.x calls the flag `isError`, 2.x `is_error` — and only the
+        # first was read here. Under 2.x every failed call therefore came back
+        # as a SUCCESS whose first item was the error text: an argument the
+        # server refused ("Error executing tool …: Extra inputs are not
+        # permitted") was handed on as the project guide, 0.3 KB of it, and
+        # the session would have run with no conventions at all. Found by
+        # running the fallback against a real older server, not the fake.
+        if getattr(result, "is_error", False) or getattr(result, "isError", False):
             return ToolOutcome(False, error="\n".join(blocks) or "tool reported an error")
         # The server reports refusals as an ordinary result whose text starts
         # with "Error:", so a successful transport is not a successful call.
-        if len(blocks) == 1 and blocks[0].startswith(("Error:", "Unknown tool:")):
+        if len(blocks) == 1 and blocks[0].startswith(("Error:", "Unknown tool:", "Error executing tool")):
             return ToolOutcome(False, error=blocks[0])
         return ToolOutcome(True, items=[_unwrap(b) for b in blocks])
 

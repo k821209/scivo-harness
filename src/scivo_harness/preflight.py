@@ -269,6 +269,12 @@ def to_markdown(brief: Briefing) -> str:
     if brief.identity.get("install_warning"):
         out.append(f"**Install warning from the MCP — tell the user before anything else:** "
                    f"{brief.identity['install_warning']}")
+    if brief.identity.get("stale_process"):
+        out.append(
+            "**Stale process — tell the user before anything else:** the MCP this session calls "
+            "is not the code on disk"
+            + (f" ({brief.identity['stale_hint']})" if brief.identity.get("stale_hint") else "")
+            + ". Only a restart clears it; until then an empty lint is not a pass.")
     if brief.identity.get("install_note"):
         out.append(f"_Install note from the MCP (no action needed): {brief.identity['install_note']}_")
     if brief.identity.get("key_scope_note"):
