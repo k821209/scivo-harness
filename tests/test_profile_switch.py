@@ -103,6 +103,8 @@ def _repl(monkeypatch, profile="full", session_id="sess-1", read_only=False,
     stub._say = stub.said.append
     stub._stop_pump = lambda: asyncio.sleep(0)
     stub._start_pump = lambda: asyncio.sleep(0)
+    stub._swap_client = Repl._swap_client.__get__(stub)
+    stub._resumed = Repl._resumed.__get__(stub)
     for name in ("_profile", "_profile_rows"):
         setattr(stub, name, getattr(Repl, name).__get__(stub))
     import scivo_harness.repl as repl_mod
@@ -332,3 +334,39 @@ def test_a_lean_session_keeps_its_narrowed_host_tools(monkeypatch):
     stub = _repl(monkeypatch, profile="full", local=True, lean=True)
     asyncio.run(stub._profile("writing"))
     assert _built(stub).tools == list(LOCAL_HOST_TOOLS)
+
+
+def test_a_failed_switch_comes_back_into_the_same_conversation(monkeypatch):
+    """The fallback reconnected with the options as they stood, whose
+    `resume` is whatever the session was STARTED with — usually nothing. So
+    "still on full" meant "on full, in an empty conversation", and nothing
+    said so (review 2026-11-10)."""
+    stub = _repl(monkeypatch, fail_connect=True)
+    assert stub.session.options.resume is None          # a session started fresh
+    asyncio.run(stub._profile("video"))
+    fallback = stub.clients[-1]
+    assert fallback.connected and fallback.options.resume == "sess-1"
+    assert fallback.options.continue_conversation is False
+    said = ANSI.sub("", "\n".join(stub.said))
+    assert "still on full" in said and "the conversation continues" in said
+
+
+def test_a_failed_switch_with_no_session_to_return_to_says_so(monkeypatch):
+    stub = _repl(monkeypatch, fail_connect=True, session_id=None)
+    asyncio.run(stub._profile("video"))
+    said = ANSI.sub("", "\n".join(stub.said))
+    assert "NEW conversation" in said
+
+
+def test_a_dead_cli_cannot_fail_the_step_that_replaces_it(monkeypatch):
+    """One copy of this sequence suppressed a failed disconnect and two did
+    not: a switch away from a CLI that had already gone raised on the way out
+    and never started the new one."""
+    stub = _repl(monkeypatch)
+
+    async def gone():
+        raise RuntimeError("Cannot write to terminated process")
+    stub.client.disconnect = gone
+    asyncio.run(stub._profile("video"))
+    assert stub.clients[-1].connected
+    assert stub.session.plan.profile == "video"

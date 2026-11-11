@@ -1474,22 +1474,18 @@ class Repl:
         if endpoint.note:
             self._say(ui.dim(f"  · {endpoint.note}"))
         self._say(ui.dim(f"  switching to {target_name} ({model}) — this starts a new conversation…"))
-        await self._stop_pump()
-        await self.client.disconnect()
-        self.client = ClaudeSDKClient(options=options)
         try:
-            await self.client.connect()
+            await self._swap_client(options)
         except Exception as exc:  # noqa: BLE001
             endpoint.close()
             self._say(ui.red(f"  could not start on {target_name}: {exc}"))
-            self.client = ClaudeSDKClient(options=self.session.options)
-            await self.client.connect()
-            await self._start_pump()
-            self._say(ui.dim(f"  back on {provider.name} ({self.session.model}), in a new conversation\n"))
+            # Back where it was — and INTO the conversation it was having,
+            # which is on disk and did not go anywhere.
+            await self._swap_client(self._resumed(self.session.options))
+            kept = ("the conversation continues" if self.session_id
+                    else "in a new conversation — there was no session id to return to")
+            self._say(ui.dim(f"  back on {provider.name} ({self.session.model}), {kept}\n"))
             return
-        await self._start_pump()
-        if self.mode != (options.permission_mode or "default"):
-            await self.client.set_permission_mode(self.mode)
         if self.session.endpoint is not None:
             self.session.endpoint.close()
         self.session.endpoint = endpoint
@@ -1501,6 +1497,42 @@ class Repl:
             self.control.model = model
         hint = ""
         self._say(ui.green(f"  now on {target_name} · {model}") + ui.dim(f"\n{hint}\n" if hint else "\n"))
+
+    def _resumed(self, options):
+        """`options`, pointed back at THIS conversation when there is one.
+
+        Options are a snapshot from when they were built, and `resume` in
+        them is whatever the session was started with — usually nothing. A
+        fallback that reconnected with them as they stood came back into an
+        EMPTY conversation, and `/profile` said only "still on full".
+        """
+        if not self.session_id:
+            return options
+        from dataclasses import replace
+
+        return replace(options, resume=self.session_id, continue_conversation=False)
+
+    async def _swap_client(self, options) -> None:
+        """Replace the CLI process with one started from `options`.
+
+        The one place this is done. A model switch, a profile switch and a
+        reconnect each had their own copy, and the copies had drifted: one
+        suppressed a failed disconnect and two did not, so a dead CLI could
+        fail the very step meant to replace it. Raises what `connect` raises,
+        and then there is NO live client — the caller decides what to fall
+        back to.
+        """
+        await self._stop_pump()
+        with contextlib.suppress(Exception):     # the old process may already be gone
+            await self.client.disconnect()
+        self.client = ClaudeSDKClient(options=options)
+        await self.client.connect()
+        await self._start_pump()
+        if self.mode != (options.permission_mode or "default"):
+            try:
+                await self.client.set_permission_mode(self.mode)
+            except Exception as exc:  # noqa: BLE001 — connected; the mode is worth a line, not the session
+                self._say(ui.yellow(f"  could not restore permission mode {self.mode}: {exc}"))
 
     async def _reconnect(self, exc: Exception) -> bool:
         """Start a new CLI on the same conversation. False means give up.
@@ -1526,25 +1558,14 @@ class Repl:
                              "reconnect to. Start again with `scivo`.\n"))
             return False
         self._say(ui.dim(f"  reconnecting to {self.session_id[:8]}…"))
-        await self._stop_pump()
-        with contextlib.suppress(Exception):
-            await self.client.disconnect()
-        from dataclasses import replace
-
-        options = replace(self.session.options, resume=self.session_id,
-                          continue_conversation=False)
-        self.client = ClaudeSDKClient(options=options)
+        options = self._resumed(self.session.options)
         try:
-            await self.client.connect()
+            await self._swap_client(options)
         except Exception as again:  # noqa: BLE001
             self._say(ui.red(f"  could not reconnect: {again}"))
             self._say(ui.dim(f"  the conversation is kept — "
                              f"`scivo resume {self.session_id[:8]}`\n"))
             return False
-        await self._start_pump()
-        if self.mode != (options.permission_mode or "default"):
-            with contextlib.suppress(Exception):
-                await self.client.set_permission_mode(self.mode)
         self.session.options = options
         self._say(ui.green("  reconnected") + ui.dim(" — the conversation continues. "
                                                      "The turn that was running did not finish; "
@@ -1640,22 +1661,19 @@ class Repl:
             resume=self.session_id,
         )
         self._say(ui.dim(f"\n  switching to {wanted} — {plan.summary()}…"))
-        await self._stop_pump()
-        await self.client.disconnect()
-        self.client = ClaudeSDKClient(options=options)
         try:
-            await self.client.connect()
+            await self._swap_client(options)
         except Exception as exc:  # noqa: BLE001
             self.session.plan = before_plan
             self._say(ui.red(f"  could not switch profile: {exc}"))
-            self.client = ClaudeSDKClient(options=before_options)
-            await self.client.connect()
-            await self._start_pump()
-            self._say(ui.dim(f"  still on {before_plan.profile}\n"))
+            # `before_options` as they stood would resume whatever the session
+            # was STARTED with — usually nothing — so "still on full" used to
+            # mean "on full, in an empty conversation", with no word of it.
+            await self._swap_client(self._resumed(before_options))
+            kept = ("the conversation continues" if self.session_id
+                    else "in a NEW conversation — there was no session id to return to")
+            self._say(ui.dim(f"  still on {before_plan.profile}; {kept}\n"))
             return
-        await self._start_pump()
-        if self.mode != (options.permission_mode or "default"):
-            await self.client.set_permission_mode(self.mode)
         self.session.options = options
         kept = ("the conversation continues" if self.session_id
                 # Said plainly rather than discovered: without an id to resume,

@@ -52,6 +52,8 @@ def _repl(monkeypatch, session_id="sess-1", reconnects=True):
     stub._say = stub.said.append
     stub._stop_pump = lambda: asyncio.sleep(0)
     stub._start_pump = lambda: asyncio.sleep(0)
+    stub._swap_client = Repl._swap_client.__get__(stub)
+    stub._resumed = Repl._resumed.__get__(stub)
     stub.client = DeadClient()
     stub._reconnect = Repl._reconnect.__get__(stub)
     import scivo_harness.repl as repl_mod
