@@ -574,8 +574,6 @@ async def _shim(args) -> int:
 
 
 async def _providers(args) -> int:
-    from pathlib import Path
-
     if args.show_example:
         print(example_text(), end="")
         return 0

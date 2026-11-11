@@ -1,0 +1,32 @@
+# The tests were only ever run by whoever remembered to. This runs them on
+# every push and pull request, against the dependencies a fresh install gets.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint (the package; a warning here is an unused import or a dead name)
+        run: python -m pyflakes src
+      - name: Test
+        # --timeout: a test that hangs must FAIL. One did, locally, and a run
+        # that never finishes reads as a run still in progress.
+        # -rs: every skip is printed with its reason, so "N skipped" cannot
+        # hide a whole file the way one did for months.
+        run: python -m pytest -q -rs --timeout=120

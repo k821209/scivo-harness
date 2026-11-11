@@ -38,9 +38,7 @@ OUTWARD = ("youtube_", "publish_page", "update_publication", "add_passcode",
            "submit_remote_job", "kill_remote_job", "launch_local_job")
 
 
-from .shellread import (  # noqa: F401 — re-exported: this is where callers look
-    SHELL_TOOLS, shell_allowed, shell_parts, shell_rule, shell_rules,
-)
+from .shellread import SHELL_TOOLS, shell_allowed, shell_rules
 
 
 def full_command(tool_name: str, payload: dict[str, Any]) -> str | None:

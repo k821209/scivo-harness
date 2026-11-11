@@ -23,6 +23,13 @@ dependencies = [
     "co-scientist-local @ git+https://github.com/k821209/co-scientist-mcp-public.git#subdirectory=apps/local-mcp",
 ]
 
+[project.optional-dependencies]
+# What the tests need. They were run for months from a venv somebody had
+# installed pytest into by hand; a fresh clone had no way to know. Pillow is
+# here because three image tests are skipped without it — and a suite that
+# skips is a suite that has not run those.
+dev = ["pytest>=8", "pytest-asyncio", "pytest-timeout", "pyflakes", "pillow"]
+
 [project.scripts]
 scivo = "scivo_harness.cli:main"
 
