@@ -97,3 +97,88 @@ def test_a_list_that_fits_claims_nothing_is_missing():
     brief.todos = [{"text": f"do {i}", "status": "open"} for i in range(preflight.TODOS_SHOWN)]
     markdown = preflight.to_markdown(brief)
     assert "NOT shown" not in markdown and "not shown" not in markdown
+
+
+# ── what the briefing repeats, and what it carries for nobody ───────────────
+# Measured 2026-11-11 on a real project: one 1.2 KB to-do text three times
+# (once under each of two papers as a raw record, once in the to-do list), and
+# 6 KB of notes for thirteen servers on a project bound to none of them.
+
+PROMISE = {"name": "open_promises", "label": "Work promised in a to-do and still open",
+           "kind": "promise", "ok": False, "stale": [{"text": "x" * 900}],
+           "message": "1 to-do(s) open for 3+ days — measure max RSS. Nothing has run since."}
+
+
+def _two_papers(violations_a, violations_b):
+    from scivo_harness.preflight import Briefing, PaperBrief
+    brief = Briefing(identity={"project_id": "p"})
+    brief.papers = [PaperBrief(slug="a", requirement_violations=violations_a),
+                    PaperBrief(slug="b", requirement_violations=violations_b)]
+    return brief
+
+
+def test_a_project_wide_violation_is_written_out_once():
+    out = preflight.to_markdown(_two_papers([PROMISE], [PROMISE]))
+    assert out.count("measure max RSS") == 1
+    assert "the same as under `a`" in out
+    # The record behind it is not dumped: the sentence is what the model needs.
+    assert "xxxxxxxx" not in out and "'kind'" not in out
+
+
+def test_a_violation_of_one_paper_is_not_mistaken_for_the_other_papers():
+    over = lambda n: {"name": "abstract_words", "label": "Abstract length",  # noqa: E731
+                      "message": f"abstract {n}/150 words"}
+    out = preflight.to_markdown(_two_papers([over(178)], [over(201)]))
+    assert "abstract 178/150 words" in out and "abstract 201/150 words" in out
+    assert "the same as under" not in out
+
+
+def test_a_violation_in_a_shape_nobody_planned_for_is_still_shown():
+    out = preflight.to_markdown(_two_papers(["figures 9/6"], [{"limit": 6, "actual": 9}]))
+    assert "figures 9/6" in out
+    assert "'actual': 9" in out
+
+
+def _servers(bound):
+    from scivo_harness.preflight import Briefing
+    brief = Briefing(identity={"project_id": "p"})
+    brief.servers = [
+        {"alias": "here", "host": "h1", "cores": 8, "notes": "port 2244.\n" + "shared machine. " * 30},
+        {"alias": "there", "host": "h2", "cores": 64, "notes": "EBI egress 43 B/s — do not download here.\n" + "more. " * 100},
+    ]
+    brief.bound_servers = bound
+    return brief
+
+
+def test_a_server_this_project_does_not_use_shows_the_first_line_of_its_notes():
+    out = preflight.to_markdown(_servers({"here"}))
+    assert "shared machine. shared machine." in out            # bound: the notes
+    assert "EBI egress 43 B/s — do not download here." in out  # elsewhere: the first line
+    assert "more. more." not in out
+    assert "chars total" in out and "get_server(alias)" in out
+    assert "on 1 of these 2" in out
+
+
+def test_a_dataset_on_a_server_counts_as_using_it():
+    brief = _servers(set())
+    brief.datasets = [{"name": "d", "server_alias": "there", "path": "/x"}]
+    assert "more. more." in preflight.to_markdown(brief)
+
+
+def test_bindings_that_could_not_be_read_hide_nothing():
+    """Unknown is not "none": every note is shown, as before."""
+    out = preflight.to_markdown(_servers(None))
+    assert "shared machine. shared machine." in out and "more. more." in out
+    assert "get_server(alias)" not in out
+
+
+def test_a_long_todo_is_cut_and_says_where_the_rest_is():
+    from scivo_harness.preflight import Briefing, TODO_BUDGET, to_markdown
+    brief = Briefing(identity={"project_id": "p"})
+    brief.todos = [{"status": "open", "text": "Review findings. " + "detail " * 400},
+                   {"status": "open", "text": "measure max RSS"}]
+    out = to_markdown(brief)
+    assert "Review findings." in out and "measure max RSS" in out
+    assert out.count("detail") < TODO_BUDGET // 7 + 2
+    assert "chars — `list_todos()` for the rest" in out
+    assert out.count("list_todos()") == 1          # the short one claims nothing is missing

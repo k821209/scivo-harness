@@ -20,6 +20,15 @@ from .scivo_mcp import ScivoClient, ToolOutcome
 
 MEMORY_BUDGET = 6000  # chars; memory is a curated digest, not a log
 NOTE_BUDGET = 400
+# A server this project has no working directory or dataset on gets the first
+# line of its notes; one it does gets them to NOTE_BUDGET. The registry is the
+# whole ACCOUNT's, and thirteen machines' notes came to 6 KB on a project that
+# computes on none of them (review 2026-11-11).
+NOTE_ELSEWHERE = 160
+VIOLATION_BUDGET = 280
+# A to-do is a line of work, and some are written as a page of findings. The
+# start of it says what it is; `list_todos()` has the rest, and the cut says so.
+TODO_BUDGET = 600
 # How many of each list the briefing carries. A cut is always SAID, with the
 # call that returns the rest: the briefing also tells the model not to repeat
 # the session-start calls, so a list cut in silence is a list the model
@@ -77,6 +86,9 @@ class Briefing:
     # question is work waiting for this session, the agent's own is work
     # waiting for the reader. One number would have the session nag itself.
     study_questions: dict[str, Any] = field(default_factory=dict)
+    # Aliases this project has a working directory on. None: the bindings
+    # could not be read — which is not "none", and is rendered as not knowing.
+    bound_servers: set[str] | None = None
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -95,6 +107,27 @@ class Briefing:
 def _clip(text: Any, limit: int) -> str:
     text = "" if text is None else str(text)
     return text if len(text) <= limit else text[:limit].rstrip() + f" …[{len(text)} chars total]"
+
+
+def _violation(violation: Any, slug: str, said: dict[str, str]) -> str:
+    """One requirement that is not met, as a sentence — once.
+
+    `check_requirements` runs per paper, and some of its checks are about the
+    PROJECT (a to-do left open for days). Those came back identical under
+    every paper, and were printed as the raw record each time: one 1.2 KB
+    to-do text, three times in one briefing, counting the to-do list itself.
+    The second paper now points at the first. Nothing is dropped — a shape
+    this does not recognise is printed as it came, clipped.
+    """
+    if isinstance(violation, dict) and (violation.get("message") or violation.get("label")):
+        label = str(violation.get("label") or violation.get("name") or "requirement")
+        message = str(violation.get("message") or "")
+        key = f"{violation.get('name')}\x00{message}"
+        if key in said and said[key] != slug:
+            return f"{label}: the same as under `{said[key]}` (a project-wide check)."
+        said.setdefault(key, slug)
+        return f"{label}: {_clip(message, VIOLATION_BUDGET)}" if message else label
+    return _clip(violation, VIOLATION_BUDGET)
 
 
 def _doc_content(outcome: ToolOutcome) -> str:
@@ -129,7 +162,7 @@ async def gather(client: ScivoClient, config: ScivoConfig) -> Briefing:
 
     # Project-wide context: one round trip each, all independent.
     (memory, skills, decisions, servers, datasets, todos, papers,
-     questions) = await asyncio.gather(
+     questions, workdirs) = await asyncio.gather(
         client.call("get_project_memory"),
         client.call("get_project_skills"),
         client.call("list_decisions"),
@@ -141,6 +174,8 @@ async def gather(client: ScivoClient, config: ScivoConfig) -> Briefing:
         # is the one kind of waiting work that lives nowhere near a paper, so
         # nothing else in this briefing would have shown it.
         client.call("count_open_study_questions"),
+        # Which of the account's servers THIS project computes on.
+        client.call("list_project_workdirs"),
     )
     brief.memory = _doc_content(memory)
     brief.skills = _doc_content(skills)
@@ -148,6 +183,12 @@ async def gather(client: ScivoClient, config: ScivoConfig) -> Briefing:
     brief.servers = servers.items
     brief.datasets = datasets.items
     brief.todos = [t for t in todos.items if str(_get(t, "status", "")) != "done"]
+    if workdirs:
+        brief.bound_servers = {str(_get(w, "server_alias")) for w in workdirs.items
+                               if _get(w, "server_alias")}
+    else:
+        # Not fatal, and not "no bindings": every note is then shown in full.
+        brief.errors.append(f"list_project_workdirs: {workdirs.error}")
     counts = questions.first if questions else None
     brief.study_questions = counts if isinstance(counts, dict) else {}
 
@@ -273,6 +314,7 @@ def to_markdown(brief: Briefing) -> str:
         out.append("_none recorded._")
 
     out += ["", "## Papers", ""]
+    said: dict[str, str] = {}    # a violation already written out, and under which paper
     if brief.papers:
         for paper in brief.papers:
             bits = [f"**`{paper.slug}`**"]
@@ -290,8 +332,10 @@ def to_markdown(brief: Briefing) -> str:
             unrebutted = paper.triage.get("rejected_without_rationale")
             if unrebutted:
                 out.append(f"  - {unrebutted} rejected comment(s) with no rationale — these block a clean export.")
+            for violation in paper.requirement_violations:
+                out.append("  - requirement not met — " + _violation(violation, paper.slug, said))
             if paper.requirement_violations:
-                out.append(f"  - journal requirement violations: {paper.requirement_violations}")
+                pass   # said above, one line each
             elif not paper.requirements_configured and paper.journal:
                 out.append(f"  - no requirements captured for {paper.journal} — suggest `/journal-requirements`.")
             if paper.findings:
@@ -317,6 +361,18 @@ def to_markdown(brief: Briefing) -> str:
 
     out += ["", "## Compute registry (the Runs tab's inventory — NOT project memory)", ""]
     if brief.servers:
+        here = brief.bound_servers
+        if here is not None:
+            here = here | {str(_get(d, "server_alias")) for d in brief.datasets if _get(d, "server_alias")}
+            elsewhere = sum(1 for s in brief.servers if _get(s, "alias") not in here)
+            if elsewhere:
+                out.append(
+                    f"_The registry is the whole account's. This project has a working directory or "
+                    f"a dataset on {len(brief.servers) - elsewhere} of these {len(brief.servers)}; "
+                    f"the other {elsewhere} show the first line of their notes. Before using one of "
+                    f"those, read `get_server(alias)` — the notes hold measured facts (ports, "
+                    f"egress, shared-use rules)._")
+                out.append("")
         for server in brief.servers:
             alias = _get(server, "alias", "?")
             gpus = _get(server, "gpus", 0) or 0
@@ -327,8 +383,14 @@ def to_markdown(brief: Briefing) -> str:
                 line += f" · workdir `{workdir}`"
             out.append(line)
             note = _get(server, "notes")
-            if note:
+            if note and (here is None or alias in here):
                 out.append(f"  - {_clip(note, NOTE_BUDGET)}")
+            elif note:
+                first = str(note).strip().split("\n", 1)[0]
+                short = _clip(first, NOTE_ELSEWHERE)
+                if len(short) < len(str(note).strip()) and "chars total" not in short:
+                    short += f" …[{len(str(note))} chars total]"
+                out.append(f"  - {short}")
     else:
         out.append("_no servers registered._")
 
@@ -344,8 +406,11 @@ def to_markdown(brief: Briefing) -> str:
 
     if brief.todos:
         out += ["", "## Open to-dos", ""]
-        out += [f"- [{_get(t, 'status', 'todo')}] {_get(t, 'text', t)}"
-                for t in brief.todos[:TODOS_SHOWN]]
+        for t in brief.todos[:TODOS_SHOWN]:
+            text = str(_get(t, "text", t))
+            shown = text if len(text) <= TODO_BUDGET else (
+                text[:TODO_BUDGET].rstrip() + f" …[{len(text)} chars — `list_todos()` for the rest]")
+            out.append(f"- [{_get(t, 'status', 'todo')}] {shown}")
         more = len(brief.todos) - TODOS_SHOWN
         if more > 0:
             out.append(f"- …and {more} more open to-do(s) not shown — `list_todos()`.")
