@@ -41,6 +41,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from . import running
 from .config import ScivoConfig
 from .netlog import Tally
 from .scivo_mcp import ScivoClient, connect
@@ -1141,6 +1142,13 @@ class Control:
                                                if self.events else None),
                              "project": self.project_name, "project_id": self.project_id,
                              "model": self.model,
+                             # What this PROCESS is running — the harness
+                             # commit it loaded and the MCP build it started
+                             # with (see running.py). The operator's usage
+                             # watch lists these, so "did the update take?"
+                             # is read off a screen instead of off uptimes.
+                             "harness": running.HARNESS or None,
+                             "mcp": getattr(self, "mcp_version", None),
                              # How long a message typed on the page may wait
                              # before this side reads it, so the page can say
                              # so instead of showing "sending…" at a session

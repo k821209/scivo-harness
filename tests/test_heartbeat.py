@@ -149,3 +149,31 @@ def test_the_page_judges_silence_by_that_field():
     """Two halves of one protocol in two languages."""
     page = C.page_html()
     assert "head.beat_every" in page
+
+
+# ── the head says what this process is running ─────────────────────────────
+# `scivo update` replaces the files; a session already running keeps the code
+# it loaded. Twenty sessions ran yesterday's build for eighteen hours after
+# "업뎃은 다 한 거 같은데", and the only way to tell was to read uptimes.
+
+def test_the_head_carries_the_harness_commit_and_the_mcp_build(tmp_path, monkeypatch):
+    monkeypatch.setattr(C.running, "HARNESS", "abc1234")
+    ctl = _control(tmp_path)
+    ctl.mcp_version = "0.1.20261111.post4@93db21b"
+    asyncio.run(ctl._write_head("idle"))
+    head = ctl._client.heads[-1][1]
+    assert head["harness"] == "abc1234" and head["mcp"] == "0.1.20261111.post4@93db21b"
+
+
+def test_a_version_it_could_not_determine_is_absent_not_invented(tmp_path, monkeypatch):
+    monkeypatch.setattr(C.running, "HARNESS", "")
+    ctl = _control(tmp_path)                       # no mcp_version was ever set
+    asyncio.run(ctl._write_head("idle"))
+    head = ctl._client.heads[-1][1]
+    assert head["harness"] is None and head["mcp"] is None
+
+
+def test_the_running_commit_is_read_once_when_the_process_starts():
+    from scivo_harness import running
+    assert isinstance(running.HARNESS, str)
+    assert len(running.HARNESS) in (0, 7)

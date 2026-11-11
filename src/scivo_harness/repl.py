@@ -1239,6 +1239,12 @@ class Repl:
                                briefing.project_id, self.session.model,
                                extra_roots=tuple(
                                    getattr(self.session.options, "add_dirs", None) or ()))
+        # The MCP build this session started with, for the page head.
+        identity = getattr(briefing, "identity", None) or {}
+        # An editable install reports 0.0.1 for ever, so the commit goes with it.
+        sha = str(identity.get("git_sha") or "")[:7]
+        build = str(identity.get("installed_version") or "")
+        self.control.mcp_version = (f"{build}@{sha}" if build and sha else build or sha) or None
         print(ui.dim("\n  publishing the control page…"))
         from .control import PageInUse
         try:
