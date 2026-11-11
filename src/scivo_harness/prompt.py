@@ -337,8 +337,15 @@ def build(
     if guide and plan.kept:
         parts.append(
             "# Project guide (the authoritative conventions — already fetched)\n\n"
-            "This is `project_guide()` verbatim. You do not need to call it.\n\n"
-            + guide
+            "This is `project_guide()` verbatim. You do not need to call it for "
+            "this text."
+            # A guide from 2026-11-11 on keeps some sections out of itself and
+            # points at them. Said here because "you do not need to call it"
+            # would otherwise read as covering those too.
+            + (" Where it points at `project_guide(topic=…)`, that IS a call to "
+               "make, before the first tool of that family."
+               if "project_guide(topic=" in guide else "")
+            + "\n\n" + guide
         )
 
     parts.append(to_markdown(briefing))

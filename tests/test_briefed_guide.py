@@ -131,3 +131,11 @@ def test_a_failed_call_is_a_failure_under_either_spelling_of_the_flag():
     assert not _call(_Result(REFUSAL, isError=True))         # mcp 1.x
     assert not _call(_Result(REFUSAL))                       # no flag at all: the text says so
     assert _call(_Result("an ordinary answer", is_error=False))
+
+
+def test_the_prompt_does_not_tell_the_model_to_skip_the_topics_too():
+    plan = toolsets.plan(["whoami", "project_guide"], profile="full", read_only=False)
+    brief = preflight.Briefing(identity={"project_id": "p"})
+    with_topics = NEW + '\nRead `project_guide(topic="study")` before `write_study`.\n'
+    assert "that IS a call to make" in prompt.build(brief, plan, guide=with_topics)
+    assert "that IS a call to make" not in prompt.build(brief, plan, guide=OLD)
