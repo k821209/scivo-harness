@@ -40,8 +40,12 @@ changed the answer.
 - `pgrep -f` / `pkill -f` over ssh is **blocked**: the pattern matches the ssh
   command line carrying it.
 - A memory write containing hardware — an IP, a GPU model, a core count, a
-  conda env — is **held for the user's approval**. Machines belong in the
-  servers registry (`add_server`), never in project memory.
+  conda env — is **blocked**. Machines belong in the servers registry
+  (`add_server`); write the note again without the machine facts.
+- A tool that saves a file (`get_material`, `get_asset`, `get_export`, an
+  export) to a path **outside the project** is **held for the user's
+  approval**. Inside the project, or a directory they added, it is not asked
+  about — so save there unless they named somewhere else.
 - The second analysis-shaped shell command in a session gets you a reminder to
   start recording runs. The provenance gap is built in the exploratory stretch,
   not in the big jobs.

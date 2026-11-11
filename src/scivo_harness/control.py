@@ -74,6 +74,14 @@ MAX_INLINE_BYTES = 1_500_000 # per assistant message
 # update to a 30-second cadence (review 2026-11-10, reproduced). Under the
 # limit by a margin, because JSON bytes only approximate Firestore's count.
 CHUNK_DOC_BUDGET = 900_000
+# When the inbox is READ rather than listened to, "new" means a `seq` above
+# the highest taken in — and `seq` is the browser's clock. A phone a minute
+# behind the desktop writes a message that is "older" than one already seen,
+# and it was never returned: sent, shown as sending, lost. So the read asks
+# from this far BELOW the highest, and the ids already taken in keep that
+# from delivering anything twice. A device more than this far out still
+# loses; the listener, which counts for itself, never does.
+SEQ_SKEW_MS = 10 * 60 * 1000
 _DATA_IMG = None           # compiled lazily, once
 _PIL_MISSING_NOTED = False
 _MD_IMG = None             # compiled lazily, once
@@ -1534,8 +1542,9 @@ class Control:
             # the session and a pending approval deadlocked every later prompt.
             try:
                 if self._since_seq_supported:
-                    outcome = await self._call("list_responses", pub_id=self.link.pub_id,
-                                               since_seq=self._inbox_watermark)
+                    outcome = await self._call(
+                        "list_responses", pub_id=self.link.pub_id,
+                        since_seq=max(0, self._inbox_watermark - SEQ_SKEW_MS))
                     if not outcome.ok and _rejects_since_seq(outcome.error):
                         # An older MCP: fall back for the rest of the session
                         # rather than let the inbox go silent. Polling is then

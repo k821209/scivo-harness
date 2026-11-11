@@ -48,8 +48,22 @@ SIZES = ("small", "large")
 
 
 
+def _project_root() -> Path:
+    """Where this project's `.scivo/` is — the directory holding `.mcp.json`,
+    found from here upwards, exactly as the session finds it.
+
+    This was `Path.cwd()`. The project's CHOICE of provider is read from the
+    root (`.scivo/settings.json`), so from a subdirectory the choice was
+    found and the provider it names was not: "unknown provider 'local'", in
+    a project that had worked a directory up (review 2026-11-10).
+    """
+    from .config import find_root
+
+    return find_root()
+
+
 SEARCH_PATHS = (
-    lambda: Path.cwd() / ".scivo" / "providers.toml",
+    lambda: _project_root() / ".scivo" / "providers.toml",
     lambda: Path.home() / ".config" / "scivo" / "providers.toml",
 )
 

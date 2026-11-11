@@ -580,7 +580,7 @@ async def _providers(args) -> int:
         print(example_text(), end="")
         return 0
     if args.init:
-        written = write_example(Path.cwd() / ".scivo" / "providers.toml")
+        written = write_example(find_root() / ".scivo" / "providers.toml")
         print(f"wrote {written}")
         print(ui.dim("  edit the REPLACE-ME values, then: scivo providers use local && scivo doctor"))
         return 0

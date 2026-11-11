@@ -184,10 +184,61 @@ DESTINATION_ARG = re.compile(r"^(?:dest|out|output|save|target)(?:_[a-z]+)*_(?:p
 HOST_WRITES = ("Edit", "Write", "NotebookEdit", "MultiEdit")
 
 # Long-running foreground work that leaves no run record.
+ANALYSIS_PROGRAMS = frozenset({
+    "python", "python3", "rscript", "snakemake", "nextflow", "salmon", "star", "bwa",
+    "samtools", "bcftools", "plink", "gatk", "hisat2",
+})
+# The same words as a pattern, for a line that cannot be read as commands.
 ANALYSIS_SHAPED = re.compile(
     r"\b(python3?|Rscript|snakemake|nextflow|salmon|STAR|bwa|samtools|bcftools|plink|gatk|hisat2)\b",
     re.IGNORECASE,
 )
+# `python -m <these>` is tooling, not a computation behind a number.
+_NOT_ANALYSIS_MODULES = frozenset({
+    "pytest", "pip", "pyflakes", "venv", "ensurepip", "build", "unittest", "compileall",
+    "json.tool", "http.server", "scivo_harness", "co_scientist_local", "ruff", "mypy", "black",
+})
+
+
+def analysis_shaped(command: str, _depth: int = 0) -> bool:
+    """Does this line RUN one of the programs that produce results?
+
+    It used to be the pattern alone, on the whole text — so it fired on a
+    `sed` whose path ran through `…/lib/python3.11/site-packages/…`, on
+    `pytest`, on `grep -rn plink docs/`. The nudge it feeds is given ONCE, at
+    the second such command; spent on a `sed`, it was not there for the
+    second real analysis (review 2026-11-10 — it fired on the reviewer).
+
+    So the question is asked of the PROGRAM of each command on the line, and
+    of what an `ssh` is told to run on the other side. A line that cannot be
+    read as commands falls back to the pattern: over-counting there costs a
+    reminder, and under-counting costs a result with no provenance.
+    """
+    from .shellread import shell_parts, ssh_target
+
+    parts = shell_parts(command)
+    if parts is None:
+        return bool(ANALYSIS_SHAPED.search(command))
+    for argv in parts:
+        program = argv[0].rsplit("/", 1)[-1].lower()
+        rest = argv[1:]
+        if program == "ssh" and _depth == 0:
+            _host, remote = ssh_target(rest)
+            if remote and analysis_shaped(" ".join(remote), _depth=1):
+                return True
+            continue
+        # python3.11, python3.12 — the interpreter, whatever its minor version
+        base = re.sub(r"^(python)[0-9.]*$", r"\1", program)
+        if base not in ANALYSIS_PROGRAMS:
+            continue
+        if base == "python":
+            if not rest or rest[0] in ("-V", "--version", "-h", "--help"):
+                continue
+            if rest[0] == "-m" and len(rest) > 1 and rest[1] in _NOT_ANALYSIS_MODULES:
+                continue
+        return True
+    return False
+
 
 # An Enzyme Commission number is four dot-separated numbers — EC 3.2.1.35 —
 # so a bare dotted-quad regex calls it an IP address and denies the write. It
@@ -303,17 +354,20 @@ POLLING = (
 # `update_slide(...)` looked identical to the call before the edit and was
 # blocked on the third try, which is the edit → preview → fix loop
 # /paper-deck requires (Scivo feedback 635e07ec5631).
-READ_PREFIXES = (
-    "get_", "list_", "search_", "preview_", "lint_", "count_", "read_", "check_",
-    "compare_", "verify_", "whoami", "project_guide", "tail_", "poll_", "scan_",
-)
-
-
 def is_scivo_write(tool_name: str) -> bool:
+    """Anything on an MCP server that is not, by its name, a read.
+
+    "By its name" is `toolsets.is_read_only` — the same test that decides
+    which tools run without a prompt. There were two lists, and they had
+    drifted: this one lacked `diff_`, `validate_` and `server_status`, so
+    each of those counted as a WRITE here and wiped the repeat counters,
+    and a loop that happened to include one could never trip the breaker.
+    """
     if not tool_name.startswith("mcp__"):
         return False
-    label = tool_name.split("__")[-1]
-    return not label.startswith(READ_PREFIXES)
+    from .toolsets import is_read_only
+
+    return not is_read_only(tool_name.split("__")[-1])
 
 
 class Guardrails:
@@ -579,7 +633,7 @@ class Guardrails:
                 "`mcp__scivo__kill_remote_job` closes the run record too."
             )
 
-        if ANALYSIS_SHAPED.search(command):
+        if analysis_shaped(command):
             self.adhoc_runs += 1
             if self.adhoc_runs == 2:
                 return _note(
