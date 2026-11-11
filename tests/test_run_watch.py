@@ -115,6 +115,16 @@ class _FakeClient:
                                      error=None)
 
 
+def _bind_watch(stub):
+    """The real loop and what it reads, on a stand-in for the REPL."""
+    for name, value in (("control", None), ("_run_homes", set()),
+                        ("_run_homes_complete", True), ("_runs_scoped", True)):
+        if not hasattr(stub, name):
+            setattr(stub, name, value)
+    for name in ("_follow_runs", "_poll_runs", "_note_run_home"):
+        setattr(stub, name, getattr(Repl, name).__get__(stub))
+
+
 def _run_loop(stub, client, monkeypatch):
     import contextlib
 
@@ -129,7 +139,7 @@ def _run_loop(stub, client, monkeypatch):
 
     monkeypatch.setattr(scivo_mcp, "connect", fake_connect)
     stub.session = types.SimpleNamespace(config=object())
-    stub._follow_runs = Repl._follow_runs.__get__(stub)
+    _bind_watch(stub)
     asyncio.run(asyncio.wait_for(stub._follow_runs(), timeout=5))
 
 
@@ -286,3 +296,113 @@ def test_the_cli_is_told_the_client_id_too():
 
     src = inspect.getsource(session.build)
     assert '"SCIVO_CLIENT_ID": session_client_id()' in src
+
+
+# ── where the runs are, and over which connection ───────────────────────────
+# `run_notices` read every run of every analysis in the project to find this
+# session's: 800 documents a call in one real project, every thirty seconds.
+# And each watch started an MCP server process of its own — the third per
+# session, ~120 MB.
+
+_DONE = {"closed": [], "still_open": 0, "now": "t1"}
+
+
+def test_the_watch_says_where_it_filed_its_runs(monkeypatch):
+    stub = _repl()
+    _bind_watch(stub)
+    stub._note_run_home({"slug": "p", "analysis": "asm", "command": "hifiasm"})
+    stub._note_run_home({"slug": "_project", "analysis": "render"})
+    client = _FakeClient([_DONE])
+    _run_loop(stub, client, monkeypatch)
+    assert client.calls[0]["analyses"] == [["_project", "render"], ["p", "asm"]]
+
+
+def test_a_run_filed_without_saying_where_turns_the_scope_off(monkeypatch):
+    """A watch that looked in the wrong place would report a job still running
+    after it had finished — the failure the watch exists to end."""
+    stub = _repl()
+    _bind_watch(stub)
+    stub._note_run_home({"slug": "p", "analysis": "asm"})
+    stub._note_run_home({"command": "something"})          # no slug, no analysis
+    client = _FakeClient([_DONE])
+    _run_loop(stub, client, monkeypatch)
+    assert "analyses" not in client.calls[0]
+
+
+def test_an_mcp_that_refuses_the_argument_is_asked_the_old_way(monkeypatch):
+    class Older(_FakeClient):
+        async def call(self, name, **arguments):
+            self.calls.append({"name": name, **arguments})
+            if "analyses" in arguments:
+                return types.SimpleNamespace(
+                    ok=False, items=[], first=None,
+                    error="Error executing tool run_notices: analyses: Extra inputs are not permitted")
+            payload = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+            return types.SimpleNamespace(ok=True, items=[payload], first=payload, error=None)
+
+    stub = _repl()
+    _bind_watch(stub)
+    stub._note_run_home({"slug": "p", "analysis": "asm"})
+    client = Older([{"closed": [], "still_open": 1, "now": "t1"}, _DONE])
+    _run_loop(stub, client, monkeypatch)
+    asked = [("analyses" in call) for call in client.calls]
+    assert asked == [True, False, False], asked            # tried once, never again
+    assert stub._runs_scoped is False
+
+
+def test_the_pages_connection_is_used_when_there_is_a_page(monkeypatch):
+    from scivo_harness import repl as repl_mod
+    from scivo_harness import scivo_mcp
+
+    monkeypatch.setattr(repl_mod, "RUN_POLL_SECONDS", 0.0)
+    opened = []
+
+    def no_connect(_config):
+        opened.append(1)
+        raise AssertionError("a second MCP server was started")
+    monkeypatch.setattr(scivo_mcp, "connect", no_connect)
+    shared = _FakeClient([_DONE])
+    stub = _repl()
+    stub.control = types.SimpleNamespace(active=True, _client=shared)
+    stub.session = types.SimpleNamespace(config=object())
+    _bind_watch(stub)
+    asyncio.run(asyncio.wait_for(stub._follow_runs(), timeout=5))
+    assert opened == [] and len(shared.calls) == 1
+
+
+def test_a_page_connection_that_stops_answering_hands_over_to_its_own(monkeypatch):
+    class Dead(_FakeClient):
+        async def call(self, name, **arguments):
+            self.calls.append({"name": name, **arguments})
+            return types.SimpleNamespace(ok=False, items=[], first=None,
+                                         error="ClosedResourceError: ")
+
+    dead, own = Dead([{}]), _FakeClient([_DONE])
+    stub = _repl()
+    stub.control = types.SimpleNamespace(active=True, _client=dead)
+    _run_loop(stub, own, monkeypatch)
+    assert len(dead.calls) == 3, "three refusals, as before, then it moves"
+    assert len(own.calls) == 1
+
+
+def test_an_mcp_with_no_run_notices_is_not_asked_over_a_second_connection(monkeypatch):
+    """A tool that is not there is not there on any connection."""
+    from scivo_harness import repl as repl_mod
+    from scivo_harness import scivo_mcp
+
+    class NoTool(_FakeClient):
+        async def call(self, name, **arguments):
+            self.calls.append({"name": name})
+            return types.SimpleNamespace(ok=False, items=[], first=None,
+                                         error="Unknown tool: run_notices")
+
+    monkeypatch.setattr(repl_mod, "RUN_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(scivo_mcp, "connect",
+                        lambda _c: (_ for _ in ()).throw(AssertionError("opened another")))
+    shared = NoTool([{}])
+    stub = _repl()
+    stub.control = types.SimpleNamespace(active=True, _client=shared)
+    stub.session = types.SimpleNamespace(config=object())
+    _bind_watch(stub)
+    asyncio.run(asyncio.wait_for(stub._follow_runs(), timeout=5))
+    assert len(shared.calls) == 3

@@ -31,6 +31,7 @@ this machine's Claude login is not something to do quietly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import secrets
 import time
@@ -41,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ScivoConfig
+from .netlog import Tally
 from .scivo_mcp import ScivoClient, connect
 
 OWNER = "owner"
@@ -426,6 +428,21 @@ def merge_web_messages(items: list) -> Any:
     return joined
 
 
+def _net_kind(name: str, arguments: dict) -> str:
+    """What a call on this channel was FOR, in the network log's 20 characters.
+    Never the document's content, and never a session or publication id."""
+    if name == "put_page_data":
+        doc = str(arguments.get("doc_id") or "")
+        if doc.startswith("log-"):
+            return "page-chunk"
+        if doc.startswith("commands-"):
+            return "page-commands"
+        return "page-" + (doc or "put")[:14]
+    return {"list_responses": "page-read", "wait_for_responses": "page-listen",
+            "clear_page_data": "page-clear", "update_publication": "page-publish",
+            "publish_page": "page-publish"}.get(name, "page-" + name[:14])
+
+
 def _rejects_since_seq(error: Any) -> bool:
     """Did this failure come from the server not knowing the argument?"""
     text = str(error or "").lower()
@@ -552,6 +569,8 @@ class Control:
     _lease_at: float = 0.0
     _lease_due: bool = False
     _claim_note: str = ""
+    # This channel's own calls, in the shared network log (see netlog.py).
+    _net: Tally = field(default_factory=Tally)
     # Set when another session took the page: this one has stopped writing to
     # it and says so, instead of fighting over the head.
     taken_by: str = ""
@@ -662,6 +681,8 @@ class Control:
                              collection=LEASE_COLLECTION, doc_id=LEASE_DOC)
             await self._call("update_publication", pub_id=self.link.pub_id, active=False)
         finally:
+            with contextlib.suppress(Exception):
+                self._net.flush()
             for task in self._tasks:
                 task.cancel()
             await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -899,14 +920,26 @@ class Control:
 
     async def _call(self, name: str, **arguments: Any):
         from .scivo_mcp import ToolOutcome
+        started = time.monotonic()
         try:
             async with self._lock:
-                return await asyncio.wait_for(
+                outcome = await asyncio.wait_for(
                     self._client.call(name, **arguments), timeout=CALL_TIMEOUT)
         except asyncio.TimeoutError:
             note = f"{name}: no answer in {CALL_TIMEOUT:.0f}s"
             self.errors.append(note)
-            return ToolOutcome(ok=False, error=note)
+            outcome = ToolOutcome(ok=False, error=note)
+        self._tally(_net_kind(name, arguments), (time.monotonic() - started) * 1000,
+                    bool(outcome.ok))
+        return outcome
+
+    def _tally(self, kind: str, ms: float, ok: bool, note: str = "") -> None:
+        """Into the network log, and never in the way: a log line that raised
+        from inside `_call` would take the writer or the reader down with it."""
+        try:
+            self._net.add(kind, ms, ok, note)
+        except Exception:  # noqa: BLE001
+            pass
 
     def health(self) -> dict:
         """What the page's own machinery is doing — for a human to read.
@@ -1493,6 +1526,11 @@ class Control:
                       flush=True)
                 return
             reply = outcome.first if outcome is not None and outcome.ok else None
+            # Its duration is how long it WAITED, which is its job — so it is
+            # never "slow"; what the log wants is how often it came back and
+            # whether it failed.
+            self._tally("page-listen", 0, isinstance(reply, dict) and bool(reply.get("listening")),
+                        note="" if isinstance(reply, dict) else (why or "no reply"))
             if not isinstance(reply, dict) or not reply.get("listening"):
                 # `listening: false` is the server saying its stream is not
                 # delivering: an empty answer from it means nothing. Asking

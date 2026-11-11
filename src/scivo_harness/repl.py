@@ -154,21 +154,10 @@ def _wake_summary(notes: list[str], *, name: int = 2, clip: int = 90) -> str:
 
 
 def _net_record(*args, **kwargs) -> None:
-    """The MCP's outbound-call log, if this install has one.
+    """The shared outbound-call log — see netlog.py."""
+    from .netlog import record
 
-    The harness depends on co-scientist-local, so the log lives in one file
-    for both processes — which is the point: a drop is lined up against
-    everything that was in flight, not against one process's half. An older
-    MCP has no netlog, and that is not worth an error.
-    """
-    try:
-        from co_scientist_local import netlog
-    except Exception:  # noqa: BLE001 — no log is not a failure
-        return
-    try:
-        netlog.record(*args, **kwargs)
-    except Exception:  # noqa: BLE001
-        return
+    record(*args, **kwargs)
 
 
 def _notify_mode_from_env() -> str:
@@ -356,6 +345,11 @@ class Repl:
         self._own_tasks: set[str] = set()
         self._runs_task: asyncio.Task | None = None
         self._runs_since: str | None = None
+        # Where this session filed its runs, so the watch reads those and
+        # not the whole project — see _note_run_home.
+        self._run_homes: set[tuple[str, str]] = set()
+        self._run_homes_complete = True
+        self._runs_scoped = True
         self._stopping = False
         self.tool_calls = 0
         self._tool_started: dict[str, tuple[int, float]] = {}
@@ -443,6 +437,7 @@ class Repl:
                 if self.control:
                     self.control.tool(f"#{self.tool_calls} {stamp} {label}", detail)
                 if label in RUN_CREATING_TOOLS:
+                    self._note_run_home(block.input or {})
                     self._watch_runs()
                 if label in EDITING_TOOLS and self.control:
                     args = block.input or {}
@@ -503,56 +498,94 @@ class Repl:
             return
         self._runs_task = asyncio.create_task(self._follow_runs(), name="scivo-run-watch")
 
+    def _note_run_home(self, arguments: dict) -> None:
+        """Remember WHERE a run was filed, from the call that filed it.
+
+        `run_notices` finds this session's runs by reading every run of every
+        analysis in the project unless it is told where they are: 800
+        documents a call in one real project, every thirty seconds for as
+        long as one run stayed open. The session made the call; it knows.
+        A call that does not say (no slug, no analysis) switches the scope
+        off for good — a watcher that looked in the wrong place would report
+        a job still running after it had finished, which is the failure the
+        watcher exists to end.
+        """
+        slug, name = arguments.get("slug"), arguments.get("analysis")
+        if isinstance(slug, str) and slug and isinstance(name, str) and name:
+            self._run_homes.add((slug, name))
+        else:
+            self._run_homes_complete = False
+
     async def _follow_runs(self) -> None:
         """Ask `run_notices` until nothing of ours is open, then stop.
 
         Errors are swallowed and end the loop rather than the session: this is
         a convenience, and an MCP that predates `run_notices` must not take the
         REPL down with it. The next submitted run starts a fresh loop.
+
+        Asked over the control page's own MCP connection when that is up —
+        this used to start a server process of its own every time, a third
+        one per session at ~120 MB — and over one of its own only when there
+        is no page, or the page's connection stops answering.
         """
         from .scivo_mcp import connect
 
         try:
+            shared = self.control._client if (self.control and self.control.active) else None
+            if shared is not None and await self._poll_runs(shared) == "done":
+                return
             async with connect(self.session.config) as client:
-                refused = 0
-                while True:
-                    await asyncio.sleep(RUN_POLL_SECONDS)
-                    asked = time.monotonic()
-                    outcome = await client.call("run_notices", **(
-                        {"since": self._runs_since} if self._runs_since else {}))
-                    # Same log the MCP writes its SSH calls to, so a dropped
-                    # link can be lined up against everything we were sending
-                    # (todo d27e0606a7bb). This poll is HTTPS to Firestore, not
-                    # SSH, and it is one of the three periodic things under
-                    # suspicion — it has to be in the same file as the others
-                    # or the comparison cannot be made.
-                    _net_record("mcp", host="firestore", kind="run_notices",
-                                ms=int((time.monotonic() - asked) * 1000),
-                                rc=0 if outcome.ok else 1)
-                    if not outcome.ok:
-                        # A blip must not end the watch — an eleven-minute job
-                        # would then finish unannounced because one poll lost
-                        # the pipe. A tool that is simply not there refuses
-                        # every time, so a run of them is the real signal.
-                        refused += 1
-                        if refused >= RUN_POLL_GIVE_UP:
-                            return
-                        continue
-                    refused = 0
-                    # A scalar tool comes back as ONE content block: `items`
-                    # is always a list (one block per record), so the dict is
-                    # `first`. Reading `items` here looked fine and silently
-                    # never found a notice.
-                    data = outcome.first if isinstance(outcome.first, dict) else {}
-                    self._runs_since = data.get("now") or self._runs_since
-                    for notice in (data.get("closed") or []):
-                        self._on_run_closed(notice)
-                    if not data.get("still_open"):
-                        return
+                await self._poll_runs(client)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a convenience must not end a session
             return
+
+    async def _poll_runs(self, client) -> str:
+        """One watch on one connection. "done": nothing of ours is open, or
+        the server has no such tool. "lost": this connection stopped
+        answering, so the caller may try another."""
+        refused = 0
+        while True:
+            await asyncio.sleep(RUN_POLL_SECONDS)
+            arguments: dict = {"since": self._runs_since} if self._runs_since else {}
+            scoped = bool(self._runs_scoped and self._run_homes_complete and self._run_homes)
+            if scoped:
+                arguments["analyses"] = [list(pair) for pair in sorted(self._run_homes)]
+            asked = time.monotonic()
+            outcome = await client.call("run_notices", **arguments)
+            if scoped and not outcome.ok and "analyses" in str(outcome.error):
+                # An MCP from before 2026-11-11 refuses the argument. Read
+                # the whole project, as it always did, for the rest of this
+                # session — slower and billed, and still correct.
+                self._runs_scoped = False
+                arguments.pop("analyses", None)
+                outcome = await client.call("run_notices", **arguments)
+            # Same log the MCP writes its SSH calls to, so a dropped link can
+            # be lined up against everything we were sending (todo
+            # d27e0606a7bb).
+            _net_record("mcp", host="firestore", kind="run_notices",
+                        ms=int((time.monotonic() - asked) * 1000),
+                        rc=0 if outcome.ok else 1)
+            if not outcome.ok:
+                # A blip must not end the watch — an eleven-minute job would
+                # then finish unannounced because one poll lost the pipe. A
+                # tool that is simply not there refuses every time, so a run
+                # of them is the real signal.
+                refused += 1
+                if refused >= RUN_POLL_GIVE_UP:
+                    return "done" if "unknown tool" in str(outcome.error).lower() else "lost"
+                continue
+            refused = 0
+            # A scalar tool comes back as ONE content block: `items` is always
+            # a list (one block per record), so the dict is `first`. Reading
+            # `items` here looked fine and silently never found a notice.
+            data = outcome.first if isinstance(outcome.first, dict) else {}
+            self._runs_since = data.get("now") or self._runs_since
+            for notice in (data.get("closed") or []):
+                self._on_run_closed(notice)
+            if not data.get("still_open"):
+                return "done"
 
     def _on_run_closed(self, notice: dict) -> None:
         """One finished run: printed now, and offered like a finished task."""
@@ -759,9 +792,9 @@ class Repl:
                          f"claims it"
                          + (f"; the notice says session {where[:8]}" if where
                             else "; the notice names no session")
-                         + f". If this session was resumed, it is most likely "
-                         f"its own (/session shows this session's id). "
-                         f"Not picked up until you say so."), flush=True)
+                         + ". If this session was resumed, it is most likely "
+                         "its own (/session shows this session's id). "
+                         "Not picked up until you say so."), flush=True)
         if self.control and self.control.active:
             label = {"own": "", "foreign": " — another session's, not handled here",
                      "unknown": " — whose task this is could not be determined"}[owned]
