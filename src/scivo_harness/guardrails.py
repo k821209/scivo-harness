@@ -377,6 +377,9 @@ class Guardrails:
         # Where this session may write without being asked: the project, and
         # the directories the USER added on the command line.
         self.roots = self._resolved([root, *list(extra_roots or ())]) if root else []
+        # For the usage tally only (which project a skill was invoked in);
+        # set by `session.build` once the briefing knows it.
+        self.project_id = ""
         self.adhoc_runs = 0
         self.blocked: list[str] = []
         self.repeats: dict[tuple[str, str], int] = {}
@@ -500,7 +503,15 @@ class Guardrails:
     async def on_tool_success(self, payload: Any, tool_use_id: str | None,
                               context: Any) -> dict[str, Any]:
         """PostToolUse: a result arrived, so this call is not stuck."""
-        self.record_success(str(payload.get("tool_name", "")), _arguments(payload))
+        name = str(payload.get("tool_name", ""))
+        self.record_success(name, _arguments(payload))
+        if name == "Skill":
+            # The one place a model-invoked skill is visible to anything that
+            # can count it (see usage.py).
+            from . import usage
+            tool_input = payload.get("tool_input") or {}
+            usage.record_skill(str(tool_input.get("skill") or ""),
+                               getattr(self, "project_id", ""))
         return {}
 
     async def on_any_tool(self, payload: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:

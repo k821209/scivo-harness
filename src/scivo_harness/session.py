@@ -267,6 +267,7 @@ async def build(
         lambda: prepare(chosen, api_billing=api_billing))
     plan = toolsets.plan(tool_names, profile=profile, read_only=read_only)
     rails = guardrails.Guardrails(root=config.root, extra_roots=add_dirs or [])
+    rails.project_id = str(briefing.project_id or "")
 
     # Without a callback there is no channel to ask on, so anything outside
     # `allowed_tools` is denied with a message nobody can act on. An explicit

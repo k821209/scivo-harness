@@ -128,7 +128,11 @@ async def connect(config: ScivoConfig):
     params = StdioServerParameters(
         command=config.command,
         args=config.args,
-        env=config.child_env(),
+        # This connection is the HARNESS's — the briefing, the web page's
+        # channel, the run watch — not the model's. Said to the server, so its
+        # tally of what gets called (co_scientist_local/usage.py) does not show
+        # the ten calls of every session start as a model's ten favourite tools.
+        env={**config.child_env(), "SCIVO_USAGE_AS": "harness"},
         cwd=str(config.root),
     )
     # The server's stderr is kept (last few KB) instead of dropped: a server

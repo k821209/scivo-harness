@@ -46,6 +46,7 @@ from .toolsets import PREFIX
 # Defined in session.py, beside DEFAULT_MODEL which derives from it. Re-exported
 # here because this is where `/model` reads it.
 from .session import CLAUDE_CATALOG, CLAUDE_MODELS  # noqa: F401
+from . import usage as tally
 from .skills import discover
 
 # Handled by Claude Code itself, not here: they go through as a prompt. Listed
@@ -1888,6 +1889,16 @@ class Repl:
             # hear is a turn that runs — tools and all — with nobody watching.
             raise StreamEnded(pump.why_ended())
         self.session.rails.new_turn()
+        # A skill the USER typed (`/paper-writing methods`) is expanded by the
+        # CLI and never passes through the Skill tool, so it is counted here.
+        # It is a tally: whatever it cannot find out, it skips. It does not
+        # get to stop a turn.
+        try:
+            typed = tally.typed_skill(line, {skill.name for skill in getattr(self, "skills", ())})
+            if typed:
+                tally.record_skill(typed, getattr(self.session.rails, "project_id", ""))
+        except Exception:  # noqa: BLE001
+            pass
         if self.attachments:
             images, self.attachments = list(self.attachments), []
             await client.query(_attachments.one(_attachments.user_message(line, images)))
