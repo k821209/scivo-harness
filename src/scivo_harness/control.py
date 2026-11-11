@@ -366,6 +366,23 @@ CALL_TIMEOUT = 45.0
 STUCK_AFTER = 60.0
 STATE_FILE = Path(".scivo") / "control.json"
 
+# ── one session drives a page at a time ─────────────────────────────────────
+# A project has ONE control page, and nothing stopped a second session in the
+# same project from starting on it: it deleted the first session's transcript
+# ("clear previous sessions" — the first was not previous, it was running),
+# and from then on the two took turns writing the head, so the page showed
+# one conversation, then the other, every few seconds (review 2026-11-10,
+# reproduced). The session that owns the page now says so in a small document
+# of its own, and a newcomer reads it before touching anything.
+LEASE_COLLECTION = "lease"          # readable in one cheap call; `content` is not
+LEASE_DOC = "owner"
+LEASE_EVERY = 60.0                  # seconds between renewals while nothing asks
+LEASE_ANSWER_WAIT = 4.0             # how long a holder is given to answer "are you there?"
+
+
+class PageInUse(RuntimeError):
+    """Another live session is driving this project's page."""
+
 
 def page_html() -> str:
     return resources.files("scivo_harness").joinpath("control_page.html").read_text(encoding="utf-8")
@@ -522,6 +539,14 @@ class Control:
     # seconds, from a session that has gone to five minutes, reads as dead.
     _head_beat_every: float = BEAT_EVERY
     _head_hint: bool = False
+    # The lease: when it was last renewed, and whether something (a viewer, a
+    # newcomer asking "are you there?") wants it renewed now.
+    _lease_at: float = 0.0
+    _lease_due: bool = False
+    _claim_note: str = ""
+    # Set when another session took the page: this one has stopped writing to
+    # it and says so, instead of fighting over the head.
+    taken_by: str = ""
     _last_activity: float = 0.0
 
     @property
@@ -530,13 +555,28 @@ class Control:
 
     # ------------------------------------------------------------ lifecycle
 
-    async def start(self) -> Link:
+    async def start(self, take: bool = False) -> Link:
+        """Publish (or reuse) the page and start driving it.
+
+        `take` is the person saying "this session, not the one that has it":
+        without it a page another live session is driving is left alone and
+        `PageInUse` says who has it.
+        """
         if self.active and self.link:
             return self.link
         self._stack = AsyncExitStack()
         self._client = await self._stack.enter_async_context(connect(self.config))
-        self.link = await self._ensure_publication()
         self.sid = f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+        self.taken_by = ""
+        try:
+            self.link = await self._ensure_publication(take=take)
+        except BaseException:
+            # Nothing was started, so nothing may be left looking started: a
+            # Control that failed here used to stay `active` with no tasks and
+            # an MCP process nobody would close.
+            stack, self._stack, self._client = self._stack, None, None
+            await stack.aclose()
+            raise
         self._started = _now_ms()
         self.events.clear()
         self._dirty.clear()
@@ -556,6 +596,7 @@ class Control:
         self._listen_why = ""
         self._last_activity = time.monotonic()     # a session that just started is not idle
         self.interrupt_requested.clear()
+        await self._write_lease()
         await self._write_head(state="live")
         self._tasks = [
             asyncio.create_task(self._writer(), name="scivo-control-writer"),
@@ -607,6 +648,10 @@ class Control:
         try:
             await self._flush()
             await self._write_head(state="ended")
+            # Given up on the way out, so the next session — the same one after
+            # `/update`, usually — is not made to wait for it to run out.
+            await self._call("clear_page_data", pub_id=self.link.pub_id,
+                             collection=LEASE_COLLECTION, doc_id=LEASE_DOC)
             await self._call("update_publication", pub_id=self.link.pub_id, active=False)
         finally:
             for task in self._tasks:
@@ -618,7 +663,137 @@ class Control:
             self._client = None
             self._stack = None
 
-    async def _ensure_publication(self) -> Link:
+    # ------------------------------------------------------------- the lease
+
+    async def _read_lease(self, pub_id: str) -> dict | None:
+        outcome = await self._call("list_responses", pub_id=pub_id, collection=LEASE_COLLECTION)
+        if not outcome.ok:
+            return None
+        for row in outcome.items:
+            if isinstance(row, dict) and row.get("id") == LEASE_DOC and row.get("sid"):
+                return row
+        return None
+
+    async def _write_lease(self) -> None:
+        import os
+        import socket
+
+        self._lease_at = time.monotonic()
+        self._lease_due = False
+        await self._call("put_page_data", pub_id=self.link.pub_id,
+                         collection=LEASE_COLLECTION, doc_id=LEASE_DOC,
+                         data={"sid": self.sid, "at": _now_ms(), "every": LEASE_EVERY,
+                               "host": socket.gethostname(), "pid": os.getpid(),
+                               "listening": self.listening, "project": self.project_name})
+
+    async def _holder_alive(self, pub_id: str, lease: dict) -> tuple[bool, str]:
+        """Is the session named in this lease still there? (verdict, why).
+
+        Three questions, cheapest and surest first. The lease's own age: one
+        long past its renewal is nobody's. This machine's process table, when
+        the holder is on this machine: that answer is certain either way. And
+        for a holder elsewhere, ASKING — the same mark the page writes when
+        someone opens it, which a live session answers by renewing at once.
+        """
+        import os
+        import socket
+
+        age = (_now_ms() - int(lease.get("at") or 0)) / 1000
+        every = float(lease.get("every") or LEASE_EVERY)
+        if age > every * 2.5:
+            return False, f"its lease ran out ({age:.0f}s old, renewed every {every:.0f}s)"
+        if lease.get("host") == socket.gethostname() and lease.get("pid") == os.getpid():
+            # This very process, before it re-executed itself (`/update` keeps
+            # the pid). It gives the lease up on the way out; if that write
+            # was lost, its own leftover must not lock it out of its page.
+            return False, "it was this process before it restarted"
+        if lease.get("host") == socket.gethostname() and lease.get("pid"):
+            try:
+                os.kill(int(lease["pid"]), 0)
+            except ProcessLookupError:
+                return False, f"its process ({lease['pid']}) is gone"
+            except (PermissionError, ValueError, OverflowError):
+                pass                         # exists, or unreadable: ask it instead
+            else:
+                return True, f"process {lease['pid']} on this machine"
+        before = lease.get("at")
+        # Its own document, not the holder's `control`: this write REPLACES
+        # what is there, and that one carries the Stop counter a reloaded tab
+        # resumes from. `seq` so a holder reading on a timer is handed it too.
+        await self._call("put_page_data", pub_id=pub_id, collection="responses", doc_id="ping",
+                         data={"doc": "control", "sid": lease["sid"], "reviewer": OWNER,
+                               "viewer": _now_ms(), "seq": _now_ms()})
+        deadline = time.monotonic() + LEASE_ANSWER_WAIT
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1.0)
+            again = await self._read_lease(pub_id)
+            if again is None or again.get("sid") != lease["sid"]:
+                return False, "it gave the page up"
+            if again.get("at") != before:
+                return True, "it answered"
+        if lease.get("listening"):
+            return False, (f"it was listening for the page and did not answer in "
+                           f"{LEASE_ANSWER_WAIT:.0f}s")
+        return True, (f"it did not answer in {LEASE_ANSWER_WAIT:.0f}s, but it reads the page on "
+                      f"a timer and renewed its lease {age:.0f}s ago — it may still be there")
+
+    async def _claim(self, link: Link, take: bool) -> dict | None:
+        """Refuse a page someone else is driving. Returns the lease that was
+        displaced, if there was one, so its holder can be told."""
+        lease = await self._read_lease(link.pub_id)
+        if lease is None or lease.get("sid") == self.sid:
+            return None
+        alive, why = await self._holder_alive(link.pub_id, lease)
+        if alive and not take:
+            where = lease.get("host") or "another machine"
+            raise PageInUse(
+                f"another session is driving this project's page — {lease['sid']} on {where} "
+                f"({why}).\n  Two sessions on one page take turns overwriting it, so this one "
+                "has left it alone.\n  `/scivo-control take` moves the page to THIS session; "
+                "the other keeps running in its terminal and is told.")
+        self._claim_note = (f"took the page over from {lease['sid']}"
+                            + ("" if alive else f" — {why}"))
+        return lease
+
+    async def _tell_displaced(self, link: Link, lease: dict) -> None:
+        """Leave word for the session this one replaced. It reads its inbox
+        like any other message; if it is gone, nobody reads this and the next
+        start clears it."""
+        await self._call("put_page_data", pub_id=link.pub_id, collection="responses",
+                         doc_id="takeover",
+                         data={"doc": "takeover", "sid": lease["sid"], "by": self.sid,
+                               "reviewer": OWNER, "seq": _now_ms()})
+
+    async def _yield_page(self, by: str) -> None:
+        """Another session took the page: stop writing to it, and say so here.
+
+        Not `stop()`: that marks the page ended and unpublishes it, which
+        would be this session shutting down a page that is now someone
+        else's.
+        """
+        if not self.active:
+            return
+        self.taken_by = by
+        print(f"\n  [scivo-control] another session in this project ({by}) took the web page.\n"
+              "  This session carries on here in the terminal and no longer writes to the page.\n"
+              "  `/scivo-control take` brings it back.\n", flush=True)
+        for pending in self._approvals.values():
+            if not pending.future.done():
+                pending.future.set_result("deny")
+        for pending in self._questions_pending.values():
+            if not pending.future.done():
+                pending.future.set_result(None)
+        current = asyncio.current_task()
+        tasks, self._tasks = self._tasks, []
+        for task in tasks:
+            if task is not current:
+                task.cancel()
+        await asyncio.gather(*(t for t in tasks if t is not current), return_exceptions=True)
+        stack, self._stack, self._client = self._stack, None, None
+        if stack is not None:
+            await stack.aclose()
+
+    async def _ensure_publication(self, take: bool = False) -> Link:
         """Reuse this project's control page if it still exists, else publish one.
 
         No passcode is issued. The dashboard signs the owner in to a
@@ -649,9 +824,15 @@ class Control:
                 await asyncio.sleep(0.5 * (attempt + 1))
             if outcome is not None and outcome.ok:
                 link = Link(stored["pub_id"], stored["url"])
+                # BEFORE anything of an earlier session is cleared: "earlier"
+                # was assumed, and the session being cleared was sometimes
+                # still running.
+                displaced = await self._claim(link, take)
                 if stored.get("passcode"):
                     await self._retire_passcodes(link, state_path)
                 await self._clear_previous_sessions(link)
+                if displaced is not None:
+                    await self._tell_displaced(link, displaced)
                 return link
             # Publishing anew: close the old page first, or it stays active
             # with a stale head the owner may still have open.
@@ -1100,9 +1281,15 @@ class Control:
                     # before the old promise runs out, faster is someone who
                     # has just arrived and is looking at the dot.
                     or beat_every != self._head_beat_every
-                    or (self._poll_s >= 2) != self._head_hint):
+                    or (self._poll_s >= 2) != self._head_hint
+                    or self._lease_due):
                 try:
                     await self._write_head(state="live")
+                    # With the beat rather than on a timer of its own, and not
+                    # with every beat: one renewal a minute keeps the lease,
+                    # and a question gets its answer at once.
+                    if self._lease_due or time.monotonic() - self._lease_at >= LEASE_EVERY:
+                        await self._write_lease()
                 except Exception as exc:  # noqa: BLE001
                     self.errors.append(f"head: {type(exc).__name__}: {exc}")
                 last_beat = time.monotonic()
@@ -1205,6 +1392,14 @@ class Control:
                         pending.future.set_result(
                             self._name_answers(pending, answered))
                         acted += 1
+            elif kind == "takeover":
+                by = str(doc.get("by") or "")
+                if by and by != self.sid and not self.taken_by:
+                    self.taken_by = by
+                    acted += 1
+                    # Not awaited: this runs inside one of the tasks that
+                    # yielding cancels.
+                    asyncio.get_running_loop().create_task(self._yield_page(by))
             elif kind == "control":
                 seq = int(doc.get("interrupt") or 0)
                 if seq > self._interrupt_seen:
@@ -1215,7 +1410,11 @@ class Control:
                 if mark is not None and mark != self._viewer_mark:
                     self._viewer_mark = mark
                     self._viewer_at = time.monotonic()
-                    self._wake.set()        # someone arrived: beat now, not in five minutes
+                    # Someone arrived — a person at the page, or another
+                    # session asking whether this one is still here. Beat now,
+                    # and renew the lease, which is what answers the second.
+                    self._lease_due = True
+                    self._wake.set()
         return acted
 
     def _next_poll(self) -> float:

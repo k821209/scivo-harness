@@ -74,7 +74,7 @@ LOCAL_COMMANDS = {
     "/compact": "summarise the conversation so far and carry on with a shorter one",
     "/clear": "start a fresh conversation — the way out when the old one no longer fits",
     "/update": "leave, run `scivo update` (`/update video` includes vh), and come back into this session with the page on",
-    "/scivo-control": "drive this session from the scivo web page (`off` to stop)",
+    "/scivo-control": "drive this session from the scivo web page (`off` to stop, `take` to move the page here from another session)",
     "/help": "this list",
 }
 
@@ -1194,6 +1194,7 @@ class Repl:
                 print(ui.dim("\n  scivo-control is not on\n"))
             return
 
+        take = argument == "take"
         if self.control and self.control.active:
             self._print_link()
             self._print_control_health()
@@ -1205,12 +1206,21 @@ class Repl:
                                extra_roots=tuple(
                                    getattr(self.session.options, "add_dirs", None) or ()))
         print(ui.dim("\n  publishing the control page…"))
+        from .control import PageInUse
         try:
-            await self.control.start()
+            await self.control.start(take=take)
+        except PageInUse as exc:
+            # Not a failure: the page is doing its job for someone else, and
+            # the way to change that is one word.
+            print(ui.yellow(f"  {exc}\n"))
+            self.control = None
+            return
         except Exception as exc:  # noqa: BLE001
             print(ui.red(f"  scivo-control failed to start: {exc}\n"))
             self.control = None
             return
+        if self.control._claim_note:
+            print(ui.dim(f"  {self.control._claim_note}"))
         commands = [{"name": name, "help": text} for name, text in LOCAL_COMMANDS.items()]
         commands += [{"name": f"/{skill.name}", "help": skill.summary} for skill in self.skills]
         await self.control.put_commands(commands)
