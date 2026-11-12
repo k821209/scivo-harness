@@ -65,8 +65,9 @@ to a failure the guide documents as having actually happened:
 | `pgrep -f` / `pkill -f` over ssh — the pattern matches the ssh line carrying it | denied, with the bracketed-pattern fix |
 | a memory write containing an IP, GPU model, core count or conda env | held for the user — machines belong in the servers registry |
 | the second analysis-shaped shell command in a session | a reminder that this is where provenance is lost |
-| the same MCP tool called with the same arguments three times in one turn | denied, with the result it already has named; at five the turn is stopped |
-| the same Bash command five times in one turn | nudged to `Monitor` with an until-loop for polling — never denied, because a `tail log` in a row is watching a long job, not a stuck loop |
+| the same MCP tool called with the same arguments three times in one turn | denied, with the result it returned handed back; three refusals in one turn, of any calls, stop the turn |
+| the same Bash command printing the same output three times in one turn, nothing new run in between | the fourth is denied, with the output handed back — a `tail log` whose output moves is watching a job and is left alone |
+| the same Bash command five times in one turn, its output changing | nudged to `Monitor` with an until-loop for polling |
 
 **The tool surface is pruned — for correctness, not for context.** The scivo
 server exposes 234 tools. `--profile` drops whole domains, so they are absent
@@ -586,6 +587,16 @@ model class, and the honest reading is "unmeasured", not "fine".
   turns in a 15-minute window, and the fourth attempt is denied with the error
   text. A failure that CHANGES is progress and resets nothing; a success clears
   the count; an interrupt is not a failure. (2026-10-10)
+
+- **A refusal gets walked around.** A local model collecting a three-part
+  briefing asked the same queries dozens of times: refused on the third
+  identical call, it moved to the next query, was refused there, and came
+  back. No single call reached the count that ends a turn, and Bash was not
+  counted at all. Refusals now add up across calls (three end the turn), the
+  same command with the same output is refused on the fourth run, and a
+  refusal hands back what the call returned and says it is not a temporary
+  error. Checked with a cloud model only; against a local model this is
+  untested. (2026-11-12)
 
 - **Empty results get retried.** A Qwen session that gets `[]` from a lookup
   tends to call it again with the query rephrased, several times, until the

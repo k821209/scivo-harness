@@ -2080,8 +2080,10 @@ class Repl:
                         # turn rather than let it spend the context on a loop.
                         self._stopping = True
                         label = self.session.rails.looping
-                        self._say(ui.yellow(f"\n  stopped: {label} was called the same way "
-                                            f"{guardrails.SAME_CALL_STOP} times in this turn")
+                        why = (getattr(self.session.rails, "stop_reason", "")
+                               or f"{label} was called the same way "
+                                  f"{guardrails.SAME_CALL_STOP} times in this turn")
+                        self._say(ui.yellow(f"\n  stopped: {why}")
                                   + ui.dim("\n  The results were delivered each time; the model "
                                            "kept asking. Try a more specific instruction, or "
                                            "`/model opus` for this one.\n"))

@@ -8,6 +8,7 @@ fires at that moment instead.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -318,6 +319,51 @@ def _arguments(payload: Any) -> str:
         return str(payload.get("tool_input", {}))
 
 
+def _key(payload: Any) -> tuple[str, str]:
+    """What "the same call" means, for every counter here.
+
+    For Bash it is the command alone. The `description` beside it is prose the
+    model writes fresh each time, so a loop that reworded it was a new call on
+    every pass and no counter ever moved.
+    """
+    name = str(payload.get("tool_name", ""))
+    if name == "Bash":
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if isinstance(command, str):
+            return name, command.strip()
+    return name, _arguments(payload)
+
+
+def _result_text(payload: Any) -> str | None:
+    """What the tool returned, as text — None when the payload does not carry
+    it, which is "cannot tell", not "returned nothing"."""
+    if "tool_response" not in payload:
+        return None
+    response = payload.get("tool_response")
+    if response is None:
+        return None
+    if isinstance(response, str):
+        return response
+    if isinstance(response, dict) and ("stdout" in response or "stderr" in response):
+        out, err = str(response.get("stdout") or ""), str(response.get("stderr") or "")
+        return (out + ("\n" + err if err else "")).strip()
+    if isinstance(response, list) and response and all(
+            isinstance(block, dict) and isinstance(block.get("text"), str) for block in response):
+        return "\n".join(block["text"] for block in response)
+    try:
+        return json.dumps(response, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(response)
+
+
+def _excerpt(text: str) -> str:
+    if len(text) <= RESULT_EXCERPT:
+        return text
+    return (text[:RESULT_EXCERPT]
+            + f"\n… (the first {RESULT_EXCERPT:,} of {len(text):,} characters)")
+
+
 def _note(context: str) -> dict[str, Any]:
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context}}
 
@@ -327,6 +373,24 @@ def _note(context: str) -> dict[str, Any]:
 SAME_CALL_LIMIT = 3
 SAME_CALL_STOP = 5
 BASH_NUDGE = 5     # after five identical Bash calls, suggest Monitor once
+
+# Bash is never refused for being asked again — watching a log is asking again
+# on purpose — but that rests on the output CHANGING between calls. A command
+# that has printed byte-for-byte the same thing this many times in one turn,
+# with nothing new run in between, is not watching anything.
+BASH_SAME_OUTPUT = 3
+
+# Refusals add up across calls. Counting each call by itself let a model step
+# around the refusal: A, A, A (refused), B, B, B (refused), C, C, C (refused),
+# and round again — fifteen refusals in forty-five calls and the turn never
+# ended, because no one call reached SAME_CALL_STOP (feedback f5c4b6108ef6: a
+# local model collecting a three-part briefing, stopped by hand).
+REFUSALS_STOP = 3
+
+# How much of the result a refusal hands back. The model that loops is often
+# the one that did not take the result in; being told "you have it" does not
+# give it to them, and running the tool again is the only other way to get it.
+RESULT_EXCERPT = 1200
 
 # A command that FAILS the same way again has nothing to watch: that is the
 # shape the per-turn counters above cannot see, because they are cleared every
@@ -384,6 +448,16 @@ class Guardrails:
         self.blocked: list[str] = []
         self.repeats: dict[tuple[str, str], int] = {}
         self.looping: str | None = None
+        # Why the turn is being ended, in words for the person watching.
+        self.stop_reason = ""
+        # Every call made this turn. A write that was already made, the same
+        # way, has changed nothing the second time.
+        self.calls: set[tuple[str, str]] = set()
+        # Bash only: command -> [output signature, times in a row]. And for
+        # every tool, what it last returned, to hand back with a refusal.
+        self.outputs: dict[tuple[str, str], list] = {}
+        self.returned: dict[tuple[str, str], str] = {}
+        self.refusals = 0
         # (tool, arguments) -> [count, error signature, last time]. Survives
         # new_turn on purpose: a loop that retries once per turn is exactly
         # what the per-turn counters miss.
@@ -461,6 +535,33 @@ class Guardrails:
         """Repetition is counted per turn: asking again next turn is fine."""
         self.repeats.clear()
         self.looping = None
+        self.stop_reason = ""
+        self.calls.clear()
+        self.outputs.clear()
+        self.returned.clear()
+        self.refusals = 0
+
+    def _refuse(self, label: str, said: str, key: tuple[str, str]) -> dict[str, Any]:
+        """Refuse a repeat, hand back what it returned, and end the turn once
+        refusing has not worked."""
+        self.refusals += 1
+        left = REFUSALS_STOP - self.refusals
+        if left <= 0 and not self.looping:
+            self.looping = label
+            self.stop_reason = (f"{self.refusals} repeated calls were refused in this turn "
+                                f"and the model kept repeating (last: {label})")
+        had = self.returned.get(key)
+        parts = [said]
+        if had is not None:
+            parts.append("This is what it returned — you already have it:\n"
+                         + (_excerpt(had) if had.strip() else "(nothing: the output was empty)"))
+        parts.append(
+            "This is not a temporary error and it is not a failure of the tool: trying again, "
+            "or the same thing reworded, is refused the same way. Write your answer from the "
+            "result above. If it does not answer the question, say so in words."
+            + (f" {left} more refused call{'s' if left != 1 else ''} ends this turn."
+               if left > 0 else " The turn is being ended now."))
+        return _deny("\n".join(parts))
 
     # ── repeated identical failures ──────────────────────────────────────────
 
@@ -496,15 +597,25 @@ class Guardrails:
         """PostToolUseFailure: remember what failed and how."""
         if payload.get("is_interrupt"):
             return {}          # the user stopped it; that is not a loop
-        name = str(payload.get("tool_name", ""))
-        self.record_failure(name, _arguments(payload), str(payload.get("error", "")))
+        self.record_failure(*_key(payload), str(payload.get("error", "")))
         return {}
 
     async def on_tool_success(self, payload: Any, tool_use_id: str | None,
                               context: Any) -> dict[str, Any]:
         """PostToolUse: a result arrived, so this call is not stuck."""
         name = str(payload.get("tool_name", ""))
-        self.record_success(name, _arguments(payload))
+        key = _key(payload)
+        self.record_success(*key)
+        text = _result_text(payload)
+        if text is not None:
+            self.returned[key] = text
+            if name == "Bash":
+                signature = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+                seen = self.outputs.get(key)
+                if seen and seen[0] == signature:
+                    seen[1] += 1
+                else:
+                    self.outputs[key] = [signature, 1]
         if name == "Skill":
             # The one place a model-invoked skill is visible to anything that
             # can count it (see usage.py).
@@ -524,13 +635,19 @@ class Guardrails:
 
         Bash is different. A `ssh … tail log` run five times in a row is the
         model watching a long-running job, not a stuck loop; the log's tail
-        changes between calls. So Bash never denies — it notes on the fifth
-        identical run that `Monitor` with an until-loop is the pattern for
-        that, and stays out of the way.
+        changes between calls. So Bash is not refused for being asked again —
+        it is noted on the fifth identical run that `Monitor` with an
+        until-loop is the pattern for that. It IS refused once the same
+        command has printed the same output BASH_SAME_OUTPUT times with
+        nothing new run in between: then nothing is being watched.
+
+        Refusals are counted for the turn, whatever was refused; see
+        REFUSALS_STOP.
         """
         name = str(payload.get("tool_name", ""))
-        arguments = _arguments(payload)
-        key = (name, arguments)
+        key = _key(payload)
+        first = key not in self.calls
+        self.calls.add(key)
         # Checked before the polling exemption: `tail_remote_log` is asked
         # again on purpose while a job runs, but not after it has failed the
         # same way three times — that is an unreachable host, not a job to
@@ -539,6 +656,7 @@ class Guardrails:
         if strikes >= FAILED_REPEAT_LIMIT:
             label = name.split("__")[-1] if name.startswith("mcp__") else name
             self.looping = label
+            self.stop_reason = f"{label} failed the same way {strikes} times"
             return _deny(
                 f"Blocked: this exact `{label}` call has already failed {strikes} times with the "
                 f"same error — {self.failures[key][1]}\n"
@@ -549,6 +667,8 @@ class Guardrails:
             return {}
         if name in HOST_WRITES:
             self.repeats.clear()
+            self.outputs.clear()
+            self.calls.clear()
             return {}
         if not name.startswith("mcp__"):
             # Host tools are never denied. The rule is about MCP calls; a
@@ -557,6 +677,21 @@ class Guardrails:
             # nudge below recommends — used to be denied, and at five the turn
             # was interrupted.
             if name == "Bash":
+                if first:
+                    # A command not yet run this turn may have changed what the
+                    # others print — test, fix with sed, test again is not a
+                    # loop. One already run, with the same output, has not.
+                    self.outputs.clear()
+                same = self.outputs.get(key)
+                if same and same[1] >= BASH_SAME_OUTPUT:
+                    return self._refuse(
+                        "Bash",
+                        f"Blocked: this exact command has already run {same[1]} times in this "
+                        "turn and printed exactly the same output every time. Running it again "
+                        "cannot print anything new. If you are waiting for the output to change, "
+                        "that is `Monitor` with an until-loop (or `wait_for_run` for a recorded "
+                        "run), not the same command again.",
+                        key)
                 seen = self.repeats[key] = self.repeats.get(key, 0) + 1
                 if seen == BASH_NUDGE:
                     return _note(
@@ -565,24 +700,30 @@ class Guardrails:
                         "backs off, times out cleanly, and does not spend a turn per check."
                     )
             return {}
-        if is_scivo_write(name):
+        if is_scivo_write(name) and first:
             # A write may change what every read returns: forget the reads
             # counted so far (this call's own count stays, so the same write
-            # repeated verbatim is still a loop).
+            # repeated verbatim is still a loop). Only the FIRST time it is
+            # made this turn: "write" is read off the tool's name, and on a
+            # server that is not ours a query tool is called `query`. Three of
+            # those asked in rotation each wiped the other two's counts, so
+            # forty-five calls went by without one refusal.
             self.repeats = {key: self.repeats.get(key, 0)}
+            self.outputs.clear()
         seen = self.repeats[key] = self.repeats.get(key, 0) + 1
         if seen < SAME_CALL_LIMIT:
             return {}
         label = name.split("__")[-1]
-        if seen >= SAME_CALL_STOP:
+        if seen >= SAME_CALL_STOP and not self.looping:
             self.looping = label
-        return _deny(
+            self.stop_reason = (f"{label} was called the same way {SAME_CALL_STOP} times "
+                                "in this turn")
+        return self._refuse(
+            label,
             f"Blocked: `{label}` has already run {seen - 1} times in this turn with exactly "
             "these arguments, and returned each time. Calling it again cannot produce anything "
-            "new.\n"
-            "Use the result you already have and answer the user. If it genuinely did not answer "
-            "the question, say that in words instead of repeating the call."
-        )
+            "new.",
+            key)
 
     async def on_compact(self, payload: Any, tool_use_id: str | None,
                          context: Any) -> dict[str, Any]:

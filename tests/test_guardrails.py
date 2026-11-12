@@ -203,7 +203,7 @@ async def test_a_different_command_is_counted_on_its_own():
 @pytest.mark.asyncio
 async def test_old_failures_are_forgotten():
     rails = guardrails.Guardrails()
-    key = ("Bash", guardrails._arguments(_bash_call(LOOP)))
+    key = guardrails._key(_bash_call(LOOP))
     for _ in range(3):
         await _fail(rails, _bash_call(LOOP), SAME_ERR)
     # Push the record past the window: a retry an hour later starts fresh.
@@ -359,3 +359,154 @@ def test_the_other_compute_specs_still_fire():
                         ("512 GB RAM installed", "a memory size"),
                         ("ssh kang@node2 to check", "an ssh target")]:
         assert label in str(_memory_write(note)), note
+
+
+# ── a loop that steps around the refusal (feedback f5c4b6108ef6) ─────────────
+#
+# A local model collecting a three-part briefing asked the same queries dozens
+# of times; the breaker refused, the model moved to the next query and came
+# back, and the person stopped it by hand. Each pattern below ran to the end
+# of its list before the fix, with the turn never stopped.
+
+def _drive(rails, calls, output="3 rows"):
+    """Make the calls the way a session does — the pre-check, and a result for
+    whatever was allowed — until the turn is stopped. Returns (ran, refused)."""
+    ran = refused = 0
+    for name, args in calls:
+        payload = {"tool_name": name, "tool_input": args}
+        out = asyncio.run(rails.on_any_tool(payload, None, None))
+        if "Blocked" in str(out):
+            refused += 1
+        else:
+            ran += 1
+            response = ({"stdout": output, "stderr": ""} if name == "Bash"
+                        else [{"type": "text", "text": output}])
+            asyncio.run(rails.on_tool_success({**payload, "tool_response": response}, None, None))
+        if rails.looping:
+            break
+    return ran, refused
+
+
+_QA, _QB, _QC = ({"sql": f"SELECT * FROM {t}"} for t in ("calendar", "todos", "reminders"))
+_BA, _BB, _BC = ({"command": f'sqlite3 p.db "SELECT * FROM {t}"'}
+                 for t in ("calendar", "todos", "reminders"))
+
+
+def test_refusals_add_up_across_different_calls():
+    """A A A(refused) B B B(refused) C C C(refused): 15 refusals in 45 calls
+    before, and no stop — no single call reached five."""
+    rails = guardrails.Guardrails()
+    calls = [("mcp__persona__query", q) for q in (_QA, _QA, _QA, _QB, _QB, _QB, _QC, _QC, _QC)] * 5
+    ran, refused = _drive(rails, calls)
+    assert rails.looping and (ran, refused) == (6, 3)
+    assert "3 repeated calls were refused" in rails.stop_reason
+
+
+def test_a_query_tool_on_another_server_does_not_wipe_the_counts():
+    """`query` is not a read by its name, so each call counted as a write and
+    forgot the others: A B C in rotation, 45 calls, not one refusal."""
+    rails = guardrails.Guardrails()
+    ran, refused = _drive(rails, [("mcp__persona__query", q) for q in (_QA, _QB, _QC)] * 15)
+    assert rails.looping and ran <= 9 and refused == 3
+
+
+def test_the_same_command_with_the_same_output_is_refused():
+    """Bash was never refused, at any count: 40 identical sqlite3 calls, one
+    note about Monitor."""
+    rails = guardrails.Guardrails()
+    ran, refused = _drive(rails, [("Bash", _BA)] * 40)
+    assert rails.looping and (ran, refused) == (3, 3)
+
+
+def test_three_commands_in_rotation_are_stopped_too():
+    rails = guardrails.Guardrails()
+    ran, refused = _drive(rails, [("Bash", c) for c in (_BA, _BB, _BC)] * 13)
+    assert rails.looping and ran <= 12 and refused == 3
+
+
+def test_rewording_the_description_is_the_same_command():
+    rails = guardrails.Guardrails()
+    calls = [("Bash", {**_BA, "description": f"try number {i}"}) for i in range(40)]
+    ran, refused = _drive(rails, calls)
+    assert rails.looping and (ran, refused) == (3, 3)
+
+
+def test_a_command_whose_output_changes_is_watching_not_looping():
+    rails = guardrails.Guardrails()
+    payload = {"tool_name": "Bash", "tool_input": {"command": "ssh h 'tail -1 run.log'"}}
+    for i in range(12):
+        out = asyncio.run(rails.on_any_tool(payload, None, None))
+        assert "Blocked" not in str(out), f"refused on poll {i}"
+        asyncio.run(rails.on_tool_success(
+            {**payload, "tool_response": {"stdout": f"epoch {i}", "stderr": ""}}, None, None))
+    assert not rails.looping
+
+
+def test_test_then_fix_then_test_again_is_not_a_loop():
+    """The same failing output five times is five fixes that did not work —
+    each fix is a command not yet run this turn."""
+    rails = guardrails.Guardrails()
+    check = {"tool_name": "Bash", "tool_input": {"command": "python check.py"}}
+    for i in range(6):
+        assert "Blocked" not in str(asyncio.run(rails.on_any_tool(check, None, None)))
+        asyncio.run(rails.on_tool_success(
+            {**check, "tool_response": {"stdout": "FAIL: 2 errors", "stderr": ""}}, None, None))
+        fix = {"tool_name": "Bash", "tool_input": {"command": f"sed -i 's/a{i}/b/' f.py"}}
+        assert asyncio.run(rails.on_any_tool(fix, None, None)) == {}
+        asyncio.run(rails.on_tool_success(
+            {**fix, "tool_response": {"stdout": "", "stderr": ""}}, None, None))
+    assert not rails.looping
+
+
+def test_a_file_edit_in_between_lets_the_command_run_again():
+    rails = guardrails.Guardrails()
+    check = {"tool_name": "Bash", "tool_input": {"command": "python check.py"}}
+    for _ in range(6):
+        assert "Blocked" not in str(asyncio.run(rails.on_any_tool(check, None, None)))
+        asyncio.run(rails.on_tool_success(
+            {**check, "tool_response": {"stdout": "FAIL", "stderr": ""}}, None, None))
+        _call(rails, "Edit", {"file_path": "/x", "old_string": "a", "new_string": "b"})
+    assert not rails.looping
+
+
+def test_a_result_the_payload_does_not_carry_is_not_called_the_same():
+    """No `tool_response`: whether the output repeated cannot be told, and
+    "cannot tell" must not read as "identical"."""
+    rails = guardrails.Guardrails()
+    payload = {"tool_name": "Bash", "tool_input": _BA}
+    for _ in range(8):
+        assert "Blocked" not in str(asyncio.run(rails.on_any_tool(payload, None, None)))
+        asyncio.run(rails.on_tool_success(payload, None, None))
+    assert not rails.looping
+
+
+def test_a_refusal_hands_the_result_back_and_says_what_is_left():
+    rails = guardrails.Guardrails()
+    payload = {"tool_name": "mcp__persona__get_rows", "tool_input": _QA}
+    for _ in range(2):
+        asyncio.run(rails.on_any_tool(payload, None, None))
+        asyncio.run(rails.on_tool_success(
+            {**payload, "tool_response": [{"type": "text", "text": "09:00 lab meeting"}]},
+            None, None))
+    said = str(asyncio.run(rails.on_any_tool(payload, None, None)))
+    assert "09:00 lab meeting" in said
+    assert "not a temporary error" in said and "2 more refused calls ends this turn" in said
+
+
+def test_a_long_result_is_cut_and_says_so():
+    rails = guardrails.Guardrails()
+    payload = {"tool_name": "Bash", "tool_input": _BA}
+    _drive(rails, [("Bash", _BA)] * 3, output="x" * 5000)
+    said = str(asyncio.run(rails.on_any_tool(payload, None, None)))
+    assert "the first 1,200 of 5,000 characters" in said
+    assert "x" * 1201 not in said
+
+
+def test_a_new_turn_starts_the_count_again():
+    rails = guardrails.Guardrails()
+    _drive(rails, [("Bash", _BA)] * 40)
+    assert rails.looping
+    rails.new_turn()
+    assert not rails.looping and rails.refusals == 0 and rails.stop_reason == ""
+    assert _drive(rails, [("Bash", _BA)] * 2) == (2, 0)
+
