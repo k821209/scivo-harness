@@ -118,6 +118,10 @@ EDITING_TOOLS = frozenset({"update_section", "replace_in_section", "add_section"
 # Long enough to cost nothing next to an 11-minute job, short enough that the
 # answer arrives while the person is still thinking about it.
 RUN_POLL_SECONDS = 30.0
+# How long a finished task's wake-up is held to see whether the CLI answers
+# it by itself. Measured in a transcript: the notification at :43, the first
+# tool call of the CLI's own turn at :47, and stream events earlier still.
+WAKE_GRACE = 15.0
 # Consecutive refusals before the watch gives up. An MCP without `run_notices`
 # refuses every time and should stop being asked; a dropped pipe should not
 # cost the notification for a job that is still running.
@@ -331,6 +335,13 @@ class Repl:
         self.notify_mode = _notify_mode_from_env()
         self._wake = asyncio.Event()
         self._wake_notes: list[str] = []
+        # Notifications of the CLI's own tasks, held for WAKE_GRACE before they
+        # are offered: the CLI usually answers one itself, at once, and then
+        # there is nothing to wake for (see _on_unprompted).
+        self._wake_held: list[str] = []
+        self._wake_cli: set[str] = set()
+        # True while the CLI is running a turn nobody here started.
+        self._unprompted = False
         # Runs this session launched, watched until they close. Started only
         # when a run-creating tool is actually called, and stopped the moment
         # nothing of ours is open: the cheapest poll is the one not made.
@@ -624,7 +635,100 @@ class Repl:
             self._on_task_update(message)
         elif isinstance(message, SystemMessage):
             self._on_system(message)
-        # Anything else between turns has no turn to belong to; nothing to show.
+        elif isinstance(message, (StreamEvent, AssistantMessage, UserMessage, ResultMessage)):
+            self._on_unprompted(message)
+
+    def _on_unprompted(self, message) -> None:
+        """The CLI answering a notification by itself — a turn nobody here started.
+
+        When a background task finishes, the CLI does not only queue the
+        notification: it runs a turn on it, at once, and the model writes its
+        report there. This reader used to end with "anything else between
+        turns has no turn to belong to; nothing to show" — so that report went
+        nowhere. Not to the terminal, not to the page. Then the wake-up below
+        asked the model to pick the task up, and it answered, truthfully, that
+        it already had. A session whose work is long remote jobs under a
+        Monitor reports almost entirely in such turns: a day of results, and
+        the corrections to them, reached nobody (feedback 062109d59514, and
+        this harness's own review report on 2026-11-11, read from the
+        transcript afterwards).
+
+        So the turn is shown like any other, through the same handlers, and
+        the wake-up for what it is answering is withdrawn.
+        """
+        if not self._unprompted:
+            # Only the model speaking starts one. A UserMessage between turns
+            # is the notification's own echo, and a stray result belongs to a
+            # turn that has already been shown.
+            if not isinstance(message, (StreamEvent, AssistantMessage)):
+                return
+            self._unprompted = True
+            self._withdraw_cli_wakes()
+            try:
+                self.session.rails.new_turn()
+            except Exception:  # noqa: BLE001 — a display path must not need the rails
+                pass
+            stamp = time.strftime("%H:%M:%S")
+            print(ui.dim(f"\n[{stamp}]  answering the background task — nobody typed this\n"), flush=True)
+            if self.control and self.control.active:
+                self.control.status("answering a background task (nobody typed this)", level="info")
+                self.control.waiting = True
+        if isinstance(message, StreamEvent):
+            self._on_stream(message)
+        elif isinstance(message, AssistantMessage):
+            self._on_assistant(message)
+        elif isinstance(message, UserMessage):
+            self._on_tool_result(message)
+        elif isinstance(message, ResultMessage):
+            try:
+                self._on_result(message)
+            finally:
+                self._unprompted = False
+                if self.control and self.control.active:
+                    self.control.waiting = False
+                print(flush=True)
+
+    # ------------------------------------------------------------- wake-ups
+
+    def _hold_cli_wake(self, note: str) -> None:
+        """A wake-up for one of the CLI's own tasks: offered only if the CLI
+        does not answer it itself within WAKE_GRACE.
+
+        Offering at once meant two turns for one event — the CLI's, unseen,
+        and then ours, to which the honest answer was "already handled" — and
+        the second one cost a turn to say it.
+        """
+        cli = getattr(self, "_wake_cli", None)
+        if cli is not None:
+            cli.add(note)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        held = getattr(self, "_wake_held", None)
+        if loop is None or held is None:
+            self._wake_notes.append(note)       # nothing to wait on: as before
+            self._wake.set()
+            return
+        held.append(note)
+        loop.call_later(WAKE_GRACE, self._release_held_wakes)
+
+    def _release_held_wakes(self) -> None:
+        if self._unprompted:
+            return                               # being answered right now
+        notes, self._wake_held = self._wake_held, []
+        if notes:
+            self._wake_notes.extend(notes)
+            self._wake.set()
+
+    def _withdraw_cli_wakes(self) -> None:
+        """The CLI is answering its own notifications: nothing to wake for.
+        A run notice from OUR watch is not the CLI's and stays."""
+        self._wake_held = []
+        self._wake_notes = [n for n in self._wake_notes if n not in self._wake_cli]
+        self._wake_cli = set()
+        if not self._wake_notes:
+            self._wake.clear()
 
     def _tasks_file(self) -> Path:
         return self.session.config.root / TASKS_FILE
@@ -822,8 +926,7 @@ class Repl:
                 note += f" ({summary})"
             if output:
                 note += f", output in {output}"
-            self._wake_notes.append(note)
-            self._wake.set()
+            Repl._hold_cli_wake(self, note)
 
     def _consume_wake(self) -> list[str]:
         """The notifications waiting for a turn, taken and cleared.
@@ -834,6 +937,10 @@ class Repl:
         be woken again for it afterwards.
         """
         notes, self._wake_notes = self._wake_notes, []
+        if getattr(self, "_wake_held", None):
+            self._wake_held = []
+        if getattr(self, "_wake_cli", None):
+            self._wake_cli = set()
         self._wake.clear()
         return notes
 
