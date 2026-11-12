@@ -387,6 +387,16 @@ BASH_SAME_OUTPUT = 3
 # local model collecting a three-part briefing, stopped by hand).
 REFUSALS_STOP = 3
 
+# A call that comes back refused WITHOUT having run — by a guard here, by a
+# hook file, by the CLI ("No such tool available") — and is made again. Nothing
+# counted these: a refused call has no result and no failure, so every counter
+# above stood still while one turn made three commands 1,114 times in five
+# hours, each refused, through three compactions (msja, 2026-11-12). The same
+# refusal of the same call counts as the same failure (FAILED_REPEAT_LIMIT),
+# and this many refusals of anything in one turn ends it: by then the model is
+# looking for a way round the rule, not for what the rule asks.
+UNRUN_STOP = 8
+
 # How much of the result a refusal hands back. The model that loops is often
 # the one that did not take the result in; being told "you have it" does not
 # give it to them, and running the tool again is the only other way to get it.
@@ -458,6 +468,16 @@ class Guardrails:
         self.outputs: dict[tuple[str, str], list] = {}
         self.returned: dict[tuple[str, str], str] = {}
         self.refusals = 0
+        # Calls refused before they ran, this turn; and the ids of the ones
+        # the loop breaker refused itself, which it has already counted.
+        self.unrun = 0
+        self.counted: set[str] = set()
+        # What to tell the person when the turn is ended.
+        self.stop_hint = ""
+        # The scivo tools this session carries, bare names — None until the
+        # session says. A refusal that sends the model to a tool checks here
+        # first.
+        self.loaded: set[str] | None = None
         # (tool, arguments) -> [count, error signature, last time]. Survives
         # new_turn on purpose: a loop that retries once per turn is exactly
         # what the per-turn counters miss.
@@ -540,10 +560,49 @@ class Guardrails:
         self.outputs.clear()
         self.returned.clear()
         self.refusals = 0
+        self.unrun = 0
+        self.counted.clear()
+        self.stop_hint = ""
 
-    def _refuse(self, label: str, said: str, key: tuple[str, str]) -> dict[str, Any]:
+    def kit_changed(self, loaded: set[str]) -> None:
+        """The session carries a different set of tools now (a profile or a
+        model switch). What could not work a minute ago may work now, so a
+        call that was refused is not held against the new kit."""
+        self.loaded = set(loaded)
+        self.failures.clear()
+
+    def note_refused(self, tool_use_id: str | None, name: str, tool_input: Any,
+                     text: str) -> None:
+        """A call came back refused without having run. Called by the session
+        for every such result, whoever refused it."""
+        if tool_use_id and tool_use_id in self.counted:
+            return          # the loop breaker's own refusal, counted where it was made
+        key = _key({"tool_name": name, "tool_input": tool_input})
+        strikes = self.record_failure(*key, text)
+        self.unrun += 1
+        if self.looping:
+            return
+        label = name.split("__")[-1] if name.startswith("mcp__") else name
+        why = self.failures[key][1]
+        hint = ("Nothing was run. The refusal says what it wants instead; if the model "
+                "cannot get there, do that step yourself or tell it how.")
+        if strikes > FAILED_REPEAT_LIMIT:
+            self.looping = label
+            self.stop_reason = (f"the same {label} call was refused {strikes} times and "
+                                f"made again — {why}")
+            self.stop_hint = hint
+        elif self.unrun >= UNRUN_STOP:
+            self.looping = label
+            self.stop_reason = (f"{self.unrun} calls were refused in this turn before they "
+                                f"ran (last: {label} — {why})")
+            self.stop_hint = hint
+
+    def _refuse(self, label: str, said: str, key: tuple[str, str],
+                tool_use_id: str | None = None) -> dict[str, Any]:
         """Refuse a repeat, hand back what it returned, and end the turn once
         refusing has not worked."""
+        if tool_use_id:
+            self.counted.add(tool_use_id)
         self.refusals += 1
         left = REFUSALS_STOP - self.refusals
         if left <= 0 and not self.looping:
@@ -655,8 +714,14 @@ class Guardrails:
         strikes = self._failure_strikes(key, time.monotonic())
         if strikes >= FAILED_REPEAT_LIMIT:
             label = name.split("__")[-1] if name.startswith("mcp__") else name
-            self.looping = label
-            self.stop_reason = f"{label} failed the same way {strikes} times"
+            if tool_use_id:
+                self.counted.add(tool_use_id)
+            if not self.looping:
+                self.looping = label
+                self.stop_reason = (f"{label} failed or was refused the same way {strikes} "
+                                    f"times and was made again — {self.failures[key][1]}")
+                self.stop_hint = ("It was not run again. Fix what the error names, or tell "
+                                  "the model what to do instead.")
             return _deny(
                 f"Blocked: this exact `{label}` call has already failed {strikes} times with the "
                 f"same error — {self.failures[key][1]}\n"
@@ -691,9 +756,11 @@ class Guardrails:
                         "cannot print anything new. If you are waiting for the output to change, "
                         "that is `Monitor` with an until-loop (or `wait_for_run` for a recorded "
                         "run), not the same command again.",
-                        key)
+                        key, tool_use_id)
                 seen = self.repeats[key] = self.repeats.get(key, 0) + 1
-                if seen == BASH_NUDGE:
+                # Only for a command that has RUN: the note is about polling,
+                # and it was given to a command refused five times in a row.
+                if seen == BASH_NUDGE and key in self.returned:
                     return _note(
                         "This Bash command has run identically several times. If it is polling for a "
                         "log line or a file to appear, use `Monitor` with an until-loop instead — that "
@@ -723,7 +790,7 @@ class Guardrails:
             f"Blocked: `{label}` has already run {seen - 1} times in this turn with exactly "
             "these arguments, and returned each time. Calling it again cannot produce anything "
             "new.",
-            key)
+            key, tool_use_id)
 
     async def on_compact(self, payload: Any, tool_use_id: str | None,
                          context: Any) -> dict[str, Any]:
@@ -750,6 +817,20 @@ class Guardrails:
 
         if RAW_REMOTE_JOB.search(command):
             self.blocked.append("raw remote job")
+            if self.loaded is not None and "submit_remote_job" not in self.loaded:
+                # Never send the model to a tool it does not have.
+                return _deny(
+                    "Blocked: a remote job launched through raw ssh leaves no run record, so "
+                    "the Runs tab cannot say which machine, command and parameters produced "
+                    "the result.\n"
+                    "The tool that launches it WITH a record, `submit_remote_job`, is not "
+                    "loaded in this session (a read-only session, or a profile that carries "
+                    "no scivo tools). There is no way to start this job from here, and "
+                    "rewording the command will be refused the same way.\n"
+                    "Stop and tell the user: what you were going to launch and on which "
+                    "server, and that they can run it themselves or restart the session "
+                    "with its tools (`/profile` lists the choices)."
+                )
             return _deny(
                 "Blocked: a remote job launched through raw ssh leaves no run record, so the "
                 "Runs tab cannot say which machine, command and parameters produced the result.\n"

@@ -40,6 +40,7 @@ from .interrupts import KeyWatcher
 from . import attachments as _attachments
 from .prompt_line import Line
 from .permissions import is_outward
+from . import session as session_mod
 from .session import Session, scivo_tool_label
 from .toolsets import PREFIX
 
@@ -269,6 +270,30 @@ def _result_state(block) -> str:
     return "failed"
 
 
+def _refused_unrun(block) -> str:
+    """The refusal's text when a call came back refused WITHOUT having run —
+    a PreToolUse hook's denial (this harness's guards, or a hook file), or the
+    CLI saying the tool does not exist. "" for everything else, including a
+    person saying no: that is an answer, not a rule to walk around."""
+    if not bool(getattr(block, "is_error", False)):
+        return ""
+    content = getattr(block, "content", "")
+    if isinstance(content, list):
+        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    text = str(content).strip()
+    head = text.removeprefix("<tool_use_error>").lstrip()
+    # A hook's denial arrives two ways, depending on the CLI: wrapped
+    # ("PreToolUse:Bash hook error: [...]: Blocked: …", as in the msja log) or
+    # as the bare reason ("Blocked: …", as the CLI on the development machine
+    # sends it). The first version of this matched only the wrapped one, and a
+    # live session made the same refused call six times without being stopped.
+    if head.startswith(("PreToolUse:", "Blocked:", "Held")):
+        return head
+    if "No such tool available" in head[:160]:
+        return head
+    return ""
+
+
 def _preview(tool: str, payload: dict[str, Any]) -> str:
     """One line describing a tool call, without dumping its arguments."""
     if tool == "Bash":
@@ -365,6 +390,8 @@ class Repl:
         self._stopping = False
         self.tool_calls = 0
         self._tool_started: dict[str, tuple[int, float]] = {}
+        # What each open call asked for, so a refusal can be counted against it.
+        self._tool_asked: dict[str, tuple[str, Any]] = {}
         self._activity_shown = False
         self._last_output = time.monotonic()
         ui.clear_activity = self._clear_activity
@@ -443,6 +470,7 @@ class Repl:
                 # gave no way to tell a retry from a call still running.
                 self.tool_calls += 1
                 self._tool_started[block.id] = (self.tool_calls, time.monotonic())
+                self._tool_asked[block.id] = (block.name, block.input or {})
                 stamp = time.strftime("%H:%M:%S")
                 line = f"  #{self.tool_calls} {stamp}  {label}" + (f"  {detail}" if detail else "")
                 print(ui.dim(line), flush=True)
@@ -476,6 +504,10 @@ class Repl:
             if identifier is None or identifier not in self._tool_started:
                 continue
             number, started = self._tool_started.pop(identifier)
+            name, asked = self._tool_asked.pop(identifier, ("", {}))
+            refusal = _refused_unrun(block)
+            if refusal and name:
+                self.session.rails.note_refused(identifier, name, asked, refusal)
             seconds = time.monotonic() - started
             took = f"{seconds:.1f}s" if seconds < 60 else f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
             state = _result_state(block)
@@ -1278,12 +1310,13 @@ class Repl:
             else:
                 print(ui.dim(f"\n  claude.ai subscription — {self.turns} turns, on your plan\n"))
         elif command == "/tools":
-            plan = self.session.plan
+            plan = self.session.kit()
             print(f"\n  {plan.summary()}")
-            if self.session.lean_tools:
-                print(ui.dim(f"  lean kit: {self.session.lean_tools} of them are loaded — a small "
-                             "model reads every schema on every request."))
-                print(ui.dim("  `scivo --profile video` (or deck, analysis) loads that domain too."))
+            if plan.lean:
+                print(ui.dim("  a small model reads every schema on every request, so a local "
+                             "session carries a working core."))
+                print(ui.dim("  `/profile video` (or deck, analysis) loads that domain beside "
+                             "it; `full` is the core alone."))
             if plan.dropped:
                 print(ui.dim(f"  dropped: {', '.join(plan.dropped[:12])}"
                              + (" …" if len(plan.dropped) > 12 else "")))
@@ -1642,8 +1675,14 @@ class Repl:
         self.session_id = None
         if self.control:
             self.control.model = model
-        hint = ""
-        self._say(ui.green(f"  now on {target_name} · {model}") + ui.dim(f"\n{hint}\n" if hint else "\n"))
+        # A local model carries a smaller kit than a Claude one, so the
+        # switch changes what is loaded — said here, where it happens, with
+        # the count that is true for the new model.
+        kit = self.session.kit()
+        self.session.rails.kit_changed(set(kit.kept))
+        self.session.lean_tools = len(kit.kept) if kit.lean else None
+        self._say(ui.green(f"  now on {target_name} · {model}")
+                  + ui.dim(f"\n  {kit.summary()}\n"))
 
     def _resumed(self, options):
         """`options`, pointed back at THIS conversation when there is one.
@@ -1735,7 +1774,9 @@ class Repl:
             domains = ", ".join(toolsets.PROFILES[name])
             # An empty column reads as a rendering gap rather than as the
             # profile's whole point.
-            rows.append((name, len(plan.kept),
+            # What THIS session would carry: a local model's kit is smaller
+            # than the profile's plan, and `full` is not its largest.
+            rows.append((name, len(self.session.kit(plan).kept),
                          domains or "nothing — the host's own tools only"))
         return rows
 
@@ -1764,7 +1805,7 @@ class Repl:
                     + (ui.green(f"  {kept:>3} tools") if here else f"  {kept:>3} tools")
                     + ui.dim(f"  {domains}")
                     + (ui.green("  ← this session") if here else ""))
-            self._say(f"\n  {self.session.plan.summary()}"
+            self._say(f"\n  {self.session.kit().summary()}"
                       + "".join(listing)
                       + ui.dim("\n\n  /profile <number or name>"
                                "\n  this scopes the scivo TOOLS; skills stay available in every"
@@ -1784,7 +1825,7 @@ class Repl:
                       + ui.dim(f" — {', '.join(toolsets.PROFILES)}\n"))
             return
         if wanted == current:
-            self._say(ui.dim(f"\n  already on {wanted} — {self.session.plan.summary()}\n"))
+            self._say(ui.dim(f"\n  already on {wanted} — {self.session.kit().summary()}\n"))
             return
 
         plan = toolsets.plan(list(self.session.scivo_tools), profile=wanted,
@@ -1804,10 +1845,13 @@ class Repl:
             plan,
             full_append=prompt_mod.build(self.session.briefing, plan,
                                          guide=self.session.guide),
-            lean_append=prompt_mod.build(self.session.briefing, plan, guide=None),
+            lean_append=prompt_mod.build(
+                self.session.briefing,
+                session_mod.kit_plan(plan, self.session.scivo_tools, True), guide=None),
             resume=self.session_id,
         )
-        self._say(ui.dim(f"\n  switching to {wanted} — {plan.summary()}…"))
+        kit, was = self.session.kit(plan), self.session.kit(before_plan)
+        self._say(ui.dim(f"\n  switching to {wanted} — {kit.summary()}…"))
         try:
             await self._swap_client(options)
         except Exception as exc:  # noqa: BLE001
@@ -1822,12 +1866,20 @@ class Repl:
             self._say(ui.dim(f"  still on {before_plan.profile}; {kept}\n"))
             return
         self.session.options = options
+        self.session.rails.kit_changed(set(kit.kept))
+        if self.session.lean_tools is not None:
+            self.session.lean_tools = len(kit.kept)
         kept = ("the conversation continues" if self.session_id
                 # Said plainly rather than discovered: without an id to resume,
                 # the rebuilt process starts empty, and that is worth knowing
                 # BEFORE typing the next message into it.
                 else "a NEW conversation — this session had no id to resume")
-        self._say(ui.green(f"  {plan.summary()}") + ui.dim(f" — {kept}\n"))
+        self._say(ui.green(f"  {kit.summary()}") + ui.dim(f" — {kept}\n"))
+        gone = [name for name in was.kept if name not in set(kit.kept)]
+        if gone:
+            # A switch made to GET tools must not take some away in silence.
+            self._say(ui.yellow(f"  no longer loaded ({len(gone)}): ")
+                      + ui.dim(", ".join(gone[:10]) + (" …" if len(gone) > 10 else "") + "\n"))
 
     # ---------------------------------------------------------- permissions
 
@@ -1859,7 +1911,7 @@ class Repl:
     def _tool(self, token: str) -> str:
         if token.startswith("mcp__"):
             return token
-        if token in self.session.plan.kept:
+        if token in self.session.kit().kept:
             return PREFIX + token
         return token
 
@@ -2083,10 +2135,11 @@ class Repl:
                         why = (getattr(self.session.rails, "stop_reason", "")
                                or f"{label} was called the same way "
                                   f"{guardrails.SAME_CALL_STOP} times in this turn")
-                        self._say(ui.yellow(f"\n  stopped: {why}")
-                                  + ui.dim("\n  The results were delivered each time; the model "
-                                           "kept asking. Try a more specific instruction, or "
-                                           "`/model opus` for this one.\n"))
+                        hint = (getattr(self.session.rails, "stop_hint", "")
+                                or "The results were delivered each time; the model kept "
+                                   "asking. Try a more specific instruction, or `/model opus` "
+                                   "for this one.")
+                        self._say(ui.yellow(f"\n  stopped: {why}") + ui.dim(f"\n  {hint}\n"))
                         await client.interrupt()
             # Keys pressed during the turn were read here, not by the terminal.
             # Hand them to the next prompt so they are not silently eaten.
@@ -2166,13 +2219,14 @@ class Repl:
         if self.session.provider.has_endpoint:
             label += f" @ {self.session.provider.name}"
         print(ui.banner(briefing.project_name, briefing.project_id,
-                        self.session.plan.summary(), label))
+                        self.session.kit().summary(), label))
         for line in ui.attention(briefing):
             print(line)
         if self.session.lean_tools:
-            print(ui.dim(f"  lean kit: {self.session.lean_tools} scivo tools"
+            print(ui.dim("  a local model carries a working core"
                          + ("" if self.session.plan.profile != "full"
-                            else " — `--profile video | deck | analysis` loads that domain too")))
+                            else " — `--profile video | deck | analysis` loads that domain "
+                                 "beside it; `full` is the core alone")))
         if self.session.endpoint is not None and self.session.endpoint.note:
             print(ui.dim(f"  · {self.session.endpoint.note}"))
         if self.mode == "bypassPermissions":

@@ -150,3 +150,87 @@ def test_a_toolless_session_gets_neither_guide():
     assert prompt.LOCAL_GUIDE in prompt.build(Briefing(), narrow, guide=None)
     assert "PROJECT GUIDE TEXT" in prompt.build(Briefing(), narrow,
                                                 guide="PROJECT GUIDE TEXT")
+
+
+# ── what a refusal sends the model to is always there ────────────────────────
+
+REAL = list(dict.fromkeys(
+    NAMES + list(toolsets.PRESCRIBED) + ["list_videos", "list_materials", "get_material"]))
+
+
+def test_every_profile_that_loads_anything_loads_what_the_guards_prescribe():
+    """`--profile video` had no `submit_remote_job`, and the ssh guard named
+    it 358 times in one turn (feedback d291849a7b1a)."""
+    from scivo_harness import session
+    for profile, domains in toolsets.PROFILES.items():
+        if not domains:
+            continue
+        plan = toolsets.plan(REAL, profile)
+        assert set(toolsets.PRESCRIBED) <= set(plan.kept), profile
+        local = session.kit_plan(plan, tuple(REAL), True)
+        assert set(toolsets.PRESCRIBED) <= set(local.kept), f"{profile}, local model"
+
+
+def test_what_the_guards_name_is_in_the_prescribed_list():
+    """Derived from the guard's own text: a refusal written tomorrow that
+    names another tool fails here until that tool is carried everywhere."""
+    import inspect
+    import re
+    from scivo_harness import guardrails
+    source = inspect.getsource(guardrails)
+    named = set(re.findall(r"mcp__scivo__([a-z_]+)", source))
+    named |= {name for name in re.findall(r"`([a-z]+_[a-z_]+)`", source)
+              if name.startswith(("submit_", "wait_", "kill_", "create_", "record_",
+                                  "add_server", "update_server"))}
+    assert named, "the scan found nothing — it is not reading the refusals"
+    assert named <= set(toolsets.PRESCRIBED) | set(toolsets.ALWAYS), \
+        named - set(toolsets.PRESCRIBED) - set(toolsets.ALWAYS)
+
+
+def test_a_read_only_session_still_drops_the_writers_among_them():
+    kept = set(toolsets.plan(REAL, "video", read_only=True).kept)
+    assert "submit_remote_job" not in kept and "list_servers" in kept
+
+
+def test_the_kit_plan_is_what_a_local_session_is_actually_given():
+    """One computation: what is reported and what the CLI is told to drop."""
+    from dataclasses import dataclass, field
+    from scivo_harness import session
+
+    @dataclass
+    class Opts:
+        disallowed_tools: list = field(default_factory=list)
+        tools: list | None = None
+        system_prompt: dict = field(default_factory=dict)
+
+    for profile in ("full", "video", "paper", "writing"):
+        plan = toolsets.plan(REAL, profile)
+        kit = session.kit_plan(plan, tuple(REAL), True)
+        given = session.lean(Opts(disallowed_tools=plan.disallowed), "x", tuple(REAL), profile)
+        loaded = {name for name in REAL if toolsets.PREFIX + name not in set(given.disallowed_tools)}
+        assert loaded == set(kit.kept), profile
+        assert kit.lean and "local model" in kit.summary()
+        assert len(kit.kept) + len(kit.dropped) == len(REAL)
+
+
+def test_full_is_not_the_largest_kit_for_a_local_model():
+    """The fact the banner hid: `/profile full`, typed to get more, drops the
+    video tools a local `video` session had."""
+    from scivo_harness import session
+    full = session.kit_plan(toolsets.plan(REAL, "full"), tuple(REAL), True)
+    video = session.kit_plan(toolsets.plan(REAL, "video"), tuple(REAL), True)
+    assert "add_video" in video.kept and "add_video" not in full.kept
+    assert len(toolsets.plan(REAL, "full").kept) > len(full.kept)
+    assert session.kit_plan(toolsets.plan(REAL, "full"), tuple(REAL), False).lean is False
+
+
+def test_a_local_session_is_not_told_that_full_carries_everything():
+    from scivo_harness import prompt, session
+    from scivo_harness.preflight import Briefing
+    kit = session.kit_plan(toolsets.plan(REAL, "video"), tuple(REAL), True)
+    said = prompt.build(Briefing(), kit, guide=None)
+    assert f"{len(kit.kept)} of {len(REAL)} scivo tools are loaded" in said
+    assert "`full` here is the core alone" in said
+    assert "restart under" not in said
+    cloud = prompt.build(Briefing(), toolsets.plan(REAL, "video"), guide=None)
+    assert "`scivo --profile full`" in cloud

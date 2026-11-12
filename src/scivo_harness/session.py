@@ -87,9 +87,7 @@ LOCAL_SCIVO_TOOLS = (
     "log_activity", "report_feedback",
     # Every tool a guardrail message sends the model to. A block that says "use
     # submit_remote_job" in a session without it is a dead end.
-    "list_servers", "get_server", "add_server", "update_server", "add_server_env",
-    "submit_remote_job", "tail_remote_log", "poll_remote_pids",
-    "create_analysis", "record_analysis_run",
+    *toolsets.PRESCRIBED,
 )
 
 # Everything else comes in by domain, and only when asked for: `--profile
@@ -127,6 +125,11 @@ class Session:
     # (and `/profile none` has to drop the guide entirely).
     guide: str | None = None
 
+    def kit(self, plan: ToolPlan | None = None, provider: Provider | None = None) -> ToolPlan:
+        """What is loaded — or would be, for another plan or provider."""
+        return kit_plan(plan or self.plan, self.scivo_tools,
+                        (provider or self.provider).lean_profile)
+
     def options_for(self, provider: Provider, **changes: Any) -> ClaudeAgentOptions:
         """Options for `provider`: the full session, or the lean one for a small model.
 
@@ -135,6 +138,14 @@ class Session:
         (`env`, `model`) explicitly. For changing the tool surface without
         changing where the request goes, use `options_rekitted`.
         """
+        if "env" in changes:
+            # A provider switch hands over the ENDPOINT's environment. Taken as
+            # the whole environment, it dropped the session's own: after
+            # `/model <local>` the hook file no longer saw SCIVO_HARNESS, so
+            # every backgrounded ssh was refused twice, by two layers with two
+            # sets of rules (771 + 358 refusals in one msja turn), and the run
+            # watcher's client id was gone as well.
+            changes["env"] = {**session_env(), **(changes["env"] or {})}
         base = replace(self.full_options, **changes)
         if not provider.lean_profile:
             return base
@@ -188,6 +199,48 @@ def local_kit(scivo_tools: tuple[str, ...], profile: str) -> set[str]:
     # keyframes) — a lean video session without it cannot do step 3.
     keep.update(n for n in scivo_tools if set(toolsets.ALSO.get(n, ())) & set(wanted))
     return keep
+
+
+def kit_plan(plan: ToolPlan, scivo_tools: tuple[str, ...], lean_profile: bool) -> ToolPlan:
+    """The plan as it is actually in force.
+
+    For a Claude model that is the profile's plan. For a local one it is that
+    plan cut down to `local_kit` — and everything that reports a count or
+    names what is loaded has to read THIS. The banner said "profile full:
+    261/262 scivo tools" to a local session carrying 37, the prompt told the
+    model the same, and `/profile full`, typed to get MORE tools, took the
+    video tools away while saying 261 (msja session, 2026-11-13: five rounds
+    of calls to tools that were not there, each answered "No such tool").
+    """
+    if not lean_profile or plan.lean:
+        return plan
+    keep = local_kit(tuple(scivo_tools), plan.profile)
+    kept = [name for name in plan.kept if name in keep]
+    carried = set(kept)
+    return replace(
+        plan,
+        kept=kept,
+        dropped=[name for name in scivo_tools if name not in carried],
+        read_only=[name for name in plan.read_only if name in carried],
+        lean=True,
+    )
+
+
+def session_env() -> dict[str, str]:
+    """What every Claude Code process of this session is started with,
+    whichever endpoint it talks to.
+
+    MCP_DISCOVERY_CACHE: the CLI caches a server's tool list on disk and it
+    can outlive an MCP update: after `git pull` the server had new parameters
+    and the session still saw the old schema. Off means every start discovers.
+    SCIVO_HARNESS: a project wired for Claude Code carries the ssh provenance
+    guard as a file hook (.claude/settings.local.json), and this session reads
+    that file too. The guard stands down when it sees this — the rules are
+    enforced here, in process (guardrails), and one command refused twice in
+    two wordings helps nobody.
+    """
+    return {"MCP_DISCOVERY_CACHE": "false", "SCIVO_HARNESS": "1",
+            "SCIVO_CLIENT_ID": session_client_id()}
 
 
 def lean(options: ClaudeAgentOptions, append: str, scivo_tools: tuple[str, ...],
@@ -314,13 +367,8 @@ async def build(
         # can outlive an MCP update: after `git pull` the server had new
         # parameters and the session still saw the old schema. The CLI reads
         # this switch from its environment; off means every start discovers.
-        # SCIVO_HARNESS: a project wired for Claude Code carries the ssh
-        # provenance guard as a file hook (.claude/settings.local.json), and
-        # this session reads that file too. The guard stands down when it
-        # sees this — the rules are enforced here, in process (guardrails),
-        # and one command refused twice in two wordings helps nobody.
-        env={"MCP_DISCOVERY_CACHE": "false", "SCIVO_HARNESS": "1",
-             "SCIVO_CLIENT_ID": session_client_id(), **endpoint.env},
+        # The session's own variables are in `session_env`, with why.
+        env={**session_env(), **endpoint.env},
         cwd=str(config.root),
         add_dirs=list(add_dirs or []),
         # Makes bypassPermissions *available* without turning it on, so
@@ -341,12 +389,16 @@ async def build(
     session = Session(options=options, briefing=briefing, plan=plan, rails=rails,
                       config=config, provider=chosen, model=model, approver=approver,
                       endpoint=endpoint, full_options=options,
-                      lean_append=prompt.build(briefing, plan, guide=None),
+                      # The lean prompt describes the lean kit, not the plan
+                      # it was cut from.
+                      lean_append=prompt.build(
+                          briefing, kit_plan(plan, tuple(tool_names), True), guide=None),
                       guide=guide,
                       scivo_tools=tuple(tool_names), resumed=resume)
     session.options = session.options_for(chosen)
     if chosen.lean_profile:
-        session.lean_tools = len(local_kit(tuple(tool_names), profile))
+        session.lean_tools = len(session.kit().kept)
+    rails.loaded = set(session.kit().kept)
     return session
 
 

@@ -108,14 +108,13 @@ def test_discovery_cache_is_off_for_the_cli_but_a_provider_may_override():
     cache that outlives an MCP update, unless a provider says otherwise."""
     import inspect
     from scivo_harness import session
+    assert session.session_env()["MCP_DISCOVERY_CACHE"] == "false"
     src = inspect.getsource(session.build)
-    # The ORDER, not the line it happens to sit on: the default is written
-    # first and `**endpoint.env` spread after it, which is what lets a provider
-    # override it. Asserting the exact string broke when another variable
-    # joined that dict and said nothing about the rule it was guarding.
-    assert '"MCP_DISCOVERY_CACHE": "false"' in src
-    assert "**endpoint.env" in src
-    assert src.index('"MCP_DISCOVERY_CACHE"') < src.index("**endpoint.env")
+    # The ORDER, not the line it happens to sit on: the session's own
+    # variables are spread first and `**endpoint.env` after them, which is
+    # what lets a provider override one.
+    assert "**session_env()" in src and "**endpoint.env" in src
+    assert src.index("**session_env()") < src.index("**endpoint.env")
 
 
 def test_a_question_goes_to_the_control_page_when_it_is_up():
@@ -360,7 +359,7 @@ def _repl_seam(streamed: str, control):
     """A stand-in for the Repl, holding only what _on_assistant touches."""
     from types import SimpleNamespace
     return SimpleNamespace(
-        _streamed=streamed, control=control, tool_calls=0, _tool_started={},
+        _streamed=streamed, control=control, tool_calls=0, _tool_started={}, _tool_asked={},
         _mark_output=lambda: None,
     )
 
@@ -396,3 +395,48 @@ def test_a_block_that_never_streamed_is_published_once():
     seam = _repl_seam("", control)          # no partial streaming this turn
     Repl._on_assistant(seam, _assistant("PINGPONG"))
     assert control.published == ["PINGPONG"]
+
+
+# ── a refusal is seen where the result arrives ──────────────────────────────
+
+def _result_block(text, is_error=True):
+    import types
+    return types.SimpleNamespace(tool_use_id="t1", is_error=is_error, content=text)
+
+
+def test_only_a_call_refused_before_it_ran_counts_as_refused():
+    from scivo_harness.repl import _refused_unrun
+    assert _refused_unrun(_result_block(
+        "PreToolUse:Bash hook error: Blocked: a remote job launched through raw ssh"))
+    assert _refused_unrun(_result_block(
+        "<tool_use_error>Error: No such tool available: mcp__scivo__list_videos.</tool_use_error>"))
+    # the bare reason, which is how this machine's CLI hands a hook's denial over
+    assert _refused_unrun(_result_block(
+        "Blocked: a remote job launched through raw ssh leaves no run record"))
+    assert _refused_unrun(_result_block("Held for the user: writing outside the project"))
+    # an ordinary tool error is not a refusal
+    assert not _refused_unrun(_result_block(
+        "<tool_use_error>File has not been read yet. Read it first.</tool_use_error>"))
+    # a person saying no, a command that failed, a result that is fine
+    assert not _refused_unrun(_result_block("The user doesn't want to proceed with this tool use."))
+    assert not _refused_unrun(_result_block("Exit code 1\ncp: cannot stat"))
+    assert not _refused_unrun(_result_block("PreToolUse: looks like one", is_error=False))
+
+
+def test_the_session_reports_each_refusal_to_the_guardrails():
+    import time as _time
+    import types
+    from scivo_harness.repl import Repl
+    seen = []
+    rails = types.SimpleNamespace(note_refused=lambda *a: seen.append(a))
+    stub = types.SimpleNamespace(
+        session=types.SimpleNamespace(rails=rails), control=None,
+        _tool_started={"t1": (7, _time.monotonic()), "t2": (8, _time.monotonic())},
+        _tool_asked={"t1": ("Bash", {"command": "ssh h 'x &'"}), "t2": ("Bash", {"command": "ls"})},
+        _mark_output=lambda: None)
+    ok = types.SimpleNamespace(tool_use_id="t2", is_error=False, content="a b")
+    message = types.SimpleNamespace(content=[
+        _result_block("PreToolUse:Bash hook error: Blocked: raw ssh"), ok])
+    Repl._on_tool_result(stub, message)
+    assert seen == [("t1", "Bash", {"command": "ssh h 'x &'"},
+                     "PreToolUse:Bash hook error: Blocked: raw ssh")]

@@ -52,6 +52,18 @@ ALWAYS = (
     "list_project_papers", "get_user_secret", "list_user_secrets",
 )
 
+# Every scivo tool a guardrail's refusal sends the model to, and what a job
+# launched that way needs afterwards. A refusal that names a tool the session
+# does not carry is a dead end with a signpost on it: "use submit_remote_job"
+# was said 358 times in one turn to a `--profile video` session that had no
+# such tool, for five hours (feedback d291849a7b1a). The guards do not know
+# what the profile is, so every profile that loads anything loads these.
+PRESCRIBED = (
+    "submit_remote_job", "tail_remote_log", "poll_remote_pids", "wait_for_run",
+    "kill_remote_job", "mark_run_finished", "create_analysis", "record_analysis_run",
+    "list_servers", "get_server", "add_server", "update_server", "add_server_env",
+)
+
 READ_ONLY_PREFIXES = (
     "list_", "get_", "read_", "search_", "count_", "check_", "verify_",
     "preview_", "diff_", "compare_", "lint_", "validate_", "scan_", "poll_",
@@ -91,6 +103,10 @@ class ToolPlan:
     read_only: list[str]
     profile: str
     read_only_session: bool
+    # True when this is the kit of a LOCAL model: the profile's plan, cut down
+    # to what a small model can carry (session.kit_plan). The counts are then
+    # the kit's, which is what is loaded.
+    lean: bool = False
 
     @property
     def disallowed(self) -> list[str]:
@@ -112,6 +128,7 @@ class ToolPlan:
         return (
             f"profile {self.profile}: {len(self.kept)}/{total} scivo tools "
             f"({len(self.dropped)} dropped from context)"
+            + (" — the kit for a local model" if self.lean else "")
             + (", read-only session" if self.read_only_session else "")
         )
 
@@ -179,7 +196,8 @@ def plan(all_tools: list[str], profile: str = "full", read_only: bool = False) -
                         profile=profile, read_only_session=read_only)
     kept, dropped = [], []
     for name in all_tools:
-        keep = (name in ALWAYS or _domain_of(name) in wanted or _domain_of(name) == "core"
+        keep = (name in ALWAYS or name in PRESCRIBED
+                or _domain_of(name) in wanted or _domain_of(name) == "core"
                 or bool(wanted & set(ALSO.get(name, ()))))
         if name in HARNESS_ONLY:
             keep = False

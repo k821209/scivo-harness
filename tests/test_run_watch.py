@@ -294,8 +294,8 @@ def test_the_cli_is_told_the_client_id_too():
 
     from scivo_harness import session
 
-    src = inspect.getsource(session.build)
-    assert '"SCIVO_CLIENT_ID": session_client_id()' in src
+    assert session.session_env()["SCIVO_CLIENT_ID"] == session.session_client_id()
+    assert "**session_env()" in inspect.getsource(session.build)
 
 
 # ── where the runs are, and over which connection ───────────────────────────

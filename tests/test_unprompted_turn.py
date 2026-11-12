@@ -42,7 +42,8 @@ def _repl(page=None):
         control=page, notify_mode="ask",
         session=types.SimpleNamespace(rails=types.SimpleNamespace(new_turn=lambda: None)),
         _wake=asyncio.Event(), _wake_notes=[], _wake_held=[], _wake_cli=set(), _unprompted=False,
-        _streamed="", tool_calls=0, _tool_started={}, _activity_shown=False, _last_output=0.0,
+        _streamed="", tool_calls=0, _tool_started={}, _tool_asked={}, _activity_shown=False,
+        _last_output=0.0,
         results=[],
     )
     for name in ("_on_idle_message", "_on_unprompted", "_on_stream", "_on_assistant", "_on_tool_result",

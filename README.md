@@ -598,6 +598,21 @@ model class, and the honest reading is "unmeasured", not "fine".
   error. Checked with a cloud model only; against a local model this is
   untested. (2026-11-12)
 
+- **A refused call gets made again, for hours.** One turn made three ssh
+  commands 1,114 times in five hours, through three compactions. Each was
+  refused before it ran — by the hook file and by the guard in process — and a
+  refused call has no result and no failure, so no counter moved. Four things
+  were wrong at once, and all four are fixed: a call refused the same way
+  three times ends the turn on the fourth try, and eight refusals of anything
+  in one turn end it too; the tools a refusal names (`submit_remote_job` and
+  what a launched job needs) are loaded in every profile, where `video`,
+  `deck` and `writing` had none of them; `/model <local>` no longer drops the
+  session's own environment, which had woken the hook file up beside the
+  in-process guard; and a local session is shown and told the kit it has
+  (`full` is the core alone there — it had said 261 tools while carrying 37).
+  Stopping was checked in a real session with a cloud model; against a local
+  model it is untested. (2026-11-13)
+
 - **Empty results get retried.** A Qwen session that gets `[]` from a lookup
   tends to call it again with the query rephrased, several times, until the
   repeat-call breaker stops it; Claude reads the empty result as "not there".

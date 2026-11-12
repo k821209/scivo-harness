@@ -510,3 +510,106 @@ def test_a_new_turn_starts_the_count_again():
     assert not rails.looping and rails.refusals == 0 and rails.stop_reason == ""
     assert _drive(rails, [("Bash", _BA)] * 2) == (2, 0)
 
+
+# ── a refused call, made again (msja, 2026-11-12) ────────────────────────────
+#
+# One turn made three ssh commands 1,114 times in five hours. Every one was
+# refused before it ran — 771 times by the hook file, 358 times here — and a
+# refused call has no result and no failure, so no counter moved.
+
+HOOK_FILE = ("PreToolUse:Bash hook error: [/home/u/.scivo/bin/python3 /home/u/co-sci/packages/"
+             "hooks/pretool_block_ssh_nohup.py]: Blocked: raw ssh nohup to a registered server")
+START = "ssh deevo-219 'bash /tmp/start_qwen.sh > /tmp/qwen.log 2>&1 &'"
+PROBE = "ssh deevo-219 'if curl -s localhost:8000/health; then echo up; fi; bash /tmp/s.sh &'"
+
+
+def _attempt(rails, command, refusal, n):
+    """One call the way a session sees it: the pre-check, then — unless the
+    loop breaker itself refused — the refusal coming back as the result."""
+    payload = _bash_call(command)
+    out = asyncio.run(rails.on_any_tool(payload, f"id-{n}", None))
+    if "Blocked" not in str(out):
+        rails.note_refused(f"id-{n}", "Bash", payload["tool_input"], refusal)
+    return out
+
+
+def test_the_same_refused_command_ends_the_turn_on_the_fourth_try():
+    rails = guardrails.Guardrails()
+    for n in range(408):
+        _attempt(rails, START, HOOK_FILE, n)
+        if rails.looping:
+            break
+    assert n == 3, f"stopped after {n + 1} attempts"
+    assert "refused" in rails.stop_reason and rails.stop_hint.startswith("It was not run")
+
+
+def test_three_refused_commands_in_rotation_end_it_too():
+    """The turn as it was: start, probe, and the probe again under `# setup`."""
+    rails = guardrails.Guardrails()
+    commands = [START, PROBE, "# setup\n" + PROBE]
+    for n in range(1114):
+        _attempt(rails, commands[n % 3], HOOK_FILE, n)
+        if rails.looping:
+            break
+    assert n + 1 <= guardrails.UNRUN_STOP, f"stopped after {n + 1} attempts"
+    assert "refused in this turn before they ran" in rails.stop_reason
+
+
+def test_a_tool_that_does_not_exist_is_not_asked_for_for_ever():
+    """No PreToolUse runs for a tool the CLI does not have, so only the
+    result says so — five rounds of four such calls in one msja turn."""
+    rails = guardrails.Guardrails()
+    said = "Error: No such tool available: mcp__scivo__list_videos."
+    for n in range(20):
+        rails.note_refused(f"id-{n}", "mcp__scivo__list_videos", {}, said)
+        if rails.looping:
+            break
+    assert n == 3 and rails.looping == "list_videos"
+
+
+def test_the_breakers_own_refusal_is_counted_once():
+    rails = guardrails.Guardrails()
+    payload = {"tool_name": "mcp__scivo__list_todos", "tool_input": {}}
+    for n in range(2):
+        asyncio.run(rails.on_any_tool(payload, f"id-{n}", None))
+    out = asyncio.run(rails.on_any_tool(payload, "id-2", None))
+    assert "Blocked" in str(out) and rails.refusals == 1
+    rails.note_refused("id-2", "mcp__scivo__list_todos", {}, "PreToolUse:x hook error: Blocked")
+    assert rails.unrun == 0 and not rails.failures
+
+
+def test_a_new_kit_forgets_what_could_not_be_called():
+    rails = guardrails.Guardrails()
+    for n in range(3):
+        rails.note_refused(f"id-{n}", "mcp__scivo__list_videos", {}, "No such tool available")
+    rails.kit_changed({"list_videos"})
+    payload = {"tool_name": "mcp__scivo__list_videos", "tool_input": {}}
+    assert asyncio.run(rails.on_any_tool(payload, "id-9", None)) == {}
+
+
+def test_the_ssh_refusal_does_not_name_a_tool_the_session_lacks():
+    """"Use submit_remote_job" was said 358 times to a session without it."""
+    rails = guardrails.Guardrails()
+    rails.loaded = {"whoami", "add_video"}
+    said = str(_bash(rails, START))
+    assert "is not loaded in this session" in said and "tell the user" in said
+    assert "Use `mcp__scivo__submit_remote_job" not in said
+    rails.loaded = {"whoami", "submit_remote_job"}
+    assert "Use `mcp__scivo__submit_remote_job" in str(_bash(rails, START))
+    rails.loaded = None                      # not told: the message as it always was
+    assert "Use `mcp__scivo__submit_remote_job" in str(_bash(rails, START))
+
+
+def test_the_polling_note_is_not_given_to_a_command_that_never_ran():
+    rails = guardrails.Guardrails()
+    for n in range(6):
+        out = asyncio.run(rails.on_any_tool(_bash_call(START), f"id-{n}", None))
+        assert "Monitor" not in str(out)
+    ran = guardrails.Guardrails()
+    payload = _bash_call("ssh h 'tail -1 run.log'")
+    notes = []
+    for n in range(6):
+        notes.append(str(asyncio.run(ran.on_any_tool(payload, f"id-{n}", None))))
+        asyncio.run(ran.on_tool_success(
+            {**payload, "tool_response": {"stdout": f"epoch {n}", "stderr": ""}}, None, None))
+    assert sum("Monitor" in note for note in notes) == 1

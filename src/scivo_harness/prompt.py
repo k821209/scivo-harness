@@ -305,11 +305,23 @@ def _tool_note(plan: ToolPlan, guide: str | None = None) -> str:
             "session-start section as describing what has been done, not what "
             "to do."
         )
-    lines.append(
-        "\nIf a task needs a domain that is missing (decks, video, analysis runs), "
-        "say so and tell the user which profile to restart under — "
-        "`scivo --profile full`."
-    )
+    if plan.lean:
+        # `full` is not "everything" here, and saying it was sent a session
+        # from video to full to get one tool and lost the video tools.
+        lines.append(
+            "\nThis is the kit for a local model: a working core, plus the "
+            f"`{plan.profile}` profile's own domain where it has one. If a task needs "
+            "a tool that is absent, say which and tell the user: `/profile video` "
+            "(or `deck`, `analysis`) loads that domain beside the core — `full` "
+            "here is the core alone — and a Claude model (`/model`) carries "
+            "everything. Do not call an absent tool to see whether it works."
+        )
+    else:
+        lines.append(
+            "\nIf a task needs a domain that is missing (decks, video, analysis runs), "
+            "say so and tell the user which profile to restart under — "
+            "`scivo --profile full`."
+        )
     return "\n".join(lines)
 
 

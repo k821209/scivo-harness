@@ -88,8 +88,11 @@ def _repl(monkeypatch, profile="full", session_id="sess-1", read_only=False,
         briefing=Briefing(), guide="PROJECT GUIDE TEXT", lean_append="LAUNCH LEAN APPEND",
         provider=types.SimpleNamespace(name="local" if local else "anthropic",
                                        lean_profile=lean),
-        model=options.model,
+        model=options.model, lean_tools=None,
     )
+    from scivo_harness.guardrails import Guardrails
+    session.rails = Guardrails()
+    session.kit = Session.kit.__get__(session)
     # The REAL methods, both of them, so a falsification that swaps one for
     # the other fails on what it actually got wrong — the endpoint and the
     # model — rather than on a stub that happens to be missing a name.
@@ -370,3 +373,32 @@ def test_a_dead_cli_cannot_fail_the_step_that_replaces_it(monkeypatch):
     asyncio.run(stub._profile("video"))
     assert stub.clients[-1].connected
     assert stub.session.plan.profile == "video"
+
+
+# ── a local session is shown the kit it has (msja, 2026-11-13) ───────────────
+
+def test_a_local_switch_reports_the_kit_and_what_it_took_away(monkeypatch):
+    """`/profile full` said "261/262 scivo tools" to a local session that then
+    carried 37, without the video tools it had a moment before."""
+    stub = _repl(monkeypatch, profile="video", local=True, lean=True)
+    before = stub.session.kit()
+    assert "add_video" in before.kept
+    asyncio.run(stub._profile("full"))
+    after = stub.session.kit()
+    text = _text(stub)
+    assert f"profile full: {len(after.kept)}/{len(TOOLS)} scivo tools" in text
+    assert "the kit for a local model" in text
+    assert "no longer loaded" in text and "add_video" in text
+    assert stub.session.rails.loaded == set(after.kept)
+    dropped = set(_built(stub).disallowed_tools)
+    assert toolsets.PREFIX + "add_video" in dropped
+
+
+def test_the_menu_counts_what_a_local_session_would_carry(monkeypatch):
+    stub = _repl(monkeypatch, profile="video", local=True, lean=True)
+    rows = dict((name, kept) for name, kept, _ in stub._profile_rows())
+    for name in ("full", "video"):
+        plan = toolsets.plan(list(TOOLS), profile=name)
+        assert rows[name] == len(stub.session.kit(plan).kept)
+    cloud = _repl(monkeypatch, profile="video")
+    assert dict((n, k) for n, k, _ in cloud._profile_rows())["full"] == len(TOOLS)

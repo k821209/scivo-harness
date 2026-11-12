@@ -55,4 +55,31 @@ def test_the_guard_is_not_attempted_when_the_skills_failed(monkeypatch):
 def test_a_session_marks_itself_so_the_file_guard_stands_down():
     import inspect
     from scivo_harness import session
-    assert '"SCIVO_HARNESS": "1"' in inspect.getsource(session.build)
+    assert session.session_env()["SCIVO_HARNESS"] == "1"
+    assert "**session_env()" in inspect.getsource(session.build)
+
+
+def test_the_mark_survives_a_switch_to_another_endpoint():
+    """`/model <local>` rebuilt the environment from the endpoint's alone. The
+    mark was gone, the hook file woke up, and one msja turn was refused 771
+    times by the file and 358 times in process — two layers, two sets of
+    rules, and an override only one of them knew (2026-11-12). The test above
+    passed throughout: it read the string in `build`."""
+    import types
+    from dataclasses import dataclass, field
+
+    from scivo_harness import session
+
+    @dataclass
+    class Opts:
+        env: dict = field(default_factory=dict)
+        model: str = "claude-opus-5"
+
+    stub = types.SimpleNamespace(full_options=Opts(env={"SCIVO_HARNESS": "1"}))
+    cloud = types.SimpleNamespace(lean_profile=False)
+    endpoint = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8099", "MCP_DISCOVERY_CACHE": "true"}
+    built = session.Session.options_for(stub, cloud, env=endpoint, model="qwen")
+    assert built.env["SCIVO_HARNESS"] == "1"
+    assert built.env["SCIVO_CLIENT_ID"] == session.session_client_id()
+    assert built.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8099"
+    assert built.env["MCP_DISCOVERY_CACHE"] == "true"      # an endpoint may still override
