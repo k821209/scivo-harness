@@ -613,3 +613,58 @@ def test_the_polling_note_is_not_given_to_a_command_that_never_ran():
         asyncio.run(ran.on_tool_success(
             {**payload, "tool_response": {"stdout": f"epoch {n}", "stderr": ""}}, None, None))
     assert sum("Monitor" in note for note in notes) == 1
+
+
+# ── `# setup`: a question for the person, not a way through (2026-11-13) ─────
+
+def _decision(out) -> str:
+    return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision", "")
+
+
+@pytest.mark.parametrize("command", [
+    "# setup\n" + START,
+    "  # manual\n" + START,
+    START + "  # allow-untracked",
+])
+def test_a_marked_remote_launch_is_held_for_the_user(command):
+    rails = guardrails.Guardrails()
+    out = _bash(rails, command)
+    assert _decision(out) == "ask"
+    said = str(out)
+    assert "NO run record" in said and "submit_remote_job" in said
+    assert rails.blocked == ["held: raw remote launch marked setup"]
+
+
+def test_an_unmarked_one_is_still_refused_and_says_how_to_ask():
+    out = _bash(guardrails.Guardrails(), START)
+    assert _decision(out) == "deny"
+    assert "`# setup` alone on the first line" in str(out)
+
+
+def test_the_mark_has_to_open_the_command():
+    """`# setup` halfway down is a comment in a script, not the mark."""
+    out = _bash(guardrails.Guardrails(), START + "\n# setup the rest later")
+    assert _decision(out) == "deny"
+
+
+def test_the_mark_asks_about_nothing_else():
+    """A marked command that is not a remote launch is not held, and the mark
+    does not lift the other ssh rule."""
+    rails = guardrails.Guardrails()
+    assert _bash(rails, "# setup\nssh deevo-219 'ls /tmp'") == {}
+    out = _bash(rails, "# setup\nssh deevo-219 'pkill -f train.py'")
+    assert _decision(out) == "deny" and "pkill" in str(out)
+
+
+def test_the_marks_are_the_ones_the_hook_file_reads():
+    """One command, one meaning on every host. The file is in the other
+    repository; when it is on this machine, the two lists are compared."""
+    import pathlib
+    import re
+    hook = pathlib.Path.home() / "works/co-scientists-web/packages/hooks/pretool_block_ssh_nohup.py"
+    if not hook.is_file():
+        pytest.skip("the hook file is not on this machine — the lists were not compared")
+    source = hook.read_text()
+    prefixes = re.search(r"OVERRIDE_PREFIXES = \(([^)]*)\)", source).group(1)
+    assert tuple(re.findall(r'"([^"]+)"', prefixes)) == guardrails.SETUP_PREFIXES
+    assert re.search(r'OVERRIDE_INLINE = "([^"]+)"', source).group(1) == guardrails.SETUP_INLINE

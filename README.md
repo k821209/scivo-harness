@@ -62,6 +62,7 @@ to a failure the guide documents as having actually happened:
 | Rule | Action |
 |---|---|
 | `ssh … nohup` — a remote job with no run record | denied, with `submit_remote_job` named |
+| the same, with `# setup` (or `# manual`) on the first line, or `# allow-untracked` anywhere | held for the user: it runs only on a yes, and the question says there will be no run record |
 | `pgrep -f` / `pkill -f` over ssh — the pattern matches the ssh line carrying it | denied, with the bracketed-pattern fix |
 | a memory write containing an IP, GPU model, core count or conda env | held for the user — machines belong in the servers registry |
 | the second analysis-shaped shell command in a session | a reminder that this is where provenance is lost |

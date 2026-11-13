@@ -310,6 +310,17 @@ def _ask(reason: str) -> dict[str, Any]:
     }
 
 
+# The marks that say "this backgrounded ssh is not a job" — the same three the
+# hook file for plain Claude Code has always read (pretool_block_ssh_nohup.py),
+# so one command means one thing on every host.
+SETUP_PREFIXES = ("# setup", "# manual")
+SETUP_INLINE = "# allow-untracked"
+
+
+def marked_setup(command: str) -> bool:
+    return (command.lstrip().startswith(SETUP_PREFIXES)) or SETUP_INLINE in command
+
+
 def _arguments(payload: Any) -> str:
     """The call's arguments, serialised the same way everywhere, so the
     pre-check and the post-hooks agree on what 'the same call' means."""
@@ -811,9 +822,29 @@ class Guardrails:
                                        "additionalContext": HANDOFF_ASK}}
 
     async def on_bash(self, payload: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
-        command = str(payload.get("tool_input", {}).get("command", ""))
+        written = str(payload.get("tool_input", {}).get("command", ""))
         # What the shell will RUN, without the file contents it writes.
-        command = executable_text(command)
+        command = executable_text(written)
+
+        if RAW_REMOTE_JOB.search(command) and marked_setup(written):
+            # Not a way round the rule: the mark turns the refusal into a
+            # question for the PERSON. In the hook file the same mark lets the
+            # command straight through, and here there was no mark at all —
+            # so starting a server on a registered machine had no path, and a
+            # model that went looking for one had nobody to ask (user,
+            # 2026-11-13: "승인요청 하도록 하자"). In a session that asks about
+            # nothing (bypassPermissions) this is not asked either; that mode
+            # says so about remote jobs when it is switched on.
+            self.blocked.append("held: raw remote launch marked setup")
+            return _ask(
+                "This starts something on a remote machine through raw ssh, in the "
+                "background, with NO run record. The model marked it as setup — not a "
+                "job whose result is used.\n"
+                "Yes runs it exactly as written: no row in the Runs tab, and nothing here "
+                "will track it or stop it.\n"
+                "For an analysis, a render or anything a result comes out of, say no: "
+                "`submit_remote_job` launches the same command with the record."
+            )
 
         if RAW_REMOTE_JOB.search(command):
             self.blocked.append("raw remote job")
@@ -829,7 +860,8 @@ class Guardrails:
                     "rewording the command will be refused the same way.\n"
                     "Stop and tell the user: what you were going to launch and on which "
                     "server, and that they can run it themselves or restart the session "
-                    "with its tools (`/profile` lists the choices)."
+                    "with its tools (`/profile` lists the choices). If it is a setup step "
+                    "and not a job, `# setup` on the first line asks them here instead."
                 )
             return _deny(
                 "Blocked: a remote job launched through raw ssh leaves no run record, so the "
@@ -840,7 +872,11 @@ class Guardrails:
                 "`slug=\"_project\"` — the run record is the point, and it does not need "
                 "a manuscript to hang from. A one-off render or image generation counts.\n"
                 "If this really is not a result-producing command (a copy, a cleanup), "
-                "say so to the user and run it in the foreground."
+                "say so to the user and run it in the foreground.\n"
+                "If it is not a job at all — a service to start, a one-time setup step — "
+                "put `# setup` alone on the first line of the command: the user is then "
+                "asked, and it runs only if they say yes. That is a question to a person, "
+                "not a switch; do not use it for work whose result is used."
             )
 
         if REMOTE_SELF_MATCH.search(command):
