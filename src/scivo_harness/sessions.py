@@ -132,6 +132,53 @@ def recap(session_id: str, exchanges: int = 2) -> list[tuple[str, str]]:
     return turns[-(exchanges * 2):]
 
 
+# Which provider each conversation was held on. The transcript records the
+# model's NAME, and two local servers are both called `local`: resuming by
+# name alone came back on the first provider with that name — a different
+# port, a 405 on the first message — until `/model` was typed again (user,
+# 2026-11-14). Kept in the project, beside the settings.
+SESSIONS_FILE = Path(".scivo") / "sessions.json"
+_KEPT = 300
+
+
+def remember(root: Path, session_id: str, provider: str, model: str | None) -> None:
+    """Note that this conversation is on this provider. Never raises: a note
+    that cannot be written costs a question at the next resume, not the turn."""
+    if not session_id or not provider:
+        return
+    path = Path(root) / SESSIONS_FILE
+    try:
+        try:
+            known = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            known = {}
+        if not isinstance(known, dict):
+            known = {}
+        entry = {"provider": provider, "model": model or ""}
+        if known.get(session_id) == entry:
+            return
+        known.pop(session_id, None)
+        known[session_id] = entry                      # newest last
+        for old in list(known)[:-_KEPT]:
+            del known[old]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(known, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(path)
+    except (OSError, ValueError):       # ValueError: a path the OS will not take
+        return
+
+
+def remembered(root: Path, session_id: str) -> dict | None:
+    """{"provider", "model"} for a conversation, or None when nothing was noted."""
+    try:
+        known = json.loads((Path(root) / SESSIONS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    entry = known.get(session_id) if isinstance(known, dict) else None
+    return entry if isinstance(entry, dict) and entry.get("provider") else None
+
+
 def last_model(session_id: str) -> str | None:
     """The model that session was last answering with, from its own transcript.
 

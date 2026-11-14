@@ -709,27 +709,46 @@ async def _resume(args) -> int:
     return await _chat(args)
 
 
-def _carry_model(args, session_id: str) -> None:
-    """Resume on the model that session was using, unless told otherwise.
+def _carry_model(args, session_id: str, root=None) -> None:
+    """Resume on the provider and model that session was using, unless told
+    otherwise.
 
     A conversation held with a local model came back on Claude, because the
     session was rebuilt from the project default. Nothing said so, and the
     first reply simply did not fit the history it claimed to continue.
+
+    The provider comes from what this project noted for the session
+    (`sessions.remember`), not from the model's name: `local` is the name of
+    every local server, so matching on it picked whichever provider was listed
+    first. Only an older session, with no note, is matched by name — and when
+    several providers answer to that name, that is said.
     """
     from . import sessions as session_log
-    from .providers import provider_for_model
+    from .providers import load_all, providers_for_model
 
     if args.provider_reason == "--provider" or args.model:
+        return
+    noted = session_log.remembered(root, session_id) if root is not None else None
+    if noted and noted["provider"] in load_all():
+        args.provider = noted["provider"]
+        args.model = noted.get("model") or session_log.last_model(session_id) or None
+        args.provider_reason = f"carried over from {session_id[:8]}"
         return
     model = session_log.last_model(session_id)
     if not model:
         return
-    provider = provider_for_model(model)
-    if provider is None:
+    serving = providers_for_model(model)
+    if not serving:
         print(ui.dim(f"  that session used {model}, which no provider here serves — "
                      f"continuing on {args.provider}"))
         return
-    args.provider, args.model = provider, model
+    if len(serving) > 1:
+        print(ui.yellow(f"  that session used a model called {model!r}, and {len(serving)} "
+                        f"providers here have one ({', '.join(serving)}) — continuing on "
+                        f"{serving[0]}.")
+              + ui.dim(" If that is the wrong one: /model <provider>, or start with "
+                       "--provider."))
+    args.provider, args.model = serving[0], model
     args.provider_reason = f"carried over from {session_id[:8]}"
 
 
@@ -756,7 +775,7 @@ async def _build_and_run(args, prompt_text: str | None) -> int:
             resumed_id = newest
     resumed_id = resume_id or resumed_id
     if resumed_id:
-        _carry_model(args, resumed_id)
+        _carry_model(args, resumed_id, config.root)
 
     session = await build(
         config,
@@ -845,7 +864,9 @@ async def _run_once(session, prompt_text: str) -> int:
 
 def _relaunch_argv(argv: list[str], resume: str | None, control: bool,
                    permission_mode: str | None = None,
-                   model: str | None = None) -> list[str]:
+                   model: str | None = None,
+                   provider: str | None = None,
+                   fresh: bool = False) -> list[str]:
     """The flags this run was started with, minus any session choice, plus the
     session to come back into and the state it was in.
 
@@ -854,12 +875,20 @@ def _relaunch_argv(argv: list[str], resume: str | None, control: bool,
     mid-session and neither writes argv, so an update used to hand the session
     back in whatever mode it was started in — most of the way through an
     unattended run, silently asking again (user, 2026-10-19).
+
+    `provider` is live in the same way: `/model <provider>` switches it and
+    argv does not know. Without it the session came back on a provider GUESSED
+    from the model's name, and a local session returned from `/update` on the
+    wrong endpoint (user, 2026-11-14). `fresh` is for a provider switched to
+    and not yet spoken to: there is no conversation of its own to resume, and
+    continuing the last one would hand another model's history to it.
     """
     # Only drop a flag we are about to supply: with no live value, what the
     # run was started with is still the right answer (an existing test caught
     # this — `--model opus` in argv and no switch means opus, not the default).
     replaced = {flag for flag, value in (("--permission-mode", permission_mode),
-                                         ("--model", model)) if value}
+                                         ("--model", model),
+                                         ("--provider", provider)) if value}
     out: list[str] = []
     skip = 0
     for a in argv:
@@ -874,11 +903,16 @@ def _relaunch_argv(argv: list[str], resume: str | None, control: bool,
         if a.startswith("--resume=") or any(a.startswith(f"{flag}=") for flag in replaced):
             continue
         out.append(a)
-    out += ["--resume", resume] if resume else ["-c"]
+    if resume:
+        out += ["--resume", resume]
+    elif not fresh:
+        out.append("-c")
     if control:
         out.append("--control")
     if permission_mode:
         out += ["--permission-mode", permission_mode]
+    if provider:
+        out += ["--provider", provider]
     if model:
         out += ["--model", model]
     return out
@@ -900,7 +934,9 @@ def _update_and_relaunch(args, plan: dict) -> int:
         return rc
     argv = _relaunch_argv(sys.argv[1:], plan.get("resume"), bool(plan.get("control")),
                           permission_mode=plan.get("permission_mode"),
-                          model=plan.get("model"))
+                          model=plan.get("model"),
+                          provider=plan.get("provider"),
+                          fresh=bool(plan.get("fresh")))
     print(ui.dim("  scivo " + " ".join(argv)))
     # An exec unwinds nothing, so the terminal has to be handed back by hand:
     # `quiet_echo` wraps this whole session and its restore is about to be

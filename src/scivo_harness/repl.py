@@ -1143,6 +1143,7 @@ class Repl:
 
     def _on_result(self, message: ResultMessage) -> None:
         self.session_id = message.session_id or self.session_id
+        self._note_provider()
         cache = cache_note(message)
         self.turns += message.num_turns
         # Claude Code prices every turn from its own table, including models it
@@ -1241,18 +1242,28 @@ class Repl:
             # "this session" as much as the page is: both can be switched
             # mid-session (`/dangerously-skip-permissions`, `/model`), and
             # neither lives in argv, so an update silently handed the session
-            # back in whatever mode it was STARTED in (user, 2026-10-19). The
-            # model only travels for Claude models — `/model <provider>` starts
-            # a new conversation, so there is no session to resume into.
+            # back in whatever mode it was STARTED in (user, 2026-10-19).
+            # The PROVIDER travels by name as well. It used to be left to the
+            # resume to work out from the model's name, and `local` is the
+            # name of every local server: a session on one came back from an
+            # update on another, and the first message was a 405 until `/model`
+            # was typed again (user, 2026-11-14). A provider switched to and
+            # not yet spoken to has no conversation of its own, so it comes
+            # back as a new one rather than continuing another model's.
+            provider = self.session.provider
             self.relaunch = {"resume": self.session_id,
                              "control": bool(self.control and self.control.active),
                              "video": "video" in line.split()[1:],
                              "permission_mode": self.mode,
-                             "model": (None if self.session.provider.has_endpoint
-                                       else self.session.model)}
+                             "provider": provider.name,
+                             "model": self.session.model,
+                             "fresh": bool(provider.has_endpoint and not self.session_id)}
             coming_back = [
                 "with the control page back on" if self.relaunch["control"] else "",
                 f"in {self.mode}" if self.mode != "default" else "",
+                (f"on {provider.name} ({self.session.model})" if provider.has_endpoint else ""),
+                ("as a new conversation — nothing was said on this provider yet"
+                 if self.relaunch["fresh"] else ""),
             ]
             said = " and ".join(part for part in coming_back if part)
             print(ui.dim("\n  leaving to update; this session resumes when it is done"
@@ -1683,6 +1694,16 @@ class Repl:
         self.session.lean_tools = len(kit.kept) if kit.lean else None
         self._say(ui.green(f"  now on {target_name} · {model}")
                   + ui.dim(f"\n  {kit.summary()}\n"))
+
+    def _note_provider(self) -> None:
+        """Write down which provider this conversation is on, for the resume
+        that will otherwise have only the model's name to go by."""
+        try:
+            from . import sessions as session_log
+            session_log.remember(self.session.config.root, self.session_id or "",
+                                 self.session.provider.name, self.session.model)
+        except Exception:  # noqa: BLE001 - a note, never the turn
+            pass
 
     def _resumed(self, options):
         """`options`, pointed back at THIS conversation when there is one.

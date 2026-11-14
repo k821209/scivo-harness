@@ -619,14 +619,24 @@ def prepare(provider: Provider, timeout: float = 30.0, *, api_billing: bool = Fa
         note += " It still refuses after reordering — check the server."
     return Endpoint(env, note, stop)
 
-def provider_for_model(model: str) -> str | None:
-    """Which configured provider serves this model name, if any."""
+def providers_for_model(model: str) -> list[str]:
+    """Every configured provider that serves this model name.
+
+    More than one is ordinary, not a corner case: a local server is usually
+    registered with the model name `local`, and so is the next one. The name
+    of a model does not say which machine it is on.
+    """
     if model.startswith("claude-"):
-        return BUILTIN_NAME
-    for name, provider in load_all().items():
-        if provider.model == model or provider.small_model == model:
-            return name
-    return None
+        return [BUILTIN_NAME]
+    return [name for name, provider in load_all().items()
+            if provider.model == model or provider.small_model == model]
+
+
+def provider_for_model(model: str) -> str | None:
+    """Which configured provider serves this model name, if any — the first
+    when several do; ask `providers_for_model` when that matters."""
+    found = providers_for_model(model)
+    return found[0] if found else None
 
 
 # What a Pro/Max credential may and may not be used for, and how a session
