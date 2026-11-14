@@ -37,6 +37,12 @@ changed the answer.
 
 - A remote job launched through raw `ssh ... nohup` is **blocked**. Use
   `submit_remote_job` — the run record is the point, not the convenience.
+  Something that is not a job (a service to start, a setup step) takes
+  `# setup` alone on the first line: the user is then asked, and it runs only
+  on their yes.
+- A call that is refused and made again is counted. The same refusal three
+  times ends the turn on the fourth try, and so do eight refusals of anything
+  — so the first refusal is the moment to stop and report, not the fourth.
 - `pgrep -f` / `pkill -f` over ssh is **blocked**: the pattern matches the ssh
   command line carrying it.
 - A memory write containing hardware — an IP, a GPU model, a core count, a
@@ -173,6 +179,12 @@ LOCAL_GUIDE = """
   question, and the user has to compare them to check they agree. End with
   what is NOT yet said — what you need from them, what happens next — or end
   without a closing paragraph.
+- **When something stops you** (a refusal, a missing tool or program, an
+  unreachable host): do not look for another way through. Report (1) what you
+  were doing, (2) what stopped it, quoted, (3) its kind — a harness rule,
+  something missing, access, a fault, (4) the ways forward, (5) your pick —
+  and end the turn. Another machine, tool or method needs the user's yes; the
+  same call reworded is the same call.
 - **An empty result is an answer.** `[]`, `null`, "no rows", "not found"
   mean the thing is not there. Do not call the same tool again with the
   words rearranged — a second empty answer carries no new information and

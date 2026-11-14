@@ -182,3 +182,63 @@ def test_a_long_todo_is_cut_and_says_where_the_rest_is():
     assert out.count("detail") < TODO_BUDGET // 7 + 2
     assert "chars — `list_todos()` for the rest" in out
     assert out.count("list_todos()") == 1          # the short one claims nothing is missing
+
+
+# ── what this machine cannot do, said before the work starts ────────────────
+
+PANDOC = {"what": "pandoc", "group": "export (export_to_path)", "needed": "required",
+          "why": "every .docx/.pdf/.tex export of a paper",
+          "install": "sudo apt install -y pandoc"}
+RSYNC = {"what": "rsync", "group": "remote jobs (submit_remote_job)", "needed": "recommended",
+         "why": "copying a script between machines", "install": "sudo apt install -y rsync"}
+FONT = {"what": "a Korean font", "group": "presentations", "needed": "required",
+        "why": "NOT CHECKED: fc-list is not on PATH", "install": "sudo apt install -y fonts-noto-cjk"}
+
+
+def _briefing(machine):
+    from scivo_harness.preflight import Briefing
+    identity = {"project_id": "p", "guide_version": "g"}
+    if machine is not ...:
+        identity["machine"] = machine
+    return Briefing(identity=identity)
+
+
+def test_a_missing_program_is_in_the_briefing_with_its_install_line():
+    from scivo_harness.preflight import to_markdown
+    said = to_markdown(_briefing({"checked": 8, "missing": [PANDOC, RSYNC], "unknown": [FONT]}))
+    assert "## This machine" in said
+    assert "**pandoc** — required for export (export_to_path)" in said
+    assert "`sudo apt install -y pandoc`" in said and "**rsync** — recommended" in said
+    assert "_could not be checked:_ a Korean font" in said
+    assert "You cannot install system packages" in said
+    assert said.index("## This machine") < said.index("## Project memory")
+
+
+def test_a_machine_with_everything_adds_nothing():
+    from scivo_harness.preflight import to_markdown
+    assert "## This machine" not in to_markdown(_briefing({"checked": 8, "missing": [], "unknown": []}))
+
+
+def test_an_mcp_too_old_to_say_is_not_reported_as_complete_or_as_broken():
+    from scivo_harness.preflight import machine_missing, to_markdown
+    assert "## This machine" not in to_markdown(_briefing(...))
+    assert machine_missing({}) == ([], [], "")
+
+
+def test_a_check_that_did_not_run_is_said_not_passed_over():
+    from scivo_harness.preflight import to_markdown
+    said = to_markdown(_briefing({"checked": 0, "missing": None, "error": "RuntimeError: boom"}))
+    assert "## This machine" in said and "could not check" in said and "boom" in said
+    assert "is not known" in said
+
+
+def test_the_banner_tells_the_person_what_to_install():
+    import re
+    from scivo_harness import ui
+    lines = ui.attention(_briefing({"checked": 8, "missing": [PANDOC, RSYNC], "unknown": []}))
+    text = re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(lines))
+    assert "pandoc is not on this machine" in text and "sudo apt install -y pandoc" in text
+    assert "rsync" not in text                      # recommended: in the briefing, not the banner
+    failed = ui.attention(_briefing({"checked": 0, "missing": None, "error": "boom"}))
+    assert any("could not check this machine" in line for line in failed)
+

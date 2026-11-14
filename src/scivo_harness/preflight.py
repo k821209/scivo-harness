@@ -254,6 +254,46 @@ async def _paper(client: ScivoClient, record: Any) -> PaperBrief:
 # ---------------------------------------------------------------- rendering
 
 
+def machine_missing(identity: dict[str, Any]) -> tuple[list[dict], list[dict], str]:
+    """(missing, unknown, error) out of whoami's `machine` — three empties when
+    the MCP is too old to say, which is "not told", not "nothing missing"."""
+    machine = identity.get("machine")
+    if not isinstance(machine, dict):
+        return [], [], ""
+    if machine.get("missing") is None:
+        return [], [], str(machine.get("error") or "the check did not run")
+    rows = lambda key: [r for r in (machine.get(key) or []) if isinstance(r, dict)]  # noqa: E731
+    return rows("missing"), rows("unknown"), ""
+
+
+def machine_section(identity: dict[str, Any]) -> list[str]:
+    """What this machine cannot do, said before the work starts.
+
+    The MCP found these out only at the moment of use: a deck was written to
+    the last slide before anyone learned no preview could render, and the
+    development machine itself had no pandoc with no session ever told
+    (2026-11-14). Nothing is written when nothing is missing.
+    """
+    missing, unknown, error = machine_missing(identity)
+    if error:
+        return ["", "## This machine", "",
+                f"_The MCP could not check which programs this machine has ({error}). Whether "
+                "exports and previews work here is not known — find out before promising one._"]
+    if not missing and not unknown:
+        return []
+    out = ["", "## This machine", "",
+           "Programs a feature needs that are NOT here. You cannot install system packages. "
+           "Before work that needs one, tell the user what is missing, what it stops and the "
+           "install line; do not start and fail, and do not switch to another method on your own.",
+           ""]
+    for row in missing:
+        out.append(f"- **{row.get('what')}** — {row.get('needed', 'needed')} for "
+                   f"{row.get('group')}: {row.get('why')}. Install: `{row.get('install')}`")
+    for row in unknown:
+        out.append(f"- _could not be checked:_ {row.get('what')} — {row.get('why')}")
+    return out
+
+
 def to_markdown(brief: Briefing) -> str:
     """The briefing as it is appended to the system prompt."""
     out: list[str] = [
@@ -287,6 +327,7 @@ def to_markdown(brief: Briefing) -> str:
             f"({brief.identity.get('installed_version')} → {brief.identity.get('latest_version')}). "
             "Tell the user before relying on tool behavior."
         )
+    out += machine_section(brief.identity)
 
     out += ["", "## Project memory", ""]
     out.append(_clip(brief.memory, MEMORY_BUDGET) if brief.memory.strip()

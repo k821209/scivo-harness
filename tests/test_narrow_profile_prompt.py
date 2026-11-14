@@ -84,3 +84,34 @@ def test_the_raw_ssh_refusal_is_actionable_without_a_paper():
     text = str(out)
     assert "_project" in text, "the paper-less path has to be named here"
     assert "does not need" in text and "manuscript" in text
+
+
+# ── stop and report (2026-11-14) ─────────────────────────────────────────────
+
+def test_a_local_session_is_told_how_to_report_being_stopped():
+    """The full guide carries the rule for every host; a local model gets no
+    guide, so the short form has to carry it — once."""
+    from scivo_harness import prompt
+    from scivo_harness.preflight import Briefing
+    plan = toolsets.plan(["whoami", "list_todos", "add_section"], "full")
+    lean = prompt.build(Briefing(), plan, guide=None)
+    assert lean.count("When something stops you") == 1
+    for step in ("what you\n  were doing", "what stopped it", "its kind", "the ways forward",
+                 "your pick", "reworded is the same call"):
+        assert step in lean, step
+
+
+def test_a_session_with_the_guide_reads_the_rule_there_and_not_twice():
+    from scivo_harness import prompt
+    from scivo_harness.preflight import Briefing
+    plan = toolsets.plan(["whoami", "list_todos", "add_section"], "full")
+    guide = "# guide\n\n## When something stops you\n\nreport, in this order…\n"
+    full = prompt.build(Briefing(), plan, guide=guide)
+    assert full.count("When something stops you") == 1
+
+
+def test_the_charter_says_a_refused_call_is_counted_and_what_setup_means():
+    from scivo_harness import prompt
+    assert "`# setup` alone on the first line" in prompt.CHARTER
+    assert "refused and made again is counted" in prompt.CHARTER
+

@@ -62,6 +62,19 @@ def attention(briefing) -> list[str]:
         lines.append(yellow(
             f"  ! MCP {identity.get('latest_version')} available "
             f"(running {identity.get('installed_version')}) — `scivo update`"))
+    # What this machine cannot do. Only the person can install a program, so
+    # they are told here, once, with the line to paste — not by a failed
+    # export in the middle of the work.
+    from .preflight import machine_missing
+    missing, _unknown, error = machine_missing(identity)
+    for row in missing:
+        if row.get("needed") != "required":
+            continue
+        lines.append(yellow(f"  ! {row.get('what')} is not on this machine — {row.get('group')} "
+                            "will not work here"))
+        lines.append(dim(f"    {row.get('install')}"))
+    if error:
+        lines.append(yellow(f"  ! could not check this machine's programs ({error})"))
     for paper in briefing.attention:
         bits = []
         if paper.open_comments:
