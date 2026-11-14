@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import warnings
@@ -119,6 +119,9 @@ class Session:
     scivo_tools: tuple[str, ...] = ()
     resumed: str | None = None
     lean_tools: int | None = None
+    # Things the person has to be told once the session is up — on the page
+    # as well as the terminal (a provider guessed at resume, for one).
+    notes: list = field(default_factory=list)
     # `project_guide()` verbatim, kept because a profile switch has to rebuild
     # the system prompt: the append names the profile and its tool counts, so
     # leaving it alone would tell the model it is running a kit it is not
@@ -399,6 +402,7 @@ async def build(
     if chosen.lean_profile:
         session.lean_tools = len(session.kit().kept)
     rails.loaded = set(session.kit().kept)
+    rails.turn_budget = chosen.turn_budget
     return session
 
 

@@ -1642,10 +1642,21 @@ class Repl:
             return
 
         # The endpoint lives in the Claude Code process's environment, so
-        # changing it means a new process — and a new conversation. Carrying the
-        # old one over is not attempted: its history holds Claude's thinking
-        # blocks, which a local server is not known to accept.
+        # changing it means a new process — and usually a new conversation:
+        # one held with Claude carries thinking blocks a local server is not
+        # known to accept. The exception is a conversation that was held with
+        # THIS model already. A session that came back from a restart on the
+        # wrong provider was put right with `/model <provider>`, and that
+        # threw the conversation away — "continue the work that was stopped"
+        # then reached a model with nothing to continue, which searched the
+        # disk for it through 127 tool calls (msja, 2026-11-14).
+        from . import sessions as session_log
         from .providers import ProviderError, prepare
+
+        same_history = bool(
+            self.session_id and target.has_endpoint
+            and session_log.last_model(self.session_id) == model)
+        carry = self.session_id if same_history else None
 
         if target.has_endpoint:
             self._say(ui.dim(f"\n  checking {target_name}…"))
@@ -1659,12 +1670,14 @@ class Repl:
             env=endpoint.env,
             model=model,
             effort=(self.session.options.effort or DEFAULT_EFFORT) if target.supports_effort else None,
-            resume=None,
+            resume=carry,
             continue_conversation=False,
         )
         if endpoint.note:
             self._say(ui.dim(f"  · {endpoint.note}"))
-        self._say(ui.dim(f"  switching to {target_name} ({model}) — this starts a new conversation…"))
+        self._say(ui.dim(f"  switching to {target_name} ({model}) — "
+                         + ("this conversation was held with that model, so it continues…"
+                            if carry else "this starts a new conversation…")))
         try:
             await self._swap_client(options)
         except Exception as exc:  # noqa: BLE001
@@ -1683,7 +1696,10 @@ class Repl:
         self.session.options = options
         self.session.provider = target
         self.session.model = model
-        self.session_id = None
+        self.session_id = carry
+        self.session.rails.turn_budget = target.turn_budget
+        if carry:
+            self._note_provider()
         if self.control:
             self.control.model = model
         # A local model carries a smaller kit than a Claude one, so the
@@ -1692,8 +1708,12 @@ class Repl:
         kit = self.session.kit()
         self.session.rails.kit_changed(set(kit.kept))
         self.session.lean_tools = len(kit.kept) if kit.lean else None
+        budget = target.turn_budget
         self._say(ui.green(f"  now on {target_name} · {model}")
-                  + ui.dim(f"\n  {kit.summary()}\n"))
+                  + ui.dim(f"\n  {kit.summary()}"
+                           + (f"\n  a turn stops after {budget} tool calls and hands back "
+                              "(`turn_calls` in the provider's settings)" if budget else "")
+                           + "\n"))
 
     def _note_provider(self) -> None:
         """Write down which provider this conversation is on, for the resume
@@ -2250,6 +2270,9 @@ class Repl:
                                  "beside it; `full` is the core alone")))
         if self.session.endpoint is not None and self.session.endpoint.note:
             print(ui.dim(f"  · {self.session.endpoint.note}"))
+        if self.session.rails.turn_budget:
+            print(ui.dim(f"  a turn stops after {self.session.rails.turn_budget} tool calls and "
+                         "hands back — `turn_calls` in the provider's settings changes it"))
         if self.mode == "bypassPermissions":
             # Loud, because `/update` now carries this mode across a restart:
             # a session that asks for nothing must never be a state you come
@@ -2267,6 +2290,10 @@ class Repl:
         await self._start_pump()
         if self.auto_control:
             await self._control("")
+        # Said after the page is connected: a line printed before it reaches
+        # the terminal only, and the person may be on the page.
+        for note in getattr(self.session, "notes", None) or []:
+            self._say(ui.yellow(f"  ! {note}\n"))
         try:
             if True:
                 while True:

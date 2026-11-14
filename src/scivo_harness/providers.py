@@ -72,6 +72,9 @@ class ProviderError(RuntimeError):
     pass
 
 
+TURN_CALLS_DEFAULT = 40
+
+
 @dataclass
 class Provider:
     name: str
@@ -84,6 +87,10 @@ class Provider:
     max_output_tokens: int | None = None
     context_tokens: int | None = None
     size: str | None = None
+    # Tool calls one turn may make before the session stops and hands back.
+    # Unset: TURN_CALLS_DEFAULT for a model that gets the lean kit, no limit
+    # otherwise. 0 turns it off.
+    turn_calls: int | None = None
     env: dict[str, str] = field(default_factory=dict)
     note: str = ""
     source: str = "built-in"
@@ -94,6 +101,22 @@ class Provider:
                 f"provider '{self.name}': size = {self.size!r} is not one of "
                 f"{', '.join(SIZES)}."
             )
+
+    @property
+    def turn_budget(self) -> int | None:
+        """How many tool calls a turn may make on this provider, or None.
+
+        A small local model that loses the thread does not stop: one turn made
+        1,146 calls in five hours, another 127 in eighteen minutes looking for
+        "the work that was stopped" in a conversation that no longer held it
+        (msja, 2026-11-12 and 11-14). Detecting the loop was tried three ways
+        and each was walked round by commands that differ a little every time.
+        A budget does not try to recognise anything: the healthy turns in
+        those same sessions used at most about thirty calls.
+        """
+        if self.turn_calls is not None:
+            return self.turn_calls if self.turn_calls > 0 else None
+        return TURN_CALLS_DEFAULT if self.lean_profile else None
 
     @property
     def has_endpoint(self) -> bool:

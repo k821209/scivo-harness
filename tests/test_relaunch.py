@@ -193,3 +193,80 @@ def test_the_note_is_small_bounded_and_never_fatal(tmp_path):
     sessions.remember(tmp_path, "s1", "gpu8192", "local")                       # recovers
     assert sessions.remembered(tmp_path, "s1")["provider"] == "gpu8192"
 
+
+# ── putting the provider right must not cost the conversation ───────────────
+# msja, 2026-11-14: back from a restart on the wrong provider (405), the user
+# typed `/model gpu8192` — which started a NEW conversation, and "멈췄던 작업
+# 계속 진행" then went to a model that had nothing to continue.
+
+def _switch(monkeypatch, tmp_path, session_id, held_with):
+    import asyncio
+    import types
+    from scivo_harness import guardrails, providers, sessions
+    from scivo_harness.providers import Provider
+    from scivo_harness.repl import Repl
+
+    wrong = Provider(name="local", base_url="http://localhost:8080", model="local")
+    right = Provider(name="gpu8192", base_url="http://localhost:8192", model="local")
+    built: dict = {}
+
+    def options_for(target, **changes):
+        built.update(changes)
+        return types.SimpleNamespace(**changes)
+
+    session = types.SimpleNamespace(
+        model="local", provider=wrong, options=types.SimpleNamespace(effort=None),
+        options_for=options_for, endpoint=None, lean_tools=None,
+        rails=guardrails.Guardrails(), config=types.SimpleNamespace(root=tmp_path),
+        kit=lambda: types.SimpleNamespace(kept=[], lean=True, summary=lambda: "kit"))
+    said: list[str] = []
+    stub = types.SimpleNamespace(session=session, session_id=session_id, control=None, said=said)
+    stub._say = said.append
+    stub._model_rows = Repl._model_rows.__get__(stub)
+    stub._note_provider = Repl._note_provider.__get__(stub)
+
+    async def swap(options):
+        stub.swapped = options
+    stub._swap_client = swap
+    monkeypatch.setattr(providers, "load_all", lambda: {
+        "anthropic": Provider(name="anthropic"), "local": wrong, "gpu8192": right})
+    monkeypatch.setattr(providers, "prepare",
+                        lambda target: types.SimpleNamespace(env={}, note="", close=lambda: None))
+    monkeypatch.setattr(sessions, "last_model", lambda sid: held_with)
+    asyncio.run(Repl._model(stub, "gpu8192"))
+    return stub, built, "\n".join(said)
+
+
+def test_a_switch_to_the_model_the_conversation_was_held_with_keeps_it(monkeypatch, tmp_path):
+    from scivo_harness import sessions
+    stub, built, said = _switch(monkeypatch, tmp_path, "sess-local", held_with="local")
+    assert built["resume"] == "sess-local"
+    assert stub.session_id == "sess-local"
+    assert "so it continues" in said and "new conversation" not in said
+    assert sessions.remembered(tmp_path, "sess-local")["provider"] == "gpu8192"
+    assert stub.session.rails.turn_budget == 40 and "stops after 40 tool calls" in said
+
+
+def test_a_conversation_held_with_claude_still_starts_again(monkeypatch, tmp_path):
+    stub, built, said = _switch(monkeypatch, tmp_path, "sess-claude", held_with="claude-opus-5-5")
+    assert built["resume"] is None and stub.session_id is None
+    assert "this starts a new conversation" in said
+
+
+def test_with_no_conversation_yet_there_is_nothing_to_keep(monkeypatch, tmp_path):
+    stub, built, _said = _switch(monkeypatch, tmp_path, None, held_with="local")
+    assert built["resume"] is None and stub.session_id is None
+
+
+def test_the_projects_own_provider_breaks_a_tie_and_the_guess_is_kept_for_the_page(
+        tmp_path, monkeypatch, capsys):
+    from scivo_harness import cli, sessions
+    _two_locals(monkeypatch)
+    monkeypatch.setattr(sessions, "last_model", lambda sid: "local")
+    args = _args()
+    args.provider, args.provider_reason = "gpu8192", "set with `scivo providers use`"
+    cli._carry_model(args, "old-session", tmp_path)
+    assert args.provider == "gpu8192"                      # not `local`, the first listed
+    assert "continuing on gpu8192" in args.resume_note
+    assert "the conversation is kept" in args.resume_note
+

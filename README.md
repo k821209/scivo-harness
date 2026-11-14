@@ -614,6 +614,18 @@ model class, and the honest reading is "unmeasured", not "fine".
   Stopping was checked in a real session with a cloud model; against a local
   model it is untested. (2026-11-13)
 
+- **A turn that does not end.** "Continue the work that was stopped" reached a
+  model in a conversation that no longer held the work, and it searched for it
+  — 127 calls in eighteen minutes, the last forty a cycle of the same six
+  reads, each command typed a little differently so no repeat rule counted
+  them. A turn on a local model now has a budget of tool calls (40; the
+  model is told at 30, refused at 40, and the turn is ended if it calls three
+  more times): `turn_calls` in the provider's settings changes it, 0 turns it
+  off, and a Claude model has none. The conversation was gone because putting
+  the provider right with `/model` started a new one; a switch to the model a
+  conversation was held with now keeps it. Watched with a cloud model given a
+  budget of six; not run on a local one. (2026-11-14)
+
 - **Empty results get retried.** A Qwen session that gets `[]` from a lookup
   tends to call it again with the query rephrased, several times, until the
   repeat-call breaker stops it; Claude reads the empty result as "not there".

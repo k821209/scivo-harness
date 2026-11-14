@@ -742,13 +742,19 @@ def _carry_model(args, session_id: str, root=None) -> None:
         print(ui.dim(f"  that session used {model}, which no provider here serves — "
                      f"continuing on {args.provider}"))
         return
+    pick = serving[0]
     if len(serving) > 1:
-        print(ui.yellow(f"  that session used a model called {model!r}, and {len(serving)} "
-                        f"providers here have one ({', '.join(serving)}) — continuing on "
-                        f"{serving[0]}.")
-              + ui.dim(" If that is the wrong one: /model <provider>, or start with "
-                       "--provider."))
-    args.provider, args.model = serving[0], model
+        # The project's own choice (`scivo providers use`) breaks the tie
+        # before list order does.
+        if args.provider in serving:
+            pick = args.provider
+        note = (f"that session used a model called {model!r}, and {len(serving)} providers "
+                f"here have one ({', '.join(serving)}) — continuing on {pick}. If that is "
+                f"the wrong one: /model <provider> (the conversation is kept), or "
+                f"`scivo providers use <provider>` to make it this project's default.")
+        print(ui.yellow(f"  {note}"))
+        args.resume_note = note
+    args.provider, args.model = pick, model
     args.provider_reason = f"carried over from {session_id[:8]}"
 
 
@@ -795,6 +801,8 @@ async def _build_and_run(args, prompt_text: str | None) -> int:
     )
     if session.resumed is None and continue_last:
         session.resumed = resumed_id
+    if getattr(args, "resume_note", None):
+        session.notes.append(args.resume_note)
     if prompt_text is not None:
         return await _run_once(session, prompt_text)
 

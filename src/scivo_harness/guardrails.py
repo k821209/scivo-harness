@@ -381,6 +381,7 @@ def _note(context: str) -> dict[str, Any]:
 
 # How many times the same call, with the same arguments, may repeat inside one
 # turn before the harness stops answering it.
+SCIVO_PREFIX = "mcp__scivo__"
 SAME_CALL_LIMIT = 3
 SAME_CALL_STOP = 5
 BASH_NUDGE = 5     # after five identical Bash calls, suggest Monitor once
@@ -407,6 +408,27 @@ REFUSALS_STOP = 3
 # and this many refusals of anything in one turn ends it: by then the model is
 # looking for a way round the rule, not for what the rule asks.
 UNRUN_STOP = 8
+
+# The same call returning the same thing, counted over the WHOLE turn. The
+# rule above forgets its count when a command not yet run this turn appears,
+# so three polls, an `ls`, three polls, an `md5sum` went on for ever (msja,
+# 2026-11-13: 41 of 59 calls the same history query). This one is not reset
+# by anything but the result changing or a file being edited — if the fifth
+# answer is the first answer, whatever ran in between did not matter to it.
+# Bash and other servers' tools only: our own `preview_slide` returns the same
+# path for a slide that has changed. And only in a session that has a turn
+# budget, which is to say for the models that loop: a test run six times with
+# the same failure after five fixes made through the shell is slow work, not
+# a loop, and a model that does that work is not refused for it.
+SAME_RESULT_TOTAL = 5
+
+# A turn budget for a model that does not stop by itself (providers.py,
+# `turn_budget`). The model is told at three quarters; at the limit further
+# calls are refused, and the turn is ended only if it goes on calling.
+BUDGET_WARN_AT = 0.75
+BUDGET_OVERRUN = 3
+# Asking the person is the thing the budget is there to produce.
+NEVER_BUDGETED = ("AskUserQuestion",)
 
 # How much of the result a refusal hands back. The model that loops is often
 # the one that did not take the result in; being told "you have it" does not
@@ -485,6 +507,13 @@ class Guardrails:
         self.counted: set[str] = set()
         # What to tell the person when the turn is ended.
         self.stop_hint = ""
+        # (tool, call) -> [result signature, times it has come back the same
+        # this turn]; never cleared by other calls.
+        self.same_result: dict[tuple[str, str], list] = {}
+        # Tool calls this turn, and how many one turn may make (None: no
+        # limit). Set by the session from the provider.
+        self.turn_calls = 0
+        self.turn_budget: int | None = None
         # The scivo tools this session carries, bare names — None until the
         # session says. A refusal that sends the model to a tool checks here
         # first.
@@ -574,6 +603,39 @@ class Guardrails:
         self.unrun = 0
         self.counted.clear()
         self.stop_hint = ""
+        self.same_result.clear()
+        self.turn_calls = 0
+
+    def _over_budget(self, name: str, tool_use_id: str | None) -> dict[str, Any] | None:
+        """Count one call against the turn's budget. Returns what to answer
+        when the call may not simply go ahead, or None."""
+        if not self.turn_budget or name in NEVER_BUDGETED:
+            return None
+        self.turn_calls += 1
+        budget = self.turn_budget
+        if self.turn_calls == max(1, int(budget * BUDGET_WARN_AT)):
+            return _note(
+                f"This turn has made {self.turn_calls} tool calls and ends at {budget}. Stop "
+                "gathering: tell the user what you have found, what is still missing and what "
+                "you would do next — or finish, if one more step does it. If you do not know "
+                "what the user wants, ask them now.")
+        if self.turn_calls <= budget:
+            return None
+        if tool_use_id:
+            self.counted.add(tool_use_id)
+        over = self.turn_calls - budget
+        if over >= BUDGET_OVERRUN and not self.looping:
+            self.looping = name.split("__")[-1] if name.startswith("mcp__") else name
+            self.stop_reason = f"{budget} tool calls in one turn — the limit for this model"
+            self.stop_hint = ("What it had found is in the conversation. Tell it what to do "
+                              "next, or say `계속` to let it go on. The limit is `turn_calls` "
+                              "in this provider's settings (0 turns it off).")
+        return _deny(
+            f"Blocked: this turn has made {budget} tool calls, which is the limit for one turn "
+            "on this model. No more tools will run in this turn — this is not an error to "
+            "retry.\nWrite to the user now: what you found, what is still missing, and what "
+            "you would do next. They can tell you to continue."
+            + (" The turn is being ended." if over >= BUDGET_OVERRUN else ""))
 
     def kit_changed(self, loaded: set[str]) -> None:
         """The session carries a different set of tools now (a profile or a
@@ -679,6 +741,13 @@ class Guardrails:
         text = _result_text(payload)
         if text is not None:
             self.returned[key] = text
+            if name == "Bash" or (name.startswith("mcp__") and not name.startswith(SCIVO_PREFIX)):
+                mark = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+                seen_all = self.same_result.get(key)
+                if seen_all and seen_all[0] == mark:
+                    seen_all[1] += 1
+                else:
+                    self.same_result[key] = [mark, 1]
             if name == "Bash":
                 signature = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
                 seen = self.outputs.get(key)
@@ -716,8 +785,27 @@ class Guardrails:
         """
         name = str(payload.get("tool_name", ""))
         key = _key(payload)
+        budget = self._over_budget(name, tool_use_id)
+        if budget is not None and "permissionDecision" in budget.get("hookSpecificOutput", {}):
+            return budget
+        verdict = self._judge(payload, tool_use_id, name, key)
+        # The three-quarters note rides on a call that is otherwise fine; a
+        # refusal says more and wins.
+        return verdict or budget or {}
+
+    def _judge(self, payload: Any, tool_use_id: str | None, name: str,
+               key: tuple[str, str]) -> dict[str, Any]:
         first = key not in self.calls
         self.calls.add(key)
+        again = self.same_result.get(key) if self.turn_budget else None
+        if again and again[1] >= SAME_RESULT_TOTAL:
+            label = name.split("__")[-1] if name.startswith("mcp__") else name
+            return self._refuse(
+                label,
+                f"Blocked: this exact call has returned exactly the same thing {again[1]} "
+                "times in this turn. Whatever was done in between did not change it, and "
+                "asking again will not.",
+                key, tool_use_id)
         # Checked before the polling exemption: `tail_remote_log` is asked
         # again on purpose while a job runs, but not after it has failed the
         # same way three times — that is an unreachable host, not a job to
@@ -745,6 +833,7 @@ class Guardrails:
             self.repeats.clear()
             self.outputs.clear()
             self.calls.clear()
+            self.same_result.clear()
             return {}
         if not name.startswith("mcp__"):
             # Host tools are never denied. The rule is about MCP calls; a
