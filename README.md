@@ -83,6 +83,9 @@ from the model's tool list rather than merely denied:
 | `deck` | deck, materials |
 | `video` | video, materials |
 | `pipeline` | pipeline |
+| `manuscript`, `figures`, `references`, `review`, `export`, `study` | one part of the paper domain each |
+| `materials` | materials |
+| `project` | the project-level tools alone (decisions, discussion, feedback, the guide) |
 | `none` | nothing of this server |
 | `--read-only` | any of the above, minus every writing tool |
 
@@ -529,11 +532,14 @@ editing a paper, its todos and memory, and running jobs on registered servers.
 top, which is how a local session gets `add_video` or the deck tools, and
 `/profile +pipeline` adds one beside another. A domain is loaded whole or not
 at all: over 60 tools it is left out, and the banner, `/tools` and the prompt
-say so by name — `paper` is 114 and stays pruned, its everyday half already
-being in the core. `full` on a local model is the core alone. The banner and
-`/tools` list what each profile would add here, counted from the server's own
-tool list; the model's prompt carries the same list, so asked for a tool it
-does not have it answers with the command instead of looking for it.
+say so by name. `paper` is 114 and stays pruned whole, its everyday half
+already being in the core — the rest loads in parts: `/profile +figures`,
+`+references`, `+review`, `+export`, `+study`, `+manuscript`. `+project` adds
+the project-level tools the local core leaves out. `full` on a local model is
+the core alone. `/tools` lists what each profile would add here, counted from
+the server's own tool list; the model's prompt carries the same list (names
+for a short group, the words in the names for a long one), so asked for a
+tool it does not have it answers with the command instead of looking for it.
 A local server has no deferred
 tool loading, and whether it re-reads the whole prompt on every request depends
 on its prompt cache: llama-server reuses a slot's prefix when the prompt starts
@@ -850,8 +856,9 @@ harness buys them the control page, the orders and the approval UI — not acces
 - No token/cost telemetry beyond the per-turn line.
 - A profile switch (`/profile`) restarts the CLI process under the session;
   the conversation is resumed, the prompt cache is not.
-- On a local model 120 of the server's tools — most of the paper domain —
-  cannot be loaded by any profile. `/tools <word>` says so for each.
+- A local kit has no ceiling of its own: every profile added with `+` is
+  more schemas on every request, and nothing stops a session from adding
+  them all.
 - Guardrail coverage is four rules. The guide documents more that could be hooks.
 
 ## License

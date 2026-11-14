@@ -194,9 +194,14 @@ def _local_kit(scivo_tools: tuple[str, ...], profile: str
     """The scivo tools a local session carries — the core, plus each asked-for
     domain that fits — and the asked-for domains that did not fit."""
     keep = set(LOCAL_SCIVO_TOOLS) & set(scivo_tools)
+    # By domain and by part of a domain: a profile asks for either
+    # (`paper`, or `paper/figures`), and each is measured as what it is.
     sizes: dict[str, list[str]] = {}
     for name in scivo_tools:
-        sizes.setdefault(toolsets._domain_of(name), []).append(name)
+        domain, group = toolsets._domain_of(name), toolsets.group_of(name)
+        sizes.setdefault(domain, []).append(name)
+        if group != domain:
+            sizes.setdefault(group, []).append(name)
     # `full` asks for nothing here: it is the default, and a default that
     # loaded every domain small enough would be 100 schemas on every request
     # of every local session. So it is the core alone, and `full+video` is the
@@ -284,17 +289,23 @@ def _elsewhere(scivo_tools: tuple[str, ...], plan: ToolPlan, carried: set[str]
             continue
         gained = _local_kept(scivo_tools, name, plan.read_only_session) - carried
         if gained:
-            adds.append((len(gained), name, gained))
-    adds.sort(key=lambda row: row[0])       # stable: PROFILES' order breaks ties
+            adds.append((len(gained), len(domains), name, gained))
+    # Fewest tools first; then the profile that asks for least (`materials`
+    # before `writing`, which adds the same eleven here and names a domain it
+    # cannot load); then PROFILES' order.
+    adds.sort(key=lambda row: row[:2])
     filed: set[str] = set()
     offers = []
-    for _, name, gained in adds:
+    for _, _, name, gained in adds:
         fresh = gained - filed
         if fresh:
             offers.append((name, tuple(n for n in scivo_tools if n in fresh)))
             filed |= fresh
+    # What a read-only session lacks because it is read-only is not "out of
+    # reach on this model", and the prompt says why those are absent already.
     absent = [n for n in scivo_tools
-              if n not in carried and n not in filed and n not in toolsets.HARNESS_ONLY]
+              if n not in carried and n not in filed and n not in toolsets.HARNESS_ONLY
+              and not (plan.read_only_session and not toolsets.is_read_only(n))]
     return tuple(offers), tuple(absent)
 
 

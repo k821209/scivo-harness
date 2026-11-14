@@ -1813,16 +1813,24 @@ class Repl:
     # -------------------------------------------------------------- profile
 
     @staticmethod
-    def _core_line(kit) -> str:
+    def _core_line(kit, BANNER_NAMES: int = 3) -> str:
         """The banner's one line about a local kit: what can be added to it.
 
         It used to read "`--profile video | deck | analysis` loads that domain"
         — written once, and still printed after `analysis` had outgrown a
         local kit and loaded nothing. The names are the kit's own `offers`.
         """
-        more = ", ".join(f"+{name}" for name, _ in kit.offers)
-        return ("  a local model carries a working core"
-                + (f" — /profile {more} adds that profile beside it" if more else "")
+        names = [f"+{name}" for name, _ in kit.offers]
+        if len(names) > BANNER_NAMES:
+            # Twelve names is a line nobody reads; the count, and where the
+            # list is.
+            more = (f" — /profile +<name> adds one of {len(names)} profiles beside it "
+                    f"({', '.join(names[:BANNER_NAMES])}, …; /tools lists them)")
+        elif names:
+            more = f" — /profile {', '.join(names)} adds that profile beside it"
+        else:
+            more = ""
+        return ("  a local model carries a working core" + more
                 + ("; `full` is the core alone" if kit.profile == "full" else ""))
 
     @staticmethod
@@ -1890,7 +1898,7 @@ class Repl:
             gained = [n for n in plan.kept if n not in set(kit.kept)]
             if gained:
                 rows.append((name, tuple(gained)))
-        rows.sort(key=lambda row: len(row[1]))
+        rows.sort(key=lambda row: (len(row[1]), len(toolsets.PROFILES[row[0]])))
         filed: set[str] = set()
         out = []
         for name, gained in rows:

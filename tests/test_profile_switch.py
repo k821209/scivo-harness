@@ -472,9 +472,8 @@ def test_tools_with_a_word_says_whether_the_tool_is_here_and_what_loads_it(monke
     assert "list_pipelines  not loaded — /profile +pipeline" in said
     here = ANSI.sub("", "\n".join(stub._find_tools("add_video")))
     assert "add_video  loaded" in here
-    # A tool no local profile reaches says THAT, not a command that would fail.
     far = ANSI.sub("", "\n".join(stub._find_tools("update_table")))
-    assert "a Claude model only" in far and "/profile +" not in far
+    assert "update_table  not loaded — /profile +figures" in far
     assert "no scivo tool" in ANSI.sub("", "\n".join(stub._find_tools("zebra")))
     # The prefix a model writes is not part of the name.
     prefixed = ANSI.sub("", "\n".join(stub._find_tools("mcp__scivo__list_pipelines")))
@@ -486,7 +485,9 @@ def test_tools_with_a_word_on_a_claude_model_names_the_profile_too(monkeypatch):
     said = ANSI.sub("", "\n".join(stub._find_tools("list_pipelines")))
     assert "not loaded — /profile +pipeline" in said
     table = ANSI.sub("", "\n".join(stub._find_tools("update_table")))
-    assert "not loaded — /profile +writing" in table
+    assert "not loaded — /profile +figures" in table, "the smallest profile, on either model"
+    material = ANSI.sub("", "\n".join(stub._find_tools("add_asset")))
+    assert "add_asset  loaded" in material
     stub.session.plan = toolsets.plan(list(REAL), "full")
     assert "list_pipelines  loaded" in ANSI.sub("", "\n".join(stub._find_tools("list_pipelines")))
 
@@ -507,18 +508,36 @@ def test_the_slash_tools_reply_reaches_the_page(monkeypatch):
     assert Repl._local(stub, "/tools") is True
     said = _text(stub)
     assert "/profile +pipeline  adds 11" in said and "/tools <word>" in said
-    assert "on a Claude model only" in said
+    assert "/profile +figures  adds" in said and "on a Claude model only" not in said
 
 
 def test_the_banner_offers_what_this_kit_can_actually_be_given(monkeypatch):
     from scivo_harness import session as session_mod
     full = session_mod.kit_plan(toolsets.plan(list(REAL), "full"), REAL, True)
     line = Repl._core_line(full)
-    for name, _ in full.offers:
+    assert f"one of {len(full.offers)} profiles" in line and "/tools lists them" in line
+    for name, _ in full.offers[:3]:
         assert f"+{name}" in line
-    assert "+pipeline" in line and "`full` is the core alone" in line
+    assert "`full` is the core alone" in line and len(line) < 200
+    # A short list is given whole.
+    whole = Repl._core_line(full, BANNER_NAMES=99)
+    for name, _ in full.offers:
+        assert f"+{name}" in whole
     video = session_mod.kit_plan(toolsets.plan(list(REAL), "video"), REAL, True)
-    assert "+video" not in Repl._core_line(video) and "core alone" not in Repl._core_line(video)
+    assert "+video" not in Repl._core_line(video, BANNER_NAMES=99)
+    assert "core alone" not in Repl._core_line(video)
     # A kit nothing can be added to says so by saying nothing, not by a name.
     from dataclasses import replace
     assert "/profile" not in Repl._core_line(replace(full, offers=()))
+
+
+def test_a_tool_no_local_profile_reaches_says_that_and_not_a_command(monkeypatch):
+    """Nothing is out of reach today; the next domain to outgrow a local kit
+    will be, and the answer must not be a command that would not deliver it."""
+    from scivo_harness import session as session_mod
+    monkeypatch.setattr(session_mod, "LOCAL_DOMAIN_LIMIT", 5)
+    stub = _repl(monkeypatch, profile="full", local=True, lean=True, TOOLS=REAL)
+    far = ANSI.sub("", "\n".join(stub._find_tools("add_video_chunk")))
+    assert "a Claude model only" in far and "/profile +" not in far
+    assert Repl._local(stub, "/tools") is True
+    assert "on a Claude model only" in _text(stub)

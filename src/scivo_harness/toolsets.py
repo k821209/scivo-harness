@@ -47,6 +47,23 @@ DOMAINS: dict[str, tuple[str, ...]] = {
     "video": ("video", "youtube"),
 }
 
+# Parts of the paper domain, most specific first; a paper tool that matches
+# none is `manuscript`. They exist for a LOCAL model: `paper` is 114 tools and
+# a local kit takes a domain whole or not at all, so until 2026-11-15 nothing
+# could give a local session `add_figure`, `export_to_path` or
+# `resolve_paper_comment` — 98 tools no profile reached. A part is asked for
+# as `paper/<name>` and is small enough to load. The `paper` domain itself is
+# unchanged, so a Claude session's `paper`, `writing` and `full` are exactly
+# what they were.
+PAPER_GROUPS: dict[str, tuple[str, ...]] = {
+    "study": ("stud", "publication", "passcode", "publish_page", "page_data", "question"),
+    "review": ("review", "comment", "anchor", "triage"),
+    "references": ("reference", "citation", "doi", "works", "finding", "csl", "taxa"),
+    "figures": ("figure", "table", "legend", "image", "supplementary"),
+    "export": ("export", "submission", "requirement", "lint_manuscript"),
+}
+PAPER_REST = "manuscript"
+
 ALWAYS = (
     "whoami", "project_guide", "get_project_memory", "append_project_memory",
     "update_project_memory", "get_project_skills", "update_project_skills",
@@ -88,6 +105,18 @@ PROFILES: dict[str, tuple[str, ...]] = {
     # The workflow registry alone: eleven tools, small enough to sit beside
     # any other profile on a local model (`video+pipeline`).
     "pipeline": ("pipeline",),
+    # The paper domain in parts, and the two other things a local kit could
+    # not be given: the materials alone, and the rest of the project-level
+    # tools (decisions, discussion, feedback, the guide) that the local core
+    # leaves out. Each is small enough to sit beside another profile.
+    "manuscript": ("paper/manuscript",),
+    "figures": ("paper/figures",),
+    "references": ("paper/references",),
+    "review": ("paper/review",),
+    "export": ("paper/export",),
+    "study": ("paper/study",),
+    "materials": ("materials",),
+    "project": ("core",),
     # No scivo surface at all — asked for as "완전 프리한걸로" (user,
     # 2026-11-08): the harness's charter, the briefing and the host's own
     # tools, and nothing of this server. An EMPTY domain list is the rule,
@@ -223,6 +252,20 @@ def _domain_of(name: str) -> str:
     return "core"
 
 
+def group_of(name: str) -> str:
+    """The part of its domain a tool belongs to: `paper/figures`. A domain
+    with no parts is its own group, so every tool has exactly one."""
+    domain = _domain_of(name)
+    if domain != "paper":
+        return domain
+    lowered = name.lower()
+    segments = lowered.split("_")
+    for group, needles in PAPER_GROUPS.items():
+        if any(_matches(needle, lowered, segments) for needle in needles):
+            return f"paper/{group}"
+    return f"paper/{PAPER_REST}"
+
+
 # Tools the HARNESS calls and the model has no use for. Dropped from every
 # profile: `wait_for_responses` holds a call open for half a minute waiting on
 # the control page, which is the control channel's own plumbing — in the
@@ -255,7 +298,8 @@ def plan(all_tools: list[str], profile: str = "full", read_only: bool = False) -
     kept, dropped = [], []
     for name in all_tools:
         keep = (name in ALWAYS or name in PRESCRIBED
-                or _domain_of(name) in wanted or _domain_of(name) == "core"
+                or _domain_of(name) in wanted or group_of(name) in wanted
+                or _domain_of(name) == "core"
                 or bool(wanted & set(ALSO.get(name, ()))))
         if name in HARNESS_ONLY:
             keep = False

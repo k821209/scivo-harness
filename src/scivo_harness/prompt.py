@@ -268,6 +268,19 @@ SESSION_START_TOOLS = (
 PRESCRIBES = "1. Call `mcp__scivo__whoami()`"
 
 
+NAMED_UP_TO = 12
+
+# What a tool DOES rather than what it is about, and the glue between the
+# words. Cosmetic: a verb that slips through is one wasted word in a line.
+_NOT_A_TOPIC = frozenset("""
+    add get list update delete set read write search check create register remove count
+    acknowledge clear build compose generate backfill attach diff answer ask reorder replace
+    resync connect join mark put rename enrich resolve reconcile validate verify prepare scan
+    link refresh reap launch poll tail wait kill submit record compare edit sync complete
+    import publish open all to from by in for of the my
+""".split())
+
+
 def _stems(names: tuple[str, ...], limit: int = 14) -> str:
     """What a long list of tools is ABOUT, in the words of their own names.
 
@@ -277,14 +290,19 @@ def _stems(names: tuple[str, ...], limit: int = 14) -> str:
     `get_table` → "table". Counted from the names, most frequent first.
     """
     from collections import Counter
-    verbs = {"add", "get", "list", "update", "delete", "set", "read", "write", "search",
-             "check", "create", "register", "remove", "count", "to", "from", "by", "in",
-             "for", "of", "the", "my"}
     words = Counter()
     for name in names:
         for word in dict.fromkeys(name.split("_")):
-            if word not in verbs and len(word) > 2:
-                words[word.rstrip("s") if len(word) > 4 else word] += 1
+            if word in _NOT_A_TOPIC or len(word) < 3:
+                continue
+            # One spelling per topic: `runs` and `run`, `studies` and `study`.
+            if word.endswith("ies"):
+                word = word[:-3] + "y"
+            elif word.endswith("yses"):
+                word = word[:-2] + "is"
+            elif word.endswith("s") and not word.endswith(("ss", "is", "us")):
+                word = word[:-1]
+            words[word] += 1
     return ", ".join(word for word, _ in words.most_common(limit)) + ", …"
 
 
@@ -351,7 +369,8 @@ def _tool_note(plan: ToolPlan, guide: str | None = None) -> str:
             f"`{plan.profile}` profile's own domains where they fit — `full` here is "
             "the core alone. Do not call an absent tool to see whether it works, "
             "and do not search the disk for it: the list below says where every "
-            "other tool of this server is. If a task needs one, say which and give the "
+            "other tool of this server is (a long group is described by the words "
+            "in its tools' names). If a task needs one, say which and give the "
             "user the command beside it; `+` adds that profile to this one and "
             "the conversation continues."
         )
@@ -359,11 +378,18 @@ def _tool_note(plan: ToolPlan, guide: str | None = None) -> str:
             lines.append(
                 f"\n`{domain}` was asked for and is NOT loaded: its {size} tools are "
                 "more than a local model's kit takes. Its everyday tools are in the "
-                "core; the rest need a Claude model.")
+                "core, and the rest load in parts — the list below — or all at once "
+                "on a Claude model.")
         if plan.offers:
             lines.append("")
         for name, tools in plan.offers:
-            lines.append(f"- `/profile +{name}` ({len(tools)}): {', '.join(tools)}")
+            # Names for a short list, what the names are about for a long one:
+            # every absent tool by name was 5.4 KB on every request of a model
+            # that reads its whole prompt each time. `/tools <word>` has the
+            # exact answer for whoever is typing.
+            listed = (", ".join(tools) if len(tools) <= NAMED_UP_TO
+                      else "tools for " + _stems(tools, limit=9))
+            lines.append(f"- `/profile +{name}` ({len(tools)}): {listed}")
         if plan.unreachable:
             lines.append(
                 f"- a Claude model only (`/model`) — {len(plan.unreachable)} more, "

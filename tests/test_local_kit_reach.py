@@ -112,7 +112,10 @@ def test_a_domain_too_large_for_a_local_kit_is_named_not_dropped_in_silence():
     assert [domain for domain, _ in kit.left_out] == ["paper"]
     assert dict(kit.left_out)["paper"] > session.LOCAL_DOMAIN_LIMIT
     assert "paper" in kit.summary() and "too large" in kit.summary()
-    assert kit.unreachable and "update_table" in kit.unreachable
+    # Left out whole — and offered in parts, so nothing of it is out of reach.
+    where = {name: profile for profile, names in kit.offers for name in names}
+    assert where["update_table"] == "figures" and where["export_to_path"] == "export"
+    assert kit.unreachable == ()
     assert local("video").left_out == ()
     assert "too large" not in local("video").summary()
 
@@ -140,16 +143,20 @@ def test_the_local_prompt_says_where_each_absent_tool_is():
     assert "`/profile +video`" not in said, "already loaded"
     assert "`/profile +analysis`" in said
     assert "(or `deck`, `analysis`)" not in said, "the sentence that was not true"
-    # What no profile reaches is described, not listed: 120 names nobody can
-    # load from here are 120 names carried on every request.
+    # A long group is described, not listed: every absent tool by name was
+    # 5.4 KB on every request of a model that reads its whole prompt each time.
     note = prompt._tool_note(local("full"))
-    assert "a Claude model only" in note and "120 more" in note
-    assert "update_table" not in note and "table" in note.split("a Claude model only")[1]
-    assert len(note) < 4000, len(note)
+    figures = next(line for line in note.splitlines() if "`/profile +figures`" in line)
+    assert "(15): tools for figure, table" in figures and "update_table" not in note
+    review = next(line for line in note.splitlines() if "`/profile +review`" in line)
+    assert "resolve_paper_comment" in review, "a short group is named in full"
+    assert "analysi," not in note and "runs," not in note, "one spelling per topic"
+    assert "a Claude model only" not in note, "nothing is out of reach any more"
+    assert len(note) < 3500, len(note)
     # And a domain that was asked for and did not fit is said in words.
     paper = prompt._tool_note(local("paper"))
     assert "`paper` was asked for and is NOT loaded" in paper and "114" in paper
-    assert "was asked for" not in note
+    assert "load in parts" in paper and "was asked for" not in note
 
 
 def test_the_video_order_survives_a_combination():
@@ -175,3 +182,84 @@ def test_a_read_only_local_session_is_not_offered_tools_that_write():
 def test_an_empty_profile_is_offered_nothing_by_addition():
     kit = session.kit_plan(toolsets.plan(list(REAL), "none"), REAL, True)
     assert kit.kept == [] and kit.offers == () and kit.unreachable == ()
+
+
+# ── the paper domain in parts ────────────────────────────────────────────────
+
+PAPER = {name for name in REAL if toolsets._domain_of(name) == "paper"}
+PARTS = ("manuscript", "figures", "references", "review", "export", "study")
+
+
+def test_no_tool_of_this_server_is_out_of_reach_of_a_local_session():
+    """98 paper tools and 22 project-level ones could not be loaded by any
+    profile: no `add_figure`, no `export_to_path`, no `record_decision`."""
+    for profile in ("full", "video", "paper", "analysis", "pipeline", "project"):
+        kit = local(profile)
+        assert kit.unreachable == (), (profile, kit.unreachable[:5])
+        offered = {name for _, names in kit.offers for name in names}
+        assert offered | set(kit.kept) == set(REAL) - set(toolsets.HARNESS_ONLY), profile
+
+
+def test_every_paper_tool_is_in_exactly_one_part_and_each_part_fits():
+    assert len(PAPER) == 114
+    seen: dict[str, str] = {}
+    for part in PARTS:
+        members = {n for n in PAPER if toolsets.group_of(n) == f"paper/{part}"}
+        assert 0 < len(members) <= session.LOCAL_DOMAIN_LIMIT, (part, len(members))
+        for name in members:
+            assert name not in seen, (name, seen.get(name), part)
+            seen[name] = part
+        assert members <= set(local(part).kept), part
+    assert set(seen) == PAPER
+    # The tools that prompted this, each where a person would look for it.
+    assert seen["add_figure"] == seen["update_table"] == seen["lint_legends"] == "figures"
+    assert seen["export_to_path"] == seen["register_submission"] == seen["check_requirements"] == "export"
+    assert seen["resolve_paper_comment"] == seen["add_review"] == "review"
+    assert seen["validate_references"] == seen["verify_doi"] == seen["register_journal_csl"] == "references"
+    assert seen["write_study"] == seen["preview_study"] == seen["publish_page"] == "study"
+    assert seen["create_paper"] == seen["add_author"] == seen["reorder_section"] == "manuscript"
+    assert toolsets.group_of("list_pipelines") == "pipeline", "a domain without parts is its own"
+
+
+def test_the_paper_domain_itself_is_what_it_was():
+    """A Claude session's `paper`, `writing` and `full` did not move."""
+    for profile in ("paper", "writing", "full"):
+        assert PAPER <= set(toolsets.plan(list(REAL), profile).kept), profile
+    assert not PAPER & set(local("paper").kept) - set(session.LOCAL_SCIVO_TOOLS), \
+        "and on a local model it is still too large to load whole"
+    # A part is a narrower profile on a Claude model too.
+    figures = set(toolsets.plan(list(REAL), "figures").kept)
+    assert "add_figure" in figures and "export_to_path" not in figures
+
+
+def test_the_project_profile_gives_the_rest_of_the_core():
+    kit = local("project")
+    assert {"record_decision", "list_decisions", "list_feedback", "project_guide",
+            "post_comment", "build_tracked_changes"} <= set(kit.kept)
+    assert "record_decision" not in local("full").kept
+
+
+def test_materials_are_offered_as_materials():
+    """`/profile +writing` was the way to the materials tools: a profile that
+    names a domain it cannot load here."""
+    where = {name: profile for profile, names in local("full").offers for name in names}
+    assert where["add_material"] == "materials"
+
+
+def test_what_a_read_only_session_lacks_for_being_read_only_is_not_out_of_reach():
+    kit = session.kit_plan(toolsets.plan(list(REAL), "video", read_only=True), REAL, True)
+    assert kit.unreachable == ()
+    assert "add_figure" not in {n for _, names in kit.offers for n in names}
+
+
+def test_what_is_out_of_reach_is_counted_and_described_in_the_prompt(monkeypatch):
+    """Nothing is, today. The next domain to outgrow a local kit will be, and
+    the model has to be told so — in a line, not in a hundred names."""
+    from scivo_harness import prompt
+    monkeypatch.setattr(session, "LOCAL_DOMAIN_LIMIT", 5)
+    kit = local("full")
+    assert "add_video_chunk" in kit.unreachable
+    note = prompt._tool_note(kit)
+    line = next(row for row in note.splitlines() if "a Claude model only" in row)
+    assert f"{len(kit.unreachable)} more" in line and "video" in line
+    assert "add_video_chunk" not in note
