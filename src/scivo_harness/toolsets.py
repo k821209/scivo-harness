@@ -34,8 +34,13 @@ DOMAINS: dict[str, tuple[str, ...]] = {
     # them as much as a paper session does, and a paper session with no
     # materials tools was a paper session that could not attach anything.
     "materials": ("material", "asset"),
+    # Pipelines are a domain of their own, split from `analysis` on 2026-11-15.
+    # A local model loads a domain whole or not at all, and with these eleven
+    # in it `analysis` was 62 tools — two over what a local kit takes — so no
+    # profile could give a local session `list_pipelines` (msja, that day).
+    "pipeline": ("pipeline",),
     "analysis": (
-        "analysis", "analyses", "run", "server", "dataset", "pipeline", "job",
+        "analysis", "analyses", "run", "server", "dataset", "job",
         "workdir", "remote", "local_job", "log", "output", "graph", "plan",
     ),
     "deck": ("deck", "slide", "pptx", "region", "renumber", "reorder_deck"),
@@ -71,15 +76,18 @@ READ_ONLY_PREFIXES = (
 )
 
 PROFILES: dict[str, tuple[str, ...]] = {
-    "full": ("paper", "materials", "analysis", "deck", "video"),
-    "paper": ("paper", "materials", "analysis"),
+    "full": ("paper", "materials", "analysis", "pipeline", "deck", "video"),
+    "paper": ("paper", "materials", "analysis", "pipeline"),
     "writing": ("paper", "materials"),
-    "analysis": ("analysis",),
+    "analysis": ("analysis", "pipeline"),
     # Decks and videos both attach materials, so those profiles carry them —
     # and no longer drag along the paper tools you do not need to make a deck
     # or upload a video.
     "deck": ("deck", "materials"),
     "video": ("video", "materials"),
+    # The workflow registry alone: eleven tools, small enough to sit beside
+    # any other profile on a local model (`video+pipeline`).
+    "pipeline": ("pipeline",),
     # No scivo surface at all — asked for as "완전 프리한걸로" (user,
     # 2026-11-08): the harness's charter, the briefing and the host's own
     # tools, and nothing of this server. An EMPTY domain list is the rule,
@@ -95,6 +103,46 @@ PROFILES: dict[str, tuple[str, ...]] = {
 # read-only session it stays and is asked about every time (permissions.py).
 HOST_FILE_WRITERS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
+# `video+pipeline`: profiles add up. A local session that needed one more
+# domain had to swap its profile for another and lose what it had — it was
+# sent from `video` to `full` for one tool and lost the video tools, and two
+# days later went to `full` again for `list_pipelines`.
+JOIN = "+"
+
+
+def parts(profile: str) -> tuple[str, ...]:
+    """The profiles a name is made of, in PROFILES' order, each once.
+
+    Raises ValueError naming the part that is not a profile, and refuses an
+    empty profile in a combination: `none` means nothing is loaded, and
+    "nothing, plus video" has no reading that is not a surprise.
+    """
+    asked = [part.strip().lower() for part in str(profile).split(JOIN)]
+    asked = [part for part in asked if part]
+    if not asked:
+        raise ValueError(f"no profile in {profile!r}; choose from {', '.join(PROFILES)}")
+    for part in asked:
+        if part not in PROFILES:
+            raise ValueError(f"unknown profile {part!r}; choose from {', '.join(PROFILES)}"
+                             f" — or several joined with {JOIN}, as in video{JOIN}pipeline")
+    if len(set(asked)) > 1:
+        empty = [part for part in asked if not PROFILES[part]]
+        if empty:
+            raise ValueError(f"`{empty[0]}` loads nothing, so it cannot be combined: "
+                             f"{profile!r}")
+    return tuple(name for name in PROFILES if name in asked)
+
+
+def canonical(profile: str) -> str:
+    """One spelling per combination, so `pipeline+video` and `video+pipeline`
+    are the same profile to everything that compares or stores the name."""
+    return JOIN.join(parts(profile))
+
+
+def domains(profile: str) -> tuple[str, ...]:
+    """Every domain the profile loads, each once."""
+    return tuple(dict.fromkeys(d for part in parts(profile) for d in PROFILES[part]))
+
 
 @dataclass
 class ToolPlan:
@@ -107,6 +155,15 @@ class ToolPlan:
     # to what a small model can carry (session.kit_plan). The counts are then
     # the kit's, which is what is loaded.
     lean: bool = False
+    # The three things a cut-down kit owes whoever reads it (session.kit_plan
+    # fills them in; they are empty for a Claude model's plan).
+    # A domain this profile asked for that was too large to load: (domain, size).
+    left_out: tuple[tuple[str, int], ...] = ()
+    # What another profile would add: (profile, tool names), each absent tool
+    # once, under the smallest profile that loads it.
+    offers: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # Absent tools no profile loads on this model.
+    unreachable: tuple[str, ...] = ()
 
     @property
     def disallowed(self) -> list[str]:
@@ -129,6 +186,8 @@ class ToolPlan:
             f"profile {self.profile}: {len(self.kept)}/{total} scivo tools "
             f"({len(self.dropped)} dropped from context)"
             + (" — the kit for a local model" if self.lean else "")
+            + ("".join(f"; `{domain}` left out, {size} tools is too large for it"
+                       for domain, size in self.left_out))
             + (", read-only session" if self.read_only_session else "")
         )
 
@@ -137,7 +196,7 @@ class ToolPlan:
 # it first `preview_slide` matched `review` and `export_deck_to_pptx` matched
 # `export`, so a `--profile deck` session lost the two tools /paper-deck cannot
 # work without.
-_DOMAIN_ORDER = ("deck", "video", "materials", "analysis", "paper")
+_DOMAIN_ORDER = ("deck", "video", "materials", "pipeline", "analysis", "paper")
 
 # A tool one domain claims that other profiles cannot work without. The
 # video loop registers keyframes (first/last images) BEFORE generating a
@@ -181,9 +240,8 @@ def is_read_only(name: str) -> bool:
 
 
 def plan(all_tools: list[str], profile: str = "full", read_only: bool = False) -> ToolPlan:
-    if profile not in PROFILES:
-        raise ValueError(f"unknown profile {profile!r}; choose from {', '.join(PROFILES)}")
-    wanted = set(PROFILES[profile])
+    profile = canonical(profile)
+    wanted = set(domains(profile))
     if not wanted:
         # Nothing, and that includes ALWAYS and the `core` domain — which is
         # the whole difference between this and a narrow profile. Everything

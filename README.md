@@ -76,13 +76,20 @@ from the model's tool list rather than merely denied:
 
 | profile | domains it carries |
 |---|---|
-| `full` | paper, materials, analysis, deck, video |
-| `paper` | paper, materials, analysis |
+| `full` | paper, materials, analysis, pipeline, deck, video |
+| `paper` | paper, materials, analysis, pipeline |
 | `writing` | paper, materials |
+| `analysis` | analysis, pipeline |
 | `deck` | deck, materials |
 | `video` | video, materials |
-| `analysis` | analysis |
+| `pipeline` | pipeline |
+| `none` | nothing of this server |
 | `--read-only` | any of the above, minus every writing tool |
+
+Profiles add up: `--profile video+pipeline`, or `/profile +pipeline` in a
+session to add one beside what is loaded (the conversation continues, and
+`/update` comes back on it). `/tools <word>` finds a tool by name and says
+whether it is loaded and which profile loads it.
 
 `materials` is its own domain: uploading a reference image, a clip, a
 briefing document is what materials are for, so a video or a deck session
@@ -518,9 +525,15 @@ a server that reports none.
 A session on a small model carries a smaller kit than a Claude one: no project guide in
 the prompt, the core file and shell tools, and ~36 scivo tools for reading and
 editing a paper, its todos and memory, and running jobs on registered servers.
-`--profile video`, `deck` or `analysis` loads that domain's tools on top, which
-is how a local session gets `add_video` or the deck tools; the paper domain is
-115 tools and stays pruned, its everyday half already being in the core.
+`--profile video`, `deck`, `analysis` or `pipeline` loads that domain's tools on
+top, which is how a local session gets `add_video` or the deck tools, and
+`/profile +pipeline` adds one beside another. A domain is loaded whole or not
+at all: over 60 tools it is left out, and the banner, `/tools` and the prompt
+say so by name — `paper` is 114 and stays pruned, its everyday half already
+being in the core. `full` on a local model is the core alone. The banner and
+`/tools` list what each profile would add here, counted from the server's own
+tool list; the model's prompt carries the same list, so asked for a tool it
+does not have it answers with the command instead of looking for it.
 A local server has no deferred
 tool loading, and whether it re-reads the whole prompt on every request depends
 on its prompt cache: llama-server reuses a slot's prefix when the prompt starts
@@ -835,7 +848,10 @@ harness buys them the control page, the orders and the approval UI — not acces
 - Streaming is block-level on the fallback path; partial deltas are used when
   the CLI emits them.
 - No token/cost telemetry beyond the per-turn line.
-- `--profile` is static for the session; the tools cannot be reloaded mid-session.
+- A profile switch (`/profile`) restarts the CLI process under the session;
+  the conversation is resumed, the prompt cache is not.
+- On a local model 120 of the server's tools — most of the paper domain —
+  cannot be loaded by any profile. `/tools <word>` says so for each.
 - Guardrail coverage is four rules. The guide documents more that could be hooks.
 
 ## License

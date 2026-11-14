@@ -55,15 +55,24 @@ from .update import (
     restore_editable,
 )
 from .session import DEFAULT_EFFORT, build, survey
-from .toolsets import PROFILES, plan as make_plan
+from .toolsets import PROFILES, canonical as canonical_profile, plan as make_plan
+
+
+def _profile_arg(value: str) -> str:
+    try:
+        return canonical_profile(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scivo", description="A command-line harness for the Scivo research co-scientist."
     )
-    parser.add_argument("--profile", default="full", choices=sorted(PROFILES),
-                        help="which domains of the scivo tool surface to load (default: full)")
+    parser.add_argument("--profile", default="full", type=_profile_arg,
+                        metavar="{" + ",".join(sorted(PROFILES)) + "}",
+                        help="which domains of the scivo tool surface to load (default: "
+                             "full). Several add up: video+pipeline")
     parser.add_argument("--read-only", action="store_true",
                         help="load no scivo tool that writes and none of the host's file "
                              "tools (Write, Edit). Bash stays, for reading, and asks about "
@@ -874,7 +883,8 @@ def _relaunch_argv(argv: list[str], resume: str | None, control: bool,
                    permission_mode: str | None = None,
                    model: str | None = None,
                    provider: str | None = None,
-                   fresh: bool = False) -> list[str]:
+                   fresh: bool = False,
+                   profile: str | None = None) -> list[str]:
     """The flags this run was started with, minus any session choice, plus the
     session to come back into and the state it was in.
 
@@ -896,7 +906,8 @@ def _relaunch_argv(argv: list[str], resume: str | None, control: bool,
     # this — `--model opus` in argv and no switch means opus, not the default).
     replaced = {flag for flag, value in (("--permission-mode", permission_mode),
                                          ("--model", model),
-                                         ("--provider", provider)) if value}
+                                         ("--provider", provider),
+                                         ("--profile", profile)) if value}
     out: list[str] = []
     skip = 0
     for a in argv:
@@ -917,6 +928,10 @@ def _relaunch_argv(argv: list[str], resume: str | None, control: bool,
         out.append("-c")
     if control:
         out.append("--control")
+    if profile:
+        # Before the subcommand's own flags and after nothing: `--profile` is
+        # a top-level option, and so is everything else appended here.
+        out += ["--profile", profile]
     if permission_mode:
         out += ["--permission-mode", permission_mode]
     if provider:
@@ -944,7 +959,8 @@ def _update_and_relaunch(args, plan: dict) -> int:
                           permission_mode=plan.get("permission_mode"),
                           model=plan.get("model"),
                           provider=plan.get("provider"),
-                          fresh=bool(plan.get("fresh")))
+                          fresh=bool(plan.get("fresh")),
+                          profile=plan.get("profile"))
     print(ui.dim("  scivo " + " ".join(argv)))
     # An exec unwinds nothing, so the terminal has to be handed back by hand:
     # `quiet_echo` wraps this whole session and its restore is about to be

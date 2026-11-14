@@ -95,6 +95,10 @@ LOCAL_SCIVO_TOOLS = (
 # a session that cannot call `add_video` cannot do the video work at all. The
 # paper domain is left out — it is 115 tools, and its everyday half is already
 # in the core list above.
+#
+# A domain over the limit is left out WHOLE, and that has to be said
+# (`ToolPlan.left_out`): `analysis` grew to 62 and went quietly, while every
+# message here went on offering `/profile analysis` (2026-11-15).
 LOCAL_DOMAIN_LIMIT = 60
 
 # The guide is tens of kilobytes. Anything this short is some other answer.
@@ -185,23 +189,43 @@ class Session:
         return lean(base, lean_append, self.scivo_tools, plan.profile)
 
 
-def local_kit(scivo_tools: tuple[str, ...], profile: str) -> set[str]:
-    """The scivo tools a local session carries: the core, plus asked-for domains."""
+def _local_kit(scivo_tools: tuple[str, ...], profile: str
+               ) -> tuple[set[str], tuple[tuple[str, int], ...]]:
+    """The scivo tools a local session carries — the core, plus each asked-for
+    domain that fits — and the asked-for domains that did not fit."""
     keep = set(LOCAL_SCIVO_TOOLS) & set(scivo_tools)
-    if profile == "full":
-        return keep
     sizes: dict[str, list[str]] = {}
     for name in scivo_tools:
         sizes.setdefault(toolsets._domain_of(name), []).append(name)
-    wanted = toolsets.PROFILES.get(profile, ())
-    for domain in wanted:  # the profile's own domains
+    # `full` asks for nothing here: it is the default, and a default that
+    # loaded every domain small enough would be 100 schemas on every request
+    # of every local session. So it is the core alone, and `full+video` is the
+    # core and the video tools — on a Claude model the same name is everything.
+    asked = [part for part in toolsets.parts(profile) if part != "full"]
+    wanted = tuple(dict.fromkeys(d for part in asked for d in toolsets.PROFILES[part]))
+    left_out = []
+    for domain in wanted:
         members = sizes.get(domain, [])
         if len(members) <= LOCAL_DOMAIN_LIMIT:
             keep.update(members)
+        else:
+            left_out.append((domain, len(members)))
     # What the profile borrows from another domain (generate_image for the
     # keyframes) — a lean video session without it cannot do step 3.
     keep.update(n for n in scivo_tools if set(toolsets.ALSO.get(n, ())) & set(wanted))
-    return keep
+    return keep, tuple(left_out)
+
+
+def local_kit(scivo_tools: tuple[str, ...], profile: str) -> set[str]:
+    return _local_kit(tuple(scivo_tools), profile)[0]
+
+
+def _local_kept(scivo_tools: tuple[str, ...], profile: str, read_only: bool) -> set[str]:
+    """What a local session on `profile` would carry: the profile's plan and
+    the local kit, both — the plan is what takes the writers out of a
+    read-only session and the harness's own tools out of every one."""
+    planned = toolsets.plan(list(scivo_tools), profile, read_only=read_only)
+    return set(planned.kept) & local_kit(scivo_tools, profile)
 
 
 def kit_plan(plan: ToolPlan, scivo_tools: tuple[str, ...], lean_profile: bool) -> ToolPlan:
@@ -214,19 +238,64 @@ def kit_plan(plan: ToolPlan, scivo_tools: tuple[str, ...], lean_profile: bool) -
     model the same, and `/profile full`, typed to get MORE tools, took the
     video tools away while saying 261 (msja session, 2026-11-13: five rounds
     of calls to tools that were not there, each answered "No such tool").
+
+    It also says where everything ELSE is. Being told "40/262" answers how
+    much is missing and not how to get any of it: the same session, asked for
+    `list_pipelines` two days later, read the MCP's source for 26 turns to
+    learn that the tool existed and nothing here loaded it. So the absent
+    tools are filed under the profile that adds them (`offers`), the domains
+    this profile asked for and did not get are named (`left_out`), and what
+    no profile reaches on this model is counted (`unreachable`) — all three
+    measured from this server's tool list, never written down.
     """
     if not lean_profile or plan.lean:
         return plan
-    keep = local_kit(tuple(scivo_tools), plan.profile)
+    scivo_tools = tuple(scivo_tools)
+    keep, left_out = _local_kit(scivo_tools, plan.profile)
     kept = [name for name in plan.kept if name in keep]
     carried = set(kept)
+    offers, unreachable = _elsewhere(scivo_tools, plan, carried)
     return replace(
         plan,
         kept=kept,
         dropped=[name for name in scivo_tools if name not in carried],
         read_only=[name for name in plan.read_only if name in carried],
         lean=True,
+        left_out=left_out,
+        offers=offers,
+        unreachable=unreachable,
     )
+
+
+def _elsewhere(scivo_tools: tuple[str, ...], plan: ToolPlan, carried: set[str]
+               ) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], tuple[str, ...]]:
+    """Each absent tool under the smallest profile that would add it.
+
+    Smallest, because the answer is a command the user types: `list_pipelines`
+    is in `pipeline` (11 tools) and in `analysis` (61), and sending a local
+    model to the second costs fifty schemas on every request for one call.
+    """
+    if not plan.kept:
+        return (), ()       # an empty profile offers nothing by adding to it
+    here = set(toolsets.parts(plan.profile))
+    adds: list[tuple[int, str, set[str]]] = []
+    for name, domains in toolsets.PROFILES.items():
+        if name in here or name == "full" or not domains:
+            continue
+        gained = _local_kept(scivo_tools, name, plan.read_only_session) - carried
+        if gained:
+            adds.append((len(gained), name, gained))
+    adds.sort(key=lambda row: row[0])       # stable: PROFILES' order breaks ties
+    filed: set[str] = set()
+    offers = []
+    for _, name, gained in adds:
+        fresh = gained - filed
+        if fresh:
+            offers.append((name, tuple(n for n in scivo_tools if n in fresh)))
+            filed |= fresh
+    absent = [n for n in scivo_tools
+              if n not in carried and n not in filed and n not in toolsets.HARNESS_ONLY]
+    return tuple(offers), tuple(absent)
 
 
 def session_env() -> dict[str, str]:

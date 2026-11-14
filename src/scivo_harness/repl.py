@@ -1255,6 +1255,10 @@ class Repl:
                              "control": bool(self.control and self.control.active),
                              "video": "video" in line.split()[1:],
                              "permission_mode": self.mode,
+                             # Live, like the mode: `/profile` switches it and
+                             # argv keeps what the run was started with, so an
+                             # update handed back the tools of an hour ago.
+                             "profile": self.session.plan.profile,
                              "provider": provider.name,
                              "model": self.session.model,
                              "fresh": bool(provider.has_endpoint and not self.session_id)}
@@ -1321,17 +1325,24 @@ class Repl:
             else:
                 print(ui.dim(f"\n  claude.ai subscription — {self.turns} turns, on your plan\n"))
         elif command == "/tools":
+            # `_say`, not print: on the control page a print is nothing at
+            # all, and the page is where a local session is usually driven.
+            word = line.partition(" ")[2].strip()
             plan = self.session.kit()
-            print(f"\n  {plan.summary()}")
+            if word:
+                self._say("\n" + "\n".join(self._find_tools(word)) + "\n")
+                return True
+            said = [f"\n  {plan.summary()}"]
             if plan.lean:
-                print(ui.dim("  a small model reads every schema on every request, so a local "
-                             "session carries a working core."))
-                print(ui.dim("  `/profile video` (or deck, analysis) loads that domain beside "
-                             "it; `full` is the core alone."))
+                said.append(ui.dim("  a small model reads every schema on every request, so a "
+                                   "local session carries a working core; `full` is the core "
+                                   "alone."))
+                said += [ui.dim(row) for row in self._offer_lines(plan)]
+            said.append(ui.dim("  /tools <word> finds a tool by name and says what loads it"))
             if plan.dropped:
-                print(ui.dim(f"  dropped: {', '.join(plan.dropped[:12])}"
-                             + (" …" if len(plan.dropped) > 12 else "")))
-            print()
+                said.append(ui.dim(f"  dropped: {', '.join(plan.dropped[:12])}"
+                                   + (" …" if len(plan.dropped) > 12 else "")))
+            self._say("\n".join(said) + "\n")
         return True
 
     # ------------------------------------------------------- scivo-control
@@ -1801,6 +1812,94 @@ class Repl:
 
     # -------------------------------------------------------------- profile
 
+    @staticmethod
+    def _core_line(kit) -> str:
+        """The banner's one line about a local kit: what can be added to it.
+
+        It used to read "`--profile video | deck | analysis` loads that domain"
+        — written once, and still printed after `analysis` had outgrown a
+        local kit and loaded nothing. The names are the kit's own `offers`.
+        """
+        more = ", ".join(f"+{name}" for name, _ in kit.offers)
+        return ("  a local model carries a working core"
+                + (f" — /profile {more} adds that profile beside it" if more else "")
+                + ("; `full` is the core alone" if kit.profile == "full" else ""))
+
+    @staticmethod
+    def _offer_lines(plan) -> list[str]:
+        """What a cut-down kit can still be given, from what was measured."""
+        lines = [f"  /profile +{name}  adds {len(tools)}: "
+                 + ", ".join(tools[:4]) + (" …" if len(tools) > 4 else "")
+                 for name, tools in plan.offers]
+        if plan.unreachable:
+            lines.append(f"  {len(plan.unreachable)} more are on a Claude model only (/model) — "
+                         "too many for a local kit")
+        return lines
+
+    def _find_tools(self, word: str) -> list[str]:
+        """`/tools pipeline`: is there such a tool, and what loads it here.
+
+        The question a session could not answer for itself: the model was
+        asked for "the list pipeline tool", had 40 of 262 loaded, and went
+        through the MCP's source to learn it existed (msja, 2026-11-15).
+        """
+        from . import toolsets
+
+        word = word.lower().removeprefix(toolsets.PREFIX)
+        kit = self.session.kit()
+        every = [n for n in self.session.scivo_tools if n not in toolsets.HARNESS_ONLY]
+        found = [n for n in every if word in n.lower()]
+        if not found:
+            return [ui.dim(f"  no scivo tool with {word!r} in its name — "
+                           f"this server has {len(every)}")]
+        where = {name: profile for profile, names in self._offers(kit) for name in names}
+        out = []
+        for name in found[:40]:
+            if name in kit.kept:
+                out.append(f"  {name}" + ui.green("  loaded"))
+            elif name in where:
+                out.append(f"  {name}" + ui.dim(f"  not loaded — /profile +{where[name]}"))
+            elif kit.read_only_session and not toolsets.is_read_only(name):
+                out.append(f"  {name}" + ui.dim("  not loaded — it writes, and this is a "
+                                                "read-only session"))
+            elif kit.lean:
+                out.append(f"  {name}" + ui.dim("  not loaded — a Claude model only (/model); "
+                                                "its domain is too large for a local kit"))
+            else:
+                out.append(f"  {name}" + ui.dim("  not loaded"))
+        if len(found) > 40:
+            out.append(ui.dim(f"  … and {len(found) - 40} more — a longer word narrows it"))
+        return out
+
+    def _offers(self, kit) -> tuple:
+        """(profile, tools it would add here) — a local kit carries its own;
+        for a Claude model's plan it is worked out the same way, from the
+        plans, so the two cannot disagree about what a profile is."""
+        from . import toolsets
+
+        if kit.lean:
+            return kit.offers
+        if not kit.kept:
+            return ()
+        here, rows = set(toolsets.parts(kit.profile)), []
+        for name, domains in toolsets.PROFILES.items():
+            if name in here or not domains:
+                continue
+            plan = toolsets.plan(list(self.session.scivo_tools), profile=name,
+                                 read_only=kit.read_only_session)
+            gained = [n for n in plan.kept if n not in set(kit.kept)]
+            if gained:
+                rows.append((name, tuple(gained)))
+        rows.sort(key=lambda row: len(row[1]))
+        filed: set[str] = set()
+        out = []
+        for name, gained in rows:
+            fresh = tuple(n for n in gained if n not in filed)
+            if fresh:
+                out.append((name, fresh))
+                filed.update(fresh)
+        return tuple(out)
+
     def _profile_rows(self) -> list[tuple[str, int, str]]:
         """Each profile, with how many of THIS server's tools it would keep."""
         from . import toolsets
@@ -1848,12 +1947,14 @@ class Repl:
                     + (ui.green("  ← this session") if here else ""))
             self._say(f"\n  {self.session.kit().summary()}"
                       + "".join(listing)
-                      + ui.dim("\n\n  /profile <number or name>"
+                      + ui.dim("\n\n  /profile <number or name>   switch to it"
+                               "\n  /profile +<name>            add it to this one "
+                               "(video+pipeline) — nothing loaded is lost"
                                "\n  this scopes the scivo TOOLS; skills stay available in every"
                                " profile, and /tools lists what is loaded now\n"))
             return
 
-        wanted = argument.split()[0].lower()
+        wanted = "".join(argument.split()).lower()
         if wanted.isdigit():
             choice = int(wanted)
             if not 1 <= choice <= len(rows):
@@ -1861,9 +1962,15 @@ class Repl:
                           + ui.dim(f" — /profile lists {len(rows)}\n"))
                 return
             wanted = rows[choice - 1][0]
-        if wanted not in toolsets.PROFILES:
-            self._say(ui.red(f"\n  no profile called {wanted!r}")
-                      + ui.dim(f" — {', '.join(toolsets.PROFILES)}\n"))
+        if wanted.startswith(toolsets.JOIN):
+            # `+pipeline`: beside what is loaded. From `none` there is nothing
+            # to be beside, so it is that profile alone.
+            alone = not toolsets.PROFILES.get(current, True)
+            wanted = wanted.lstrip(toolsets.JOIN) if alone else current + wanted
+        try:
+            wanted = toolsets.canonical(wanted)
+        except ValueError as exc:
+            self._say(ui.red(f"\n  {exc}\n"))
             return
         if wanted == current:
             self._say(ui.dim(f"\n  already on {wanted} — {self.session.kit().summary()}\n"))
@@ -2264,10 +2371,7 @@ class Repl:
         for line in ui.attention(briefing):
             print(line)
         if self.session.lean_tools:
-            print(ui.dim("  a local model carries a working core"
-                         + ("" if self.session.plan.profile != "full"
-                            else " — `--profile video | deck | analysis` loads that domain "
-                                 "beside it; `full` is the core alone")))
+            print(ui.dim(self._core_line(self.session.kit())))
         if self.session.endpoint is not None and self.session.endpoint.note:
             print(ui.dim(f"  · {self.session.endpoint.note}"))
         if self.session.rails.turn_budget:

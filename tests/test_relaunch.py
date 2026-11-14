@@ -106,7 +106,8 @@ def test_update_asks_for_the_provider_the_session_is_on(monkeypatch):
     def plan(provider_name, has_endpoint, session_id):
         provider = types.SimpleNamespace(name=provider_name, has_endpoint=has_endpoint)
         stub = types.SimpleNamespace(
-            session=types.SimpleNamespace(provider=provider, model="local" if has_endpoint else "claude-opus-5"),
+            session=types.SimpleNamespace(provider=provider, model="local" if has_endpoint else "claude-opus-5",
+                                          plan=types.SimpleNamespace(profile="video+pipeline")),
             session_id=session_id, control=None, mode="default", relaunch=None)
         try:
             Repl._local(stub, "/update")
@@ -115,6 +116,7 @@ def test_update_asks_for_the_provider_the_session_is_on(monkeypatch):
         return stub.relaunch
 
     local = plan("gpu8192", True, "sess-1")
+    assert local["profile"] == "video+pipeline", "what /profile switched to, not argv"
     assert (local["provider"], local["model"], local["fresh"]) == ("gpu8192", "local", False)
     unspoken = plan("gpu8192", True, None)
     assert unspoken["fresh"] is True
@@ -270,3 +272,28 @@ def test_the_projects_own_provider_breaks_a_tie_and_the_guess_is_kept_for_the_pa
     assert "continuing on gpu8192" in args.resume_note
     assert "the conversation is kept" in args.resume_note
 
+
+
+# ── and on the profile it was on ─────────────────────────────────────────────
+
+def test_the_live_profile_replaces_the_one_argv_started_with():
+    """Started `--profile video`, then `/profile +pipeline`, then `/update`:
+    the session came back on `video` and the tools just loaded were gone."""
+    for started in (["--profile", "video"], ["--profile=video"], []):
+        argv = _relaunch_argv([*started, "--control"], "s", True, profile="video+pipeline")
+        assert argv.count("--profile") == 1, argv
+        assert argv[argv.index("--profile") + 1] == "video+pipeline"
+        assert "--profile=video" not in argv
+    # With no live value, what the run was started with stands.
+    kept = _relaunch_argv(["--profile", "deck"], "s", False)
+    assert kept[kept.index("--profile") + 1] == "deck"
+
+
+def test_the_flag_takes_a_combination_and_refuses_a_wrong_part():
+    import pytest
+    from scivo_harness.cli import _parser
+    assert _parser().parse_args(["--profile", "pipeline+video"]).profile == "video+pipeline"
+    assert _parser().parse_args([]).profile == "full"
+    for bad in ("video+pipelines", "none+video", "+"):
+        with pytest.raises(SystemExit):
+            _parser().parse_args(["--profile", bad])

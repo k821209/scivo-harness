@@ -240,7 +240,13 @@ def _order_note(plan: ToolPlan, guide: str | None) -> str:
     order: most full sessions never touch a video, and seven steps of chunk
     procedure in every prompt is paid for on every turn (user, 2026-09-27).
     Video work is what `--profile video` is for."""
-    return ORDERS.get(plan.profile, "")
+    from . import toolsets
+    try:
+        names = toolsets.parts(plan.profile)
+    except ValueError:
+        names = (plan.profile,)
+    # Every part's order: `video+pipeline` is still a video session.
+    return "\n\n".join(ORDERS[name] for name in names if name in ORDERS)
 
 
 # The calls the project guide prescribes at session start. A narrow profile
@@ -260,6 +266,26 @@ SESSION_START_TOOLS = (
 # How a guide that still PRESCRIBES the protocol can be told from one that
 # was asked for `briefed` and says what the results mean instead.
 PRESCRIBES = "1. Call `mcp__scivo__whoami()`"
+
+
+def _stems(names: tuple[str, ...], limit: int = 14) -> str:
+    """What a long list of tools is ABOUT, in the words of their own names.
+
+    A hundred names nobody can load from here is a hundred names to carry on
+    every request of a small model; what it needs is to recognise that the
+    thing it was asked for is in this group. `update_table`, `add_table`,
+    `get_table` → "table". Counted from the names, most frequent first.
+    """
+    from collections import Counter
+    verbs = {"add", "get", "list", "update", "delete", "set", "read", "write", "search",
+             "check", "create", "register", "remove", "count", "to", "from", "by", "in",
+             "for", "of", "the", "my"}
+    words = Counter()
+    for name in names:
+        for word in dict.fromkeys(name.split("_")):
+            if word not in verbs and len(word) > 2:
+                words[word.rstrip("s") if len(word) > 4 else word] += 1
+    return ", ".join(word for word, _ in words.most_common(limit)) + ", …"
 
 
 def _tool_note(plan: ToolPlan, guide: str | None = None) -> str:
@@ -322,12 +348,26 @@ def _tool_note(plan: ToolPlan, guide: str | None = None) -> str:
         # from video to full to get one tool and lost the video tools.
         lines.append(
             "\nThis is the kit for a local model: a working core, plus the "
-            f"`{plan.profile}` profile's own domain where it has one. If a task needs "
-            "a tool that is absent, say which and tell the user: `/profile video` "
-            "(or `deck`, `analysis`) loads that domain beside the core — `full` "
-            "here is the core alone — and a Claude model (`/model`) carries "
-            "everything. Do not call an absent tool to see whether it works."
+            f"`{plan.profile}` profile's own domains where they fit — `full` here is "
+            "the core alone. Do not call an absent tool to see whether it works, "
+            "and do not search the disk for it: the list below says where every "
+            "other tool of this server is. If a task needs one, say which and give the "
+            "user the command beside it; `+` adds that profile to this one and "
+            "the conversation continues."
         )
+        for domain, size in plan.left_out:
+            lines.append(
+                f"\n`{domain}` was asked for and is NOT loaded: its {size} tools are "
+                "more than a local model's kit takes. Its everyday tools are in the "
+                "core; the rest need a Claude model.")
+        if plan.offers:
+            lines.append("")
+        for name, tools in plan.offers:
+            lines.append(f"- `/profile +{name}` ({len(tools)}): {', '.join(tools)}")
+        if plan.unreachable:
+            lines.append(
+                f"- a Claude model only (`/model`) — {len(plan.unreachable)} more, "
+                "too many for a local kit: " + _stems(plan.unreachable))
     else:
         lines.append(
             "\nIf a task needs a domain that is missing (decks, video, analysis runs), "

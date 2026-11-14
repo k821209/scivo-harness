@@ -70,7 +70,7 @@ LOCAL_ENV = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8099",
 
 
 def _repl(monkeypatch, profile="full", session_id="sess-1", read_only=False,
-          fail_connect=False, local=False, lean=False):
+          fail_connect=False, local=False, lean=False, TOOLS=TOOLS):
     from scivo_harness.preflight import Briefing
     from scivo_harness.session import Session
 
@@ -108,8 +108,9 @@ def _repl(monkeypatch, profile="full", session_id="sess-1", read_only=False,
     stub._start_pump = lambda: asyncio.sleep(0)
     stub._swap_client = Repl._swap_client.__get__(stub)
     stub._resumed = Repl._resumed.__get__(stub)
-    for name in ("_profile", "_profile_rows"):
+    for name in ("_profile", "_profile_rows", "_find_tools", "_offers"):
         setattr(stub, name, getattr(Repl, name).__get__(stub))
+    stub._offer_lines = Repl._offer_lines
     import scivo_harness.repl as repl_mod
     remaining = [fail_connect]
 
@@ -216,7 +217,7 @@ def test_the_same_profile_is_a_no_op(monkeypatch):
 def test_an_unknown_name_lists_the_real_ones_and_changes_nothing(monkeypatch):
     stub = _repl(monkeypatch, profile="full")
     asyncio.run(stub._profile("nonsense"))
-    assert "no profile called" in _text(stub)
+    assert "unknown profile 'nonsense'" in _text(stub) and "video" in _text(stub)
     assert stub.session.plan.profile == "full"
     assert not stub.clients
 
@@ -402,3 +403,122 @@ def test_the_menu_counts_what_a_local_session_would_carry(monkeypatch):
         assert rows[name] == len(stub.session.kit(plan).kept)
     cloud = _repl(monkeypatch, profile="video")
     assert dict((n, k) for n, k, _ in cloud._profile_rows())["full"] == len(TOOLS)
+
+
+# ── adding a profile, and finding where a tool is ────────────────────────────
+
+import pathlib  # noqa: E402
+
+REAL = tuple((pathlib.Path(__file__).parent / "data" / "scivo_tools_2026-11-15.txt")
+             .read_text().split())
+
+
+def _loaded(stub) -> set[str]:
+    gone = set(_built(stub).disallowed_tools)
+    return {name for name in REAL if toolsets.PREFIX + name not in gone}
+
+
+def test_plus_adds_a_profile_beside_the_one_that_is_loaded(monkeypatch):
+    """msja, 2026-11-15: a local video session needed `list_pipelines`. The
+    only move there was, was to another profile — and the video tools went."""
+    stub = _repl(monkeypatch, profile="video", local=True, lean=True, TOOLS=REAL)
+    asyncio.run(stub._profile("+pipeline"))
+    assert stub.session.plan.profile == "video+pipeline"
+    loaded = _loaded(stub)
+    assert {"list_pipelines", "register_pipeline_version", "add_video", "add_video_chunk"} <= loaded
+    assert _built(stub).resume == "sess-1", "and the conversation continues"
+    assert "video+pipeline" in _text(stub)
+    # The prompt the model now reads names the kit it has.
+    assert "`video+pipeline` profile" in _built(stub).system_prompt["append"]
+    assert stub.session.rails.loaded >= {"list_pipelines", "add_video"}
+
+
+def test_plus_is_typed_with_or_without_spaces_and_in_any_order(monkeypatch):
+    for typed in ("+ pipeline", "pipeline+video", "video + pipeline"):
+        stub = _repl(monkeypatch, profile="video", local=True, lean=True, TOOLS=REAL)
+        asyncio.run(stub._profile(typed))
+        assert stub.session.plan.profile == "video+pipeline", typed
+
+
+def test_adding_what_is_already_loaded_changes_nothing(monkeypatch):
+    stub = _repl(monkeypatch, profile="video+pipeline", TOOLS=REAL)
+    asyncio.run(stub._profile("+video"))
+    assert "already on video+pipeline" in _text(stub) and not stub.clients
+
+
+def test_plus_from_none_is_that_profile_alone(monkeypatch):
+    stub = _repl(monkeypatch, profile="none", TOOLS=REAL)
+    asyncio.run(stub._profile("+pipeline"))
+    assert stub.session.plan.profile == "pipeline"
+
+
+def test_none_cannot_be_added_to_a_profile(monkeypatch):
+    stub = _repl(monkeypatch, profile="video", TOOLS=REAL)
+    asyncio.run(stub._profile("+none"))
+    assert "loads nothing" in _text(stub)
+    assert stub.session.plan.profile == "video" and not stub.clients
+
+
+def test_the_listing_says_how_to_add(monkeypatch):
+    stub = _repl(monkeypatch, profile="video", local=True, lean=True, TOOLS=REAL)
+    asyncio.run(stub._profile(""))
+    assert "/profile +<name>" in _text(stub) and "pipeline" in _text(stub)
+
+
+def test_tools_with_a_word_says_whether_the_tool_is_here_and_what_loads_it(monkeypatch):
+    stub = _repl(monkeypatch, profile="video", local=True, lean=True, TOOLS=REAL)
+    said = ANSI.sub("", "\n".join(stub._find_tools("pipeline")))
+    assert said.count("/profile +pipeline") == 11, said
+    assert "list_pipelines  not loaded — /profile +pipeline" in said
+    here = ANSI.sub("", "\n".join(stub._find_tools("add_video")))
+    assert "add_video  loaded" in here
+    # A tool no local profile reaches says THAT, not a command that would fail.
+    far = ANSI.sub("", "\n".join(stub._find_tools("update_table")))
+    assert "a Claude model only" in far and "/profile +" not in far
+    assert "no scivo tool" in ANSI.sub("", "\n".join(stub._find_tools("zebra")))
+    # The prefix a model writes is not part of the name.
+    prefixed = ANSI.sub("", "\n".join(stub._find_tools("mcp__scivo__list_pipelines")))
+    assert "list_pipelines  not loaded — /profile +pipeline" in prefixed
+
+
+def test_tools_with_a_word_on_a_claude_model_names_the_profile_too(monkeypatch):
+    stub = _repl(monkeypatch, profile="video", TOOLS=REAL)
+    said = ANSI.sub("", "\n".join(stub._find_tools("list_pipelines")))
+    assert "not loaded — /profile +pipeline" in said
+    table = ANSI.sub("", "\n".join(stub._find_tools("update_table")))
+    assert "not loaded — /profile +writing" in table
+    stub.session.plan = toolsets.plan(list(REAL), "full")
+    assert "list_pipelines  loaded" in ANSI.sub("", "\n".join(stub._find_tools("list_pipelines")))
+
+
+def test_tools_in_a_read_only_session_says_why_a_writer_is_absent(monkeypatch):
+    stub = _repl(monkeypatch, profile="full", read_only=True, TOOLS=REAL)
+    said = ANSI.sub("", "\n".join(stub._find_tools("register_pipeline_version")))
+    assert "read-only session" in said and "/profile +" not in said
+
+
+def test_the_slash_tools_reply_reaches_the_page(monkeypatch):
+    """It was a bare print: nothing at all on the control page, which is where
+    a local session is usually driven."""
+    stub = _repl(monkeypatch, profile="video", local=True, lean=True, TOOLS=REAL)
+    assert Repl._local(stub, "/tools pipeline") is True
+    assert "list_pipelines" in _text(stub)
+    stub.said.clear()
+    assert Repl._local(stub, "/tools") is True
+    said = _text(stub)
+    assert "/profile +pipeline  adds 11" in said and "/tools <word>" in said
+    assert "on a Claude model only" in said
+
+
+def test_the_banner_offers_what_this_kit_can_actually_be_given(monkeypatch):
+    from scivo_harness import session as session_mod
+    full = session_mod.kit_plan(toolsets.plan(list(REAL), "full"), REAL, True)
+    line = Repl._core_line(full)
+    for name, _ in full.offers:
+        assert f"+{name}" in line
+    assert "+pipeline" in line and "`full` is the core alone" in line
+    video = session_mod.kit_plan(toolsets.plan(list(REAL), "video"), REAL, True)
+    assert "+video" not in Repl._core_line(video) and "core alone" not in Repl._core_line(video)
+    # A kit nothing can be added to says so by saying nothing, not by a name.
+    from dataclasses import replace
+    assert "/profile" not in Repl._core_line(replace(full, offers=()))
