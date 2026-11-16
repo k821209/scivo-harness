@@ -58,6 +58,11 @@ def attention(briefing) -> list[str]:
     if warning:
         for index, line in enumerate(str(warning).splitlines()):
             lines.append(red(f"  ! {line}") if index == 0 else dim(f"    {line}"))
+    # A CLAUDE.md that still calls the server's old tool names: the session is
+    # told what to call instead; the person is the one who can fix the file.
+    stale_context = identity.get("context_warning")
+    if stale_context:
+        lines.append(yellow(f"  ! {stale_context}"))
     if identity.get("update_available"):
         lines.append(yellow(
             f"  ! MCP {identity.get('latest_version')} available "

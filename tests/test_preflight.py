@@ -242,3 +242,21 @@ def test_the_banner_tells_the_person_what_to_install():
     failed = ui.attention(_briefing({"checked": 0, "missing": None, "error": "boom"}))
     assert any("could not check this machine" in line for line in failed)
 
+
+
+# ── a context file that still calls the server's old tools ───────────────────
+
+def test_a_stale_context_file_reaches_the_model_and_the_person():
+    """A harness session runs no session-start hook, and its own briefing
+    replaces the protocol in CLAUDE.md — but the file is still loaded, still
+    says "call mcp__co_…__whoami()", and nothing here said it was out of date
+    (co-scientists-web feedback e76efd026a3b). whoami carries the line."""
+    from scivo_harness import ui
+    from scivo_harness.preflight import Briefing, to_markdown
+    line = "/w/aivo/CLAUDE.md (4 calls) still names the server's old tools"
+    brief = Briefing(identity={"project_id": "p", "project_name": "P", "context_warning": line})
+    assert f"**Context file out of date — tell the user:** {line}" in to_markdown(brief)
+    assert any(line in row for row in ui.attention(brief))
+    quiet = Briefing(identity={"project_id": "p", "project_name": "P"})
+    assert "Context file out of date" not in to_markdown(quiet)
+    assert not any("old tools" in row for row in ui.attention(quiet))

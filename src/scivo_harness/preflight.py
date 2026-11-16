@@ -309,6 +309,9 @@ def to_markdown(brief: Briefing) -> str:
     if brief.identity.get("install_warning"):
         out.append(f"**Install warning from the MCP — tell the user before anything else:** "
                    f"{brief.identity['install_warning']}")
+    if brief.identity.get("context_warning"):
+        out.append(f"**Context file out of date — tell the user:** "
+                   f"{brief.identity['context_warning']}")
     if brief.identity.get("stale_process"):
         out.append(
             "**Stale process — tell the user before anything else:** the MCP this session calls "
