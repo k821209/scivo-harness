@@ -908,19 +908,44 @@ def _relaunch_argv(argv: list[str], resume: str | None, control: bool,
                                          ("--model", model),
                                          ("--provider", provider),
                                          ("--profile", profile)) if value}
+    # Options that take a value, read off the parser: the word after one of
+    # them is that value, whatever it looks like (`--model resume`).
+    takes_value = {flag for action in _parser()._actions
+                   if action.option_strings and action.nargs != 0 for flag in action.option_strings}
     out: list[str] = []
     skip = 0
-    for a in argv:
+    keep_next = False
+    tokens = list(argv)
+    index = 0
+    while index < len(tokens):
+        a = tokens[index]
+        index += 1
         if skip:
             skip -= 1
             continue
+        if keep_next:
+            keep_next = False
+            out.append(a)
+            continue
         if a in ("-c", "--continue", "--control", "chat"):
+            continue
+        if a == "resume":
+            # The subcommand a session's own last line tells you to type —
+            # `scivo resume 72da1018`. Left in, it stood in front of every flag
+            # appended below, none of which its subparser knows: the relaunch
+            # died on "unrecognized arguments" after the update had succeeded,
+            # and the session started by hand next was in the default mode
+            # (user, 2026-11-16). The session is named by --resume below.
+            if index < len(tokens) and not tokens[index].startswith("-"):
+                index += 1
             continue
         if a == "--resume" or a in replaced:
             skip = 1
             continue
         if a.startswith("--resume=") or any(a.startswith(f"{flag}=") for flag in replaced):
             continue
+        if a in takes_value:
+            keep_next = True
         out.append(a)
     if resume:
         out += ["--resume", resume]
@@ -939,6 +964,38 @@ def _relaunch_argv(argv: list[str], resume: str | None, control: bool,
     if model:
         out += ["--model", model]
     return out
+
+
+def _checked_relaunch(argv: list[str], plan: dict) -> list[str]:
+    """`argv` if it parses; otherwise the least that brings the session back
+    as it was.
+
+    The update has already run by the time this is used. Arguments that do
+    not parse would end the relaunch on a usage message, and the session
+    someone then starts by hand has lost its mode, its page and its profile —
+    so whatever `_relaunch_argv` did not foresee costs the flags the run was
+    started with, never the session's state.
+    """
+    import contextlib
+    import io
+
+    def parses(candidate: list[str]) -> bool:
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                _parser().parse_args(candidate)
+            except SystemExit:
+                return False
+        return True
+
+    if parses(argv):
+        return argv
+    plain = _relaunch_argv([], plan.get("resume"), bool(plan.get("control")),
+                           permission_mode=plan.get("permission_mode"),
+                           model=plan.get("model"), provider=plan.get("provider"),
+                           fresh=bool(plan.get("fresh")), profile=plan.get("profile"))
+    print(ui.yellow("  the arguments this session was started with did not parse for the "
+                    "relaunch — coming back with the session, its mode and its profile only"))
+    return plain
 
 
 def _update_and_relaunch(args, plan: dict) -> int:
@@ -961,6 +1018,7 @@ def _update_and_relaunch(args, plan: dict) -> int:
                           provider=plan.get("provider"),
                           fresh=bool(plan.get("fresh")),
                           profile=plan.get("profile"))
+    argv = _checked_relaunch(argv, plan)
     print(ui.dim("  scivo " + " ".join(argv)))
     # An exec unwinds nothing, so the terminal has to be handed back by hand:
     # `quiet_echo` wraps this whole session and its restore is about to be

@@ -297,3 +297,119 @@ def test_the_flag_takes_a_combination_and_refuses_a_wrong_part():
     for bad in ("video+pipelines", "none+video", "+"):
         with pytest.raises(SystemExit):
             _parser().parse_args(["--profile", bad])
+
+
+# ── a session started with `scivo resume …` comes back at all ────────────────
+#
+# User, 2026-11-16: "/update 하고 나서 dangerously-skip-permissions 이 다시
+# 풀려버리네". The mode was in the plan and in the arguments. The arguments
+# did not parse: `scivo resume 72da1018` — the command a session prints when
+# it ends — left its subcommand in front of every flag the relaunch appends,
+# so the new process died on "unrecognized arguments" after the update had
+# succeeded, and the session started by hand next was in the default mode.
+
+STARTS = (
+    ["resume", "72da1018"],
+    ["resume", "72da1018", "--control"],
+    ["resume"],
+    ["--permission-mode", "default", "resume", "3"],
+    ["--profile", "video", "resume", "72da1018"],
+    ["chat"],
+    ["-c", "--control"],
+    ["--control"],
+    [],
+    ["--model", "resume"],            # a VALUE that happens to be the word
+    ["--add-dir", "/data/resume", "resume", "1"],
+)
+
+
+def test_every_way_of_starting_a_session_relaunches_into_arguments_that_parse():
+    from scivo_harness.cli import _parser
+    for started in STARTS:
+        argv = _relaunch_argv(started, "FULL-SESSION-ID", True,
+                              permission_mode="bypassPermissions", model="claude-opus-5",
+                              provider="anthropic", profile="video+pipeline")
+        try:
+            args = _parser().parse_args(argv)
+        except SystemExit:
+            raise AssertionError(f"started as {started}: {argv} does not parse") from None
+        assert args.permission_mode == "bypassPermissions", started
+        assert args.resume == "FULL-SESSION-ID", started
+        assert args.command is None, (started, args.command)
+        assert args.profile == "video+pipeline" and args.control is True, started
+        assert argv.count("--resume") == 1, argv
+
+
+def test_the_resume_target_goes_and_an_option_value_spelled_resume_stays():
+    argv = _relaunch_argv(["--add-dir", "/data/resume", "resume", "1", "--no-guide"], "SID", False)
+    assert argv == ["--add-dir", "/data/resume", "--no-guide", "--resume", "SID"]
+    kept = _relaunch_argv(["--model", "resume"], "SID", False)
+    assert kept[:2] == ["--model", "resume"], "no live model given, so the started one stands"
+
+
+def test_a_relaunch_that_would_not_parse_falls_back_to_the_session_and_its_mode(capsys):
+    """Whatever this did not foresee: the update has already happened, and
+    coming back in the right session and the right mode matters more than
+    carrying every flag."""
+    from scivo_harness.cli import _checked_relaunch, _parser
+    plan = {"resume": "SID", "control": True, "permission_mode": "bypassPermissions",
+            "model": "claude-opus-5", "provider": "anthropic", "profile": "video"}
+    broken = ["--no-such-flag", "--resume", "SID", "--permission-mode", "bypassPermissions"]
+    argv = _checked_relaunch(broken, plan)
+    args = _parser().parse_args(argv)
+    assert (args.resume, args.permission_mode, args.control, args.profile) == (
+        "SID", "bypassPermissions", True, "video")
+    assert "--no-such-flag" not in argv
+    assert "did not parse" in capsys.readouterr().out
+    good = ["--resume", "SID", "--permission-mode", "plan"]
+    assert _checked_relaunch(good, plan) == good
+    assert capsys.readouterr().out == ""
+
+
+def test_update_from_a_resumed_session_execs_arguments_that_parse(monkeypatch):
+    """The whole path: what `/update` hands to exec, for a session that was
+    started with `scivo resume 72da1018`."""
+    import os
+    import subprocess
+    import sys
+    from scivo_harness import cli
+    monkeypatch.setattr(sys, "argv", ["scivo", "resume", "72da1018"])
+    monkeypatch.setattr(subprocess, "call", lambda cmd: 0)
+    seen = {}
+    monkeypatch.setattr(os, "execv", lambda exe, argv: seen.update(argv=argv))
+    plan = {"resume": "FULL-SID", "control": True, "permission_mode": "bypassPermissions",
+            "model": "claude-opus-5", "provider": "anthropic", "profile": "full", "fresh": False}
+    cli._update_and_relaunch(None, plan)
+    argv = seen["argv"][3:]                      # after: python -m scivo_harness
+    args = cli._parser().parse_args(argv)
+    assert (args.resume, args.permission_mode, args.control) == ("FULL-SID", "bypassPermissions", True)
+    assert "resume" not in argv
+
+
+def test_an_update_that_fails_does_not_relaunch(monkeypatch):
+    import os
+    import subprocess
+    from scivo_harness import cli
+    monkeypatch.setattr(subprocess, "call", lambda cmd: 3)
+    monkeypatch.setattr(os, "execv", lambda *a: (_ for _ in ()).throw(AssertionError("relaunched")))
+    assert cli._update_and_relaunch(None, {"resume": "S"}) == 3
+
+
+def test_a_flag_after_the_subcommand_is_not_taken_for_its_target():
+    assert _relaunch_argv(["resume", "--no-guide"], "SID", False) == ["--no-guide", "--resume", "SID"]
+
+
+def test_update_checks_what_it_is_about_to_exec(monkeypatch, capsys):
+    import os
+    import subprocess
+    import sys
+    from scivo_harness import cli
+    monkeypatch.setattr(sys, "argv", ["scivo", "--a-flag-from-another-version"])
+    monkeypatch.setattr(subprocess, "call", lambda cmd: 0)
+    seen = {}
+    monkeypatch.setattr(os, "execv", lambda exe, argv: seen.update(argv=argv))
+    cli._update_and_relaunch(None, {"resume": "FULL-SID", "control": False,
+                                    "permission_mode": "bypassPermissions"})
+    args = cli._parser().parse_args(seen["argv"][3:])
+    assert (args.resume, args.permission_mode) == ("FULL-SID", "bypassPermissions")
+    assert "did not parse" in capsys.readouterr().out
