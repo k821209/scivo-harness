@@ -156,8 +156,8 @@ async def gather(client: ScivoClient, config: ScivoConfig) -> Briefing:
     if expected and expected != actual:
         raise ProjectMismatch(
             f"CLAUDE.md names project {expected} but {config.source} is bound to {actual}.\n"
-            "The two files were taken from different dashboard projects. "
-            "Re-download both from the same project's Setup tab."
+            "The two files were made for different dashboard projects. "
+            "Run the install line from the right project's Setup tab again, here."
         )
 
     # Project-wide context: one round trip each, all independent.
