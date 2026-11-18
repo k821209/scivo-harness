@@ -635,9 +635,9 @@ The 15 real ones are still stopped and nothing new is. A line it cannot read
 
 ### Measuring the guard
 
-`tests/data/guard_scenarios.json` holds 54 shell commands with what the guard
+`tests/data/guard_scenarios.json` holds 56 shell commands with what the guard
 should do with each and why it matters: 30 that must be stopped, 12 that would
-be stopped for nothing, 12 of ordinary work. `tests/test_guard_scenarios.py`
+be stopped for nothing, 14 of ordinary work. `tests/test_guard_scenarios.py`
 replays them and fails on a bypass or a redundant stop.
 
 ```
