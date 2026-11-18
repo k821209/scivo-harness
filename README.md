@@ -484,6 +484,25 @@ the connection (SIGHUP) — the page then shows no heartbeat and a message typed
 there is read by nobody. Start it inside `tmux` or `screen` on the machine that
 runs it.
 
+**Inside GNU screen, two ordinary things stop a window's program** (measured,
+screen 4.09, 2026-11-18 — the session in the report above was running in one):
+
+- **Scrollback.** `Ctrl-A [` (or `Ctrl-A Esc`) to read back up the window
+  stops the program at its next few kilobytes of output, and it stays stopped
+  until copy mode is left (`q`). Scroll up to read last night's reply, close
+  the laptop, and the session is stopped until someone comes back.
+- **An attached terminal that stops reading** — the ssh client that was showing
+  the screen has gone quiet. With `defnonblock 5`, which Debian and Ubuntu put
+  in `/etc/screenrc`, the program stops for about five seconds and then carries
+  on. With `nonblock` off it stops for as long as the dead terminal stays
+  attached. `grep nonblock /etc/screenrc ~/.screenrc` says which you have;
+  `defnonblock 5` in `~/.screenrc` sets it.
+
+tmux does neither: its copy mode leaves the program running (measured, 3.3a).
+With a control page up the harness now gets out of both by itself, as above;
+without one, these are the two things to look for when a session in a screen
+"froze".
+
 ## Model endpoints
 
 The Agent SDK drives the `claude` CLI, and the CLI reads its endpoint from the
