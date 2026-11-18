@@ -467,11 +467,22 @@ frozen window); and a process that is simply gone. The record is
 `.scivo/pulse/<pid>.json` in the project: times, a process id, source
 positions. It is removed when a session ends as it should.
 
-**A session you drive from the web dies with the terminal it was started in.**
-Close the ssh window, or let the laptop that holds it sleep, and the session is
-hung up with the connection — the page then shows no heartbeat and a message
-typed there is read by nobody. Start it inside `tmux` or `screen` on the
-machine that runs it.
+**A terminal that stops reading no longer stops a session that has a page.**
+A terminal nobody reads takes about 8 KB and then every print waits — in the
+session's own loop, so the heartbeat, the inbox and the turn waited with it,
+and one long reply was enough. Now, when the loop has stood for 30 seconds on a
+terminal that takes no output (paused with Ctrl-S, a frozen window) and a
+control page is up, the session lets go of the terminal and carries on for the
+page; the page says so. When the terminal reads again it gets its output back,
+with one line saying from when to when it showed nothing. What was printed in
+between is on the page and in the transcript. Without a page nothing changes:
+a paused terminal pauses the session, as it always did.
+
+**A session still dies with the terminal it was started in.** Close the ssh
+window, or let the laptop that holds it sleep, and the session is hung up with
+the connection (SIGHUP) — the page then shows no heartbeat and a message typed
+there is read by nobody. Start it inside `tmux` or `screen` on the machine that
+runs it.
 
 ## Model endpoints
 

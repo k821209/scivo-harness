@@ -365,3 +365,243 @@ def test_the_takeover_line_reaches_the_page_not_only_the_terminal():
     from scivo_harness.repl import Repl
     source = inspect.getsource(Repl._control)
     assert 'self._say(ui.dim(f"  {self.control._claim_note}"))' in source
+
+
+# --- a terminal that takes no output must not stop a session that has a page ---
+
+TALKER = textwrap.dedent("""
+    import asyncio, sys
+    sys.path.insert(0, {src!r})
+    from pathlib import Path
+    from scivo_harness import pulse
+
+    root = Path({root!r})
+
+    async def main():
+        p = pulse.Pulse(root, tick=0.02, save_every=0.05, stall_after=0.4, watch_every=0.05,
+                        may_let_go=lambda: {page},
+                        on_let_go=lambda at: (root / "let_go").write_text(at),
+                        on_back=lambda since, back: (root / "back").write_text(since + " " + back))
+        p.start()
+        n = 0
+        while not (root / "enough").exists():
+            n += 1
+            print(f"line {{n:06d}} " + "x" * 180, flush=True)      # what a turn does: it prints
+            (root / "turning").write_text(str(n))
+            if n == 30 and {nap}:
+                __import__("time").sleep({nap})                      # the loop stands, for another reason
+            await asyncio.sleep(0.005)
+        await p.stop()
+
+    asyncio.run(main())
+""")
+
+
+def _talker(tmp_path, page: bool, nap: float = 0):
+    import pty
+    script = tmp_path / "talker.py"
+    script.write_text(TALKER.format(src=SRC, root=str(tmp_path), page=page, nap=nap), encoding="utf-8")
+    master, slave = pty.openpty()
+    child = subprocess.Popen([sys.executable, str(script)], stdin=slave, stdout=slave, stderr=slave,
+                             start_new_session=True)
+    os.close(slave)
+    return child, master
+
+
+def _turning(tmp_path) -> int:
+    try:
+        return int((tmp_path / "turning").read_text() or 0)
+    except (OSError, ValueError):
+        return -1
+
+
+def _read_some(master, seconds: float) -> str:
+    import select
+    out, end = b"", time.time() + seconds
+    while time.time() < end:
+        if select.select([master], [], [], 0.05)[0]:
+            try:
+                out += os.read(master, 65536)
+            except OSError:
+                break
+    return out.decode("utf-8", "replace")
+
+
+def _finish(tmp_path, child, master) -> None:
+    (tmp_path / "enough").write_text("")
+    deadline = time.time() + 5
+    while child.poll() is None and time.time() < deadline:
+        _read_some(master, 0.1)
+    if child.poll() is None:
+        child.kill()
+    child.wait()
+    os.close(master)
+
+
+def test_a_terminal_nobody_reads_takes_about_eight_kilobytes(tmp_path):
+    """The size of the trap, measured rather than remembered: one long reply."""
+    import fcntl
+    import pty
+    master, slave = pty.openpty()
+    try:
+        fcntl.fcntl(slave, fcntl.F_SETFL, fcntl.fcntl(slave, fcntl.F_GETFL) | os.O_NONBLOCK)
+        taken = 0
+        with pytest.raises(BlockingIOError):
+            while taken < 4_000_000:
+                taken += os.write(slave, b"x" * 512 + b"\n")
+        assert 2_000 < taken < 200_000, taken
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_a_session_with_a_page_lets_go_of_a_terminal_that_is_not_read_and_carries_on(tmp_path):
+    child, master = _talker(tmp_path, page=True)
+    try:
+        _wait_for(lambda: (tmp_path / "let_go").exists(), seconds=15)       # nobody read; it let go
+        first = _turning(tmp_path)
+        time.sleep(0.5)
+        assert _turning(tmp_path) > first + 10, "the loop turns again while the window is still unread"
+        state = json.loads((tmp_path / pulse.DIR / f"{child.pid}.json").read_text())
+        assert state["let_go"]["at"] and state["let_go"]["back"] is None
+        assert state["stall"]["where"], "and the stop that led to it is on record"
+        assert not (tmp_path / "back").exists()
+        # The window is read again: it gets its output back, from where the session now is.
+        seen = _read_some(master, 0.3)
+        _wait_for(lambda: (tmp_path / "back").exists(), seconds=10)
+        later = _read_some(master, 0.6)
+        numbers = [int(part.split()[1]) for part in (seen + later).split("\n") if part.startswith("line ")
+                   and part.split()[1].isdigit()]
+        assert numbers and max(numbers) > first, "new lines reach the terminal after it comes back"
+        gaps = [b - a for a, b in zip(numbers, numbers[1:])]
+        assert max(gaps) > 10, "and what was printed in between went nowhere, not into a queue"
+        state = json.loads((tmp_path / pulse.DIR / f"{child.pid}.json").read_text())
+        assert state["let_go"]["back"] and state["stall"]["resumed"]
+    finally:
+        _finish(tmp_path, child, master)
+    assert child.returncode == 0
+    assert pulse.left_behind(tmp_path) == []
+
+
+def test_without_a_page_a_paused_terminal_pauses_the_session_as_it_always_did(tmp_path):
+    child, master = _talker(tmp_path, page=False)
+    try:
+        def stalled():
+            files = list((tmp_path / pulse.DIR).glob("*.json"))
+            return files and json.loads(files[0].read_text()).get("stall")
+        _wait_for(stalled, seconds=15)
+        first = _turning(tmp_path)
+        time.sleep(0.6)
+        assert _turning(tmp_path) == first, "nobody could have seen it carry on, so it waits"
+        assert not (tmp_path / "let_go").exists()
+        _read_some(master, 0.5)                                            # the person reads again
+        _wait_for(lambda: _turning(tmp_path) > first, seconds=10)
+    finally:
+        _finish(tmp_path, child, master)
+    assert child.returncode == 0
+
+
+def test_output_paused_with_ctrl_s_is_let_go_and_taken_back_on_ctrl_q(tmp_path):
+    import threading
+    child, master = _talker(tmp_path, page=True)
+    reading = threading.Event()
+    reading.set()
+    done = threading.Event()
+
+    def window():                                   # a window that IS read, like any terminal
+        while not done.is_set():
+            if reading.is_set():
+                _read_some(master, 0.05)
+            else:
+                time.sleep(0.05)
+    reader = threading.Thread(target=window, daemon=True)
+    reader.start()
+    try:
+        _wait_for(lambda: _turning(tmp_path) > 20, seconds=15)
+        os.write(master, b"\x13")                                           # Ctrl-S
+        _wait_for(lambda: (tmp_path / "let_go").exists(), seconds=15)
+        first = _turning(tmp_path)
+        time.sleep(0.4)
+        assert _turning(tmp_path) > first + 10
+        os.write(master, b"\x11")                                           # Ctrl-Q
+        _wait_for(lambda: (tmp_path / "back").exists(), seconds=10)
+    finally:
+        done.set()
+        reader.join(timeout=2)
+        _finish(tmp_path, child, master)
+    assert child.returncode == 0
+
+
+def test_a_loop_that_stands_for_another_reason_keeps_its_terminal(tmp_path):
+    """Letting go is for a terminal that takes no output — not for any stop.
+    A window that is being read stays this session's window."""
+    import threading
+    child, master = _talker(tmp_path, page=True, nap=1.2)
+    done = threading.Event()
+    seen = []
+
+    def window():
+        while not done.is_set():
+            seen.append(_read_some(master, 0.05))
+    reader = threading.Thread(target=window, daemon=True)
+    reader.start()
+    try:
+        def stalled_and_back():
+            files = list((tmp_path / pulse.DIR).glob("*.json"))
+            stall = (json.loads(files[0].read_text()).get("stall") if files else None) or {}
+            return stall.get("resumed")
+        _wait_for(stalled_and_back, seconds=15)
+        state = json.loads((tmp_path / pulse.DIR / f"{child.pid}.json").read_text())
+        assert "let_go" not in state and not (tmp_path / "let_go").exists()
+        mark = _turning(tmp_path)
+        _wait_for(lambda: f"line {mark + 5:06d}" in "".join(seen), seconds=10)   # still printing HERE
+    finally:
+        done.set()
+        reader.join(timeout=2)
+        _finish(tmp_path, child, master)
+    assert child.returncode == 0
+
+
+def test_letting_go_is_not_armed_when_the_wake_signal_is_someone_elses(tmp_path):
+    mine = lambda number, frame: None                # noqa: E731
+    before = signal.signal(signal.SIGUSR1, mine)
+    try:
+        async def go():
+            p = pulse.Pulse(tmp_path, may_let_go=lambda: True, **FAST)
+            p.start()
+            armed, handler = p._armed, signal.getsignal(signal.SIGUSR1)
+            await p.stop()
+            return armed, handler
+        armed, handler = asyncio.run(go())
+        assert armed is False and handler is mine
+    finally:
+        signal.signal(signal.SIGUSR1, before)
+
+
+def test_the_repl_lets_go_only_while_its_page_is_up_and_says_so_in_both_places():
+    import inspect
+    from scivo_harness.repl import Repl
+    source = inspect.getsource(Repl.run)
+    assert "may_let_go=self._page_is_up" in source
+    assert "on_let_go=self._terminal_let_go" in source and "on_back=self._terminal_back" in source
+    from types import SimpleNamespace
+    repl = Repl.__new__(Repl)
+    repl.control = None
+    assert repl._page_is_up() is False
+    repl.control = SimpleNamespace(active=False, taken_by="")
+    assert repl._page_is_up() is False
+    repl.control = SimpleNamespace(active=True, taken_by="")
+    assert repl._page_is_up() is True
+    repl.control = SimpleNamespace(active=True, taken_by="another-session")
+    assert repl._page_is_up() is False, "a page another session took is not this one's to be reached on"
+    said = []
+    repl.control = SimpleNamespace(active=True, taken_by="",
+                                   status=lambda text, level="info": said.append((level, text)))
+    repl._terminal_let_go("2026-11-17T22:06:40Z")
+    assert said and said[0][0] == "warn" and "22:06 UTC" in said[0][1]
+    assert "stopped taking output" in said[0][1] and "carries on here" in said[0][1]
+    printed = []
+    repl._say = printed.append
+    repl._terminal_back("2026-11-17T22:06:40Z", "2026-11-18T08:19:00Z")
+    assert "took no output from 11-17 22:06 UTC to 11-18 08:19 UTC" in printed[0]
+    assert "on the page and in the transcript, not here" in printed[0]

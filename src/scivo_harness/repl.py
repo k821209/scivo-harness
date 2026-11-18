@@ -2380,12 +2380,37 @@ class Repl:
         leaves it behind is the session being stopped from outside or
         stopping by itself, which is what the next session then reports."""
         from . import pulse
-        self.pulse = pulse.Pulse(self.session.config.root)
+        self.pulse = pulse.Pulse(self.session.config.root, may_let_go=self._page_is_up,
+                                 on_let_go=self._terminal_let_go, on_back=self._terminal_back)
         self.pulse.start()
         try:
             await self._run()
         finally:
             await self.pulse.stop()
+
+    def _page_is_up(self) -> bool:
+        """Can this session be reached without its terminal? Read from the
+        watching thread, so it only looks."""
+        control = getattr(self, "control", None)
+        return bool(control and control.active and not control.taken_by)
+
+    def _terminal_let_go(self, at: str) -> None:
+        from . import pulse
+        control = getattr(self, "control", None)
+        if control and control.active:
+            control.status(
+                f"this session's terminal stopped taking output at {pulse._clock(at)} — paused "
+                "(Ctrl-S), frozen, or its connection gone quiet. The session has let go of it "
+                "and carries on here; the terminal shows nothing until it reads again.",
+                level="warn")
+
+    def _terminal_back(self, since: str, back: str) -> None:
+        from . import pulse
+        self._say(ui.yellow(
+            f"\n  ! this terminal took no output from {pulse._clock(since)} to "
+            f"{pulse._clock(back)} (paused with Ctrl-S, or the window was not being read). "
+            "The session carried on for the page; what it printed in between is on the page "
+            "and in the transcript, not here.\n"))
 
     async def _run(self) -> None:
         briefing = self.session.briefing
