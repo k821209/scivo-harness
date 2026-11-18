@@ -397,6 +397,15 @@ async def build(
     model = model or chosen.model or DEFAULT_MODEL
 
     briefing, tool_names, guide = await survey(config, with_guide=with_guide)
+    # What the session before this one left, if it did not end: read here so
+    # it is in the model's briefing as well as on the screen. A one-shot run
+    # does not take it — the record is handed over once, and to a person.
+    before = ""
+    if interactive:
+        from . import pulse
+        before = pulse.describe(pulse.left_behind(config.root))
+        if before:
+            briefing.identity["previous_session"] = before
     import asyncio
 
     endpoint: Endpoint = await asyncio.to_thread(
@@ -478,6 +487,8 @@ async def build(
                           briefing, kit_plan(plan, tuple(tool_names), True), guide=None),
                       guide=guide,
                       scivo_tools=tuple(tool_names), resumed=resume)
+    if before:
+        session.notes.append(before)
     session.options = session.options_for(chosen)
     if chosen.lean_profile:
         session.lean_tools = len(session.kit().kept)

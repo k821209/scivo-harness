@@ -312,6 +312,13 @@ def to_markdown(brief: Briefing) -> str:
     if brief.identity.get("context_warning"):
         out.append(f"**Context file out of date — tell the user:** "
                    f"{brief.identity['context_warning']}")
+    if brief.identity.get("previous_session"):
+        # The transcript cannot show this: a harness whose loop has stopped
+        # writes nothing, so "every turn finished" is all a resumed session
+        # finds when it is asked what happened.
+        out.append("**The session before this one did not end normally — this is the answer if "
+                   "the user asks what happened or why it stopped; the transcript does not show "
+                   f"it:** {brief.identity['previous_session']}")
     if brief.identity.get("stale_process"):
         out.append(
             "**Stale process — tell the user before anything else:** the MCP this session calls "

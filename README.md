@@ -444,6 +444,35 @@ once the session takes it. What remains on the web → terminal path is the
 poll interval plus one MCP call. Removing that would need a subscription on the
 harness side.
 
+## When a session stops answering
+
+A session that stops leaves a record, and the next session in the project says
+what it was — on the terminal, on the page, and to the model, so "what
+happened?" has an answer. The transcript cannot give one: a session whose own
+loop has stopped writes nothing, and a hung session and an idle one are the
+same file.
+
+```
+! The session before this one (pid 3595341, started 11-18 08:43 UTC) was ended
+  from outside at 11-18 08:43 UTC by SIGHUP — its terminal went away: the window
+  was closed, or the connection that held it (ssh from a machine that slept or
+  lost its network) was dropped. A session that has to outlive its terminal is
+  started inside tmux or screen.
+```
+
+Three ends are told apart: a signal (the terminal going away, a `kill`); the
+loop stopping while the process lives, with where the main thread was standing
+— `sys.stdout.write(…)` when the terminal had stopped taking output (Ctrl-S, a
+frozen window); and a process that is simply gone. The record is
+`.scivo/pulse/<pid>.json` in the project: times, a process id, source
+positions. It is removed when a session ends as it should.
+
+**A session you drive from the web dies with the terminal it was started in.**
+Close the ssh window, or let the laptop that holds it sleep, and the session is
+hung up with the connection — the page then shows no heartbeat and a message
+typed there is read by nobody. Start it inside `tmux` or `screen` on the
+machine that runs it.
+
 ## Model endpoints
 
 The Agent SDK drives the `claude` CLI, and the CLI reads its endpoint from the

@@ -1422,7 +1422,10 @@ class Repl:
             self.control = None
             return
         if self.control._claim_note:
-            print(ui.dim(f"  {self.control._claim_note}"))
+            # On the page too: it was printed here only, scrolled away with
+            # the banner, and was the one line that said how the session
+            # before this one had gone (feedback 515b505746ee).
+            self._say(ui.dim(f"  {self.control._claim_note}"))
         commands = [{"name": name, "help": text} for name, text in LOCAL_COMMANDS.items()]
         commands += [{"name": f"/{skill.name}", "help": skill.summary} for skill in self.skills]
         await self.control.put_commands(commands)
@@ -2370,6 +2373,21 @@ class Repl:
         print(ui.dim("  ---- live from here ----\n"))
 
     async def run(self) -> None:
+        """The session, with a record kept of its being alive (pulse.py).
+
+        The record is taken away by anything that ends the session from the
+        inside — an exit, an error with its traceback on the screen. What
+        leaves it behind is the session being stopped from outside or
+        stopping by itself, which is what the next session then reports."""
+        from . import pulse
+        self.pulse = pulse.Pulse(self.session.config.root)
+        self.pulse.start()
+        try:
+            await self._run()
+        finally:
+            await self.pulse.stop()
+
+    async def _run(self) -> None:
         briefing = self.session.briefing
         label = self.session.model
         if self.session.provider.has_endpoint:

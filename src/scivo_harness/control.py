@@ -391,6 +391,21 @@ LEASE_EVERY = 60.0                  # seconds between renewals while nothing ask
 LEASE_ANSWER_WAIT = 4.0             # how long a holder is given to answer "are you there?"
 
 
+def _last_heard(lease: dict) -> str:
+    """`; it was last heard from 10 h 12 min before this` — or nothing."""
+    try:
+        seconds = max(0, int((_now_ms() - int(lease["at"])) / 1000))
+    except (KeyError, TypeError, ValueError):
+        return ""
+    if seconds < 90:
+        span = f"{seconds} s"
+    elif seconds < 5400:
+        span = f"{seconds // 60} min"
+    else:
+        span = f"{seconds // 3600} h {seconds % 3600 // 60:02d} min"
+    return f"; it was last heard from {span} before this"
+
+
 class PageInUse(RuntimeError):
     """Another live session is driving this project's page."""
 
@@ -781,8 +796,13 @@ class Control:
                 f"({why}).\n  Two sessions on one page take turns overwriting it, so this one "
                 "has left it alone.\n  `/scivo-control take` moves the page to THIS session; "
                 "the other keeps running in its terminal and is told.")
+        # When it last renewed its hold is the last time its loop is KNOWN to
+        # have turned, and after a restart nothing else on the server says it:
+        # the earlier session's head and log are cleared below.
         self._claim_note = (f"took the page over from {lease['sid']}"
-                            + ("" if alive else f" — {why}"))
+                            + (f" on {lease['host']}" if lease.get("host") else "")
+                            + ("" if alive else f" — {why}")
+                            + _last_heard(lease))
         return lease
 
     async def _tell_displaced(self, link: Link, lease: dict) -> None:
