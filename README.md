@@ -624,6 +624,39 @@ One exception, because it is the opposite case: a heredoc fed to ssh
 Quoted arguments are never stripped either — `ssh gpu "nohup train &"` keeps
 the part worth catching inside the quotes.
 
+And it reads the line as commands, not as text (2026-11-19). `ssh` counts only
+where it stands as a word of its own in a command — not inside a `grep`
+pattern, a commit message, a string in a script, or a prompt for another
+program — and what follows that word is what is checked. Replayed over 13,964
+real shell commands from the maintainer's sessions, the old whole-line pattern
+had stopped 22; 7 of those were about the words, not a launch, and now pass.
+The 15 real ones are still stopped and nothing new is. A line it cannot read
+(an unclosed quote) is judged by the old pattern, never passed.
+
+### Measuring the guard
+
+`tests/data/guard_scenarios.json` holds 54 shell commands with what the guard
+should do with each and why it matters: 30 that must be stopped, 12 that would
+be stopped for nothing, 12 of ordinary work. `tests/test_guard_scenarios.py`
+replays them and fails on a bypass or a redundant stop.
+
+```
+python tests/guard_eval.py <commit> [<commit> …]
+
+                                    working tree       8f6ac93
+stopped (refused or asked)                    30            41
+must-stop let through                          0             0
+stopped for nothing                            0             9
+differs from the label                         0            11
+tokens of refusal text                      5868          8152
+```
+
+A guard is easy to make stricter and easy to make quieter; the table is how to
+see which a change did. Add the command that surprised you to the corpus
+first, with its label, then change the guard. The method is from
+affaan-m/ECC's GateGuard evaluation (MIT). It measures what the guard decides,
+not whether deciding it changes what the model does next.
+
 ## Messages sent while a turn is running
 
 The page accepts them and marks them "queued — the session is busy with the

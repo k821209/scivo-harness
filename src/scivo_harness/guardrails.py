@@ -76,6 +76,310 @@ REMOTE_SELF_MATCH = re.compile(
     r"\bssh\b.*?\b(pgrep|pkill)\s+(?:-{1,2}[\w-]+\s+)*(?:-\w*f\w*|--full)(?=\s|$)",
     re.IGNORECASE | re.DOTALL,
 )
+# ── what a line RUNS through ssh, as opposed to what it merely says ──────────
+# The two patterns above read the whole line: "ssh" anywhere, then "nohup" or
+# a bare `&` anywhere after it. Replayed over 13,964 real shell commands from
+# this machine's sessions (2026-11-19), that stopped 11 distinct commands and
+# was wrong about 7 of them, all in one way — the words were DATA: a `grep`
+# for them, a commit message about them, the guard's own test cases as strings
+# in a script, a prompt handed to another program. None of the 13,964 was a
+# launch that got through.
+#
+# So the line is read the way the shell reads it. It is cut into commands at
+# the unquoted `;`, `|`, `&&`, `&`, newline and at `$(`…`)`, and a command
+# runs something remotely only when `ssh` stands in it as a word of its own —
+# not inside a quoted argument of some other program. For that command, what
+# follows the `ssh` word is the remote side's, quotes and all, plus the
+# heredoc fed to it, and the old patterns are applied to exactly that.
+#
+# Every doubt falls back to the patterns on the whole line: a quote that never
+# closes, a shape this does not know. Being stopped once too often is the
+# cheaper mistake (tests/guard_eval.py counts both kinds).
+_REMOTE_PROGRAMS = frozenset({"ssh", "autossh", "mosh"})
+# Programs whose arguments are text to show or to look for, never to run.
+_TEXT_PROGRAMS = frozenset({
+    "echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "man", "which", "type", "whatis",
+    "apropos", "apt", "apt-get", "dnf", "yum", "brew", "pip", "pip3",
+})
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_KEYWORDS = frozenset({"do", "then", "else", "elif", "if", "while", "until", "time", "!", "{", "}"})
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_DETACHES = re.compile(
+    r"\bnohup\b|\bsetsid\b|\bdisown\b|\bscreen\s+-d\w*"
+    r"|\btmux\s+new(?:-session)?\b[^\n]*?\s-d\b|(?<![&|<>])&(?![&|>])",
+    re.IGNORECASE)
+_PATTERN_MATCH = re.compile(
+    r"\b(pgrep|pkill)\s+(?:-{1,2}[\w-]+\s+)*(?:-\w*f\w*|--full)(?=\s|$)", re.IGNORECASE)
+_NESTING_LIMIT = 4
+
+
+class _Unreadable(Exception):
+    """The line cannot be cut into commands with any confidence."""
+
+
+def _commands(line: str) -> list[dict[str, Any]]:
+    """The line as the shell would cut it: one entry per simple command.
+
+    `words` are (text with its quotes removed, whether any of it was quoted,
+    where it starts); `stop` is where the command ends in the line;
+    `background` says an unquoted `&` ended it; `payload` is the heredoc fed to it; `inner` holds what stands in
+    `$( )` or backticks inside its double-quoted words, to be read in turn.
+    """
+    out: list[dict[str, Any]] = []
+    n = len(line)
+    i = 0
+    start = 0
+    words: list[tuple[str, bool, int]] = []
+    inner: list[str] = []
+    pending: list[tuple[str, bool]] = []     # heredocs opened on this line: (tag, body kept?)
+    word: list[str] | None = None
+    quoted = False
+    word_at = 0
+
+    def end_word() -> None:
+        nonlocal word, quoted
+        if word is not None:
+            words.append(("".join(word), quoted, word_at))
+        word, quoted = None, False
+
+    def end_command(stop: int, background: bool = False) -> None:
+        nonlocal words, inner, start
+        end_word()
+        if words:
+            out.append({"words": words, "stop": stop, "background": background,
+                        "inner": inner, "payload": ""})
+        words, inner, start = [], [], stop
+
+    def substitution(at: int) -> int:
+        """`at` is just past `$(`: the index just past its closing `)`."""
+        depth, j = 1, at
+        while j < n:
+            if line[j] == "\\":
+                j += 2
+                continue
+            if line[j] == "(":
+                depth += 1
+            elif line[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    return j + 1
+            j += 1
+        raise _Unreadable("a $( that never closes")
+
+    while i < n:
+        ch = line[i]
+        if ch == "\\" and i + 1 < n:
+            if word is None:
+                word, word_at = [], i
+            if line[i + 1] != "\n":
+                word.append(line[i + 1])
+            i += 2
+            continue
+        if ch == "'":
+            close = line.find("'", i + 1)
+            if close < 0:
+                raise _Unreadable("a ' that never closes")
+            if word is None:
+                word, word_at = [], i
+            word.append(line[i + 1:close])
+            quoted = True
+            i = close + 1
+            continue
+        if ch == '"':
+            if word is None:
+                word, word_at = [], i
+            quoted = True
+            j = i + 1
+            while True:
+                if j >= n:
+                    raise _Unreadable('a " that never closes')
+                if line[j] == "\\" and j + 1 < n:
+                    word.append(line[j + 1])
+                    j += 2
+                elif line[j] == '"':
+                    break
+                elif line.startswith("$(", j):
+                    close = substitution(j + 2)
+                    inner.append(line[j + 2:close - 1])
+                    word.append(line[j:close])
+                    j = close
+                elif line[j] == "`":
+                    close = line.find("`", j + 1)
+                    if close < 0:
+                        raise _Unreadable("a ` that never closes")
+                    inner.append(line[j + 1:close])
+                    word.append(line[j:close + 1])
+                    j = close + 1
+                else:
+                    word.append(line[j])
+                    j += 1
+            i = j + 1
+            continue
+        if ch == "#" and word is None:
+            stop = line.find("\n", i)
+            i = n if stop < 0 else stop
+            continue
+        if line.startswith("$(", i):
+            close = substitution(i + 2)
+            inner.append(line[i + 2:close - 1])
+            if word is None:
+                word, word_at = [], i
+            word.append(line[i:close])
+            quoted = True                       # a substituted word is not a literal one
+            i = close
+            continue
+        if ch == "`":
+            close = line.find("`", i + 1)
+            if close < 0:
+                raise _Unreadable("a ` that never closes")
+            inner.append(line[i + 1:close])
+            if word is None:
+                word, word_at = [], i
+            word.append(line[i:close + 1])
+            quoted = True
+            i = close + 1
+            continue
+        if line.startswith("<<", i) and not line.startswith("<<<", i):
+            match = re.match(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line[i:])
+            if match:
+                end_word()
+                pending.append((match.group(2), True))
+                i += match.end()
+                continue
+        if ch == "\n":
+            if pending:
+                # The lines up to each tag are the heredoc's, not commands.
+                # They belong to the command that opened it.
+                end_word()
+                body_from = i + 1
+                at = body_from
+                for tag, _kept in pending:
+                    found = re.compile(rf"^[ \t]*{re.escape(tag)}[ \t]*$", re.M).search(line, at)
+                    if not found:
+                        raise _Unreadable("a heredoc that never closes")
+                    at = found.end()
+                if words:
+                    out.append({"words": words, "stop": i, "background": False,
+                                "inner": inner, "payload": line[body_from:at]})
+                words, inner, pending = [], [], []
+                i = start = at
+                continue
+            end_command(i)
+            i += 1
+            start = i
+            continue
+        if ch in " \t":
+            end_word()
+            i += 1
+            continue
+        if ch == ";":
+            end_command(i)
+            i += 1
+            start = i
+            continue
+        if ch == "|":
+            end_command(i)
+            i += 1
+            start = i
+            continue
+        if ch == "&":
+            before = line[i - 1] if i else ""
+            after = line[i + 1] if i + 1 < n else ""
+            if after == "&":
+                end_command(i)
+                i += 2
+                start = i
+                continue
+            if before in "<>" or after == ">":
+                if word is None:
+                    word, word_at = [], i
+                word.append(ch)                  # part of a redirection: 2>&1, &>file
+                i += 1
+                continue
+            end_command(i, background=True)
+            i += 1
+            start = i
+            continue
+        if ch in "()":
+            end_command(i)
+            i += 1
+            start = i
+            continue
+        if word is None:
+            word, word_at = [], i
+        word.append(ch)
+        i += 1
+    if pending:
+        raise _Unreadable("a heredoc that never closes")
+    end_command(n)
+    return out
+
+
+def remote_calls(line: str, _depth: int = 0) -> list[dict[str, Any]]:
+    """What this line hands to a remote machine, one entry per `ssh` it runs:
+    `remote` is the text that goes with it, `background` whether the ssh
+    itself is left running here. Raises `_Unreadable` when it cannot tell."""
+    if _depth > _NESTING_LIMIT:
+        raise _Unreadable("nested too deep to follow")
+    found: list[dict[str, Any]] = []
+    for command in _commands(line):
+        for text in command["inner"]:
+            found += remote_calls(text, _depth + 1)
+        words = list(command["words"])
+        # `do ssh …`, `VAR=value ssh …`: the command proper starts after these.
+        while words and ((words[0][0] in _KEYWORDS and not words[0][1])
+                         or _ASSIGNMENT.match(words[0][0])):
+            words.pop(0)
+        if not words:
+            continue
+        program = words[0][0].rsplit("/", 1)[-1].lower()
+        if program in _SHELLS or program == "eval":
+            # One shell deeper: its `-c` string (or eval's arguments) is a line to read.
+            rest = [text for text, _quoted, _at in words[1:]]
+            scripts = rest if program == "eval" else [
+                rest[k + 1] for k, text in enumerate(rest[:-1]) if re.fullmatch(r"-[a-z]*c", text)]
+            for script in scripts:
+                found += remote_calls(script, _depth + 1)
+        if program in _TEXT_PROGRAMS:
+            continue
+        for position, (text, was_quoted, at) in enumerate(words):
+            if text.rsplit("/", 1)[-1].lower() not in _REMOTE_PROGRAMS:
+                continue
+            # As an argument, a quoted "ssh" is a string someone is passing
+            # along. As the program, quoted or not, it is what runs: `"ssh"
+            # host …` is still an ssh.
+            if was_quoted and position:
+                continue
+            # `nohup ssh …`, `setsid ssh …`: left running from this side.
+            ahead = " ".join(w for w, q, a in words if a < at and not q)
+            found.append({
+                "remote": line[at:command["stop"]] + "\n" + command["payload"],
+                "background": command["background"]
+                              or bool(re.search(r"\b(nohup|setsid)\b", ahead, re.I)),
+            })
+            break
+    return found
+
+
+def launches_remote_job(command: str) -> bool:
+    """Does this line leave something running on a remote machine?"""
+    try:
+        return any(call["background"] or _DETACHES.search(call["remote"])
+                   for call in remote_calls(command))
+    except _Unreadable:
+        return bool(RAW_REMOTE_JOB.search(command))
+    except Exception:  # noqa: BLE001 — a reader that fails must not become a pass
+        return bool(RAW_REMOTE_JOB.search(command))
+
+
+def matches_patterns_remotely(command: str) -> bool:
+    """Does this line run `pgrep -f` / `pkill -f` on the far side of an ssh?"""
+    try:
+        return any(_PATTERN_MATCH.search(call["remote"]) for call in remote_calls(command))
+    except Exception:  # noqa: BLE001 — _Unreadable included
+        return bool(REMOTE_SELF_MATCH.search(command))
+
+
 # The LOCAL form of the same mistake, and the one that actually happened. The
 # guard above requires the remote prefix, so a pattern kill on THIS machine
 # went straight through — and that command sends SIGTERM by default, which is
@@ -915,7 +1219,7 @@ class Guardrails:
         # What the shell will RUN, without the file contents it writes.
         command = executable_text(written)
 
-        if RAW_REMOTE_JOB.search(command) and marked_setup(written):
+        if launches_remote_job(command) and marked_setup(written):
             # Not a way round the rule: the mark turns the refusal into a
             # question for the PERSON. In the hook file the same mark lets the
             # command straight through, and here there was no mark at all —
@@ -935,7 +1239,7 @@ class Guardrails:
                 "`submit_remote_job` launches the same command with the record."
             )
 
-        if RAW_REMOTE_JOB.search(command):
+        if launches_remote_job(command):
             self.blocked.append("raw remote job")
             if self.loaded is not None and "submit_remote_job" not in self.loaded:
                 # Never send the model to a tool it does not have.
@@ -968,7 +1272,7 @@ class Guardrails:
                 "not a switch; do not use it for work whose result is used."
             )
 
-        if REMOTE_SELF_MATCH.search(command):
+        if matches_patterns_remotely(command):
             self.blocked.append("remote pgrep/pkill -f")
             return _deny(
                 "Blocked: over ssh, `pgrep -f`/`pkill -f` matches the ssh command line that "
