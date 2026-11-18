@@ -395,6 +395,16 @@
   async function resetFor(head) {
     for (const un of chunkSubs.values()) { try { un(); } catch (_) {} }
     chunkSubs.clear();
+    // What was typed at the session before this one and never taken: the new
+    // session does not read the old one's inbox, and clearing the log below
+    // used to take the words with it. Back into the box, to be sent again or
+    // not — a message that left on its own would be one nobody chose to send.
+    const unsent = [...log.querySelectorAll(".sc-pending")].map((n) => n.dataset.text || "").filter(Boolean);
+    if (S.sid && unsent.length) {
+      input.value = [input.value.trim(), ...unsent].filter(Boolean).join("\n\n");
+      setTimeout(autosize, 0);
+    }
+    S.unanswered = null; S.gone = false;
     S.sid = head.sid; S.events = []; S.nodes.clear(); S.json.clear(); S.oldest = undefined;
     log.innerHTML = ""; log.prepend(earlier); earlier.hidden = true;
     S.seq = 0; S.msgs = []; S.interrupt = 0;
@@ -516,13 +526,48 @@
     // this tab ever SAW an answer to a mark made a millisecond earlier, and
     // left a dead session looking alive for twelve minutes (caught by
     // tests/browser/heartbeat.spec.mjs before this shipped).
-    if (S.marked && head.beat === S.markBeat) { age = Date.now() - S.marked; allowed = STALE_MS; }
-    const state = head.state === "ended" ? "ended" : age > allowed ? "stale" : "live";
-    setDot(state, { live: "connected", stale: "no heartbeat for " + Math.round(age / 1000) + "s", ended: "session ended — run /scivo-control again" }[state]
+    //
+    // And counted from the FIRST mark this beat has not answered, never the
+    // latest. The mark is renewed every thirty seconds while someone is
+    // using the page, and each renewal used to restart the twenty: a session
+    // dead for ten hours read "connected" for two seconds in every three for
+    // as long as its owner kept typing at it, with their message at
+    // "sending…" underneath (feedback 515b505746ee, seen in a browser
+    // 2026-11-18). A mark can shorten the wait; it must never lengthen it.
+    const unanswered = S.unanswered && head.beat === S.unanswered.beat
+      ? Date.now() - S.unanswered.since : 0;
+    const gone = age > allowed || unanswered > STALE_MS;
+    const state = head.state === "ended" ? "ended" : gone ? "stale" : "live";
+    S.gone = state === "stale";
+    setDot(state, { live: "connected",
+      stale: "not answering for " + span(Math.max(age, unanswered)) + " — the session is stopped or gone; restart it where it runs",
+      ended: "session ended — run /scivo-control again" }[state]
       + " · " + (head.model || "") + " · " + head.sid + (LIVE ? "" : " · polling"));
+    // A message typed at a session that is not there says so, instead of
+    // "sending…" for ever.
+    for (const via of log.querySelectorAll(".sc-pending .sc-via")) {
+      const waiting = via.dataset.waiting || (via.dataset.waiting = via.textContent);
+      via.textContent = S.gone
+        ? "you · web · not delivered — the session is not answering. It will be read only if that session comes back; a restarted one starts clean."
+        : waiting;
+    }
   }
 
-  function setDot(state, text) { $("sc-dot").className = "sc-dot " + state; $("sc-sub").textContent = text; }
+  // "10 h 13 min", not "36664s".
+  function span(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 90) return s + " s";
+    if (s < 5400) return Math.floor(s / 60) + " min";
+    return Math.floor(s / 3600) + " h " + String(Math.floor(s % 3600 / 60)).padStart(2, "0") + " min";
+  }
+
+  function setDot(state, text) {
+    $("sc-dot").className = "sc-dot " + state; $("sc-sub").textContent = text;
+    // One line while all is well. When it is not, the line is the message —
+    // cut at the edge of a phone it read "not answering for 10 h 14 min — the
+    // sessio…", with what to do about it in the part that was cut.
+    $("sc-sub").style.whiteSpace = state === "live" ? "" : "normal";
+  }
 
   function onHead(head) { queue = queue.then(() => applyHead(head)).catch((e) => setDot("stale", e.message)); }
 
@@ -567,6 +612,9 @@
     if (now - S.touched > VIEWER_FRESH || now - S.marked < VIEWER_EVERY) return;
     S.marked = now;
     S.markBeat = S.lastHead ? S.lastHead.beat : undefined;
+    // When the wait for an answer began: kept across renewals of the mark
+    // for as long as the beat has not moved (see refreshDot).
+    if (!S.unanswered || S.unanswered.beat !== S.markBeat) S.unanswered = { beat: S.markBeat, since: now };
     // Merged into the control document, so `interrupt` beside it is kept.
     try { await C.put("responses", "control", { doc: "control", sid: S.sid, viewer: now }); }
     catch (_) { S.marked = 0; }       // not worth an alert; the next touch tries again
