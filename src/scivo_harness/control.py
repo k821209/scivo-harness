@@ -49,6 +49,10 @@ from .scivo_mcp import ScivoClient, connect
 OWNER = "owner"
 CHUNK = 20                 # events per log doc; keeps a doc well under Firestore's 1 MB
 MAX_TEXT = 150_000         # one event's text, same reason
+# Messages typed for a session that never read them, handed to the next one:
+# how many are shown, and how much of each. The most recent are the ones kept.
+UNREAD_MAX = 20
+UNREAD_TEXT = 20_000
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
 # Steps tried in order until one fits the cap. A single 1400 px pass was the
@@ -585,6 +589,13 @@ class Control:
     _lease_at: float = 0.0
     _lease_due: bool = False
     _claim_note: str = ""
+    # What was typed on the page for an earlier session and never taken by
+    # it: `{text, at, images?}`, oldest first. `unread_known` is False when
+    # the earlier session's log could not be read, so "never taken" could
+    # not be checked and every message of its inbox is listed.
+    unread: list = field(default_factory=list)
+    unread_known: bool = True
+    _unread_left_out: int = 0
     # This channel's own calls, in the shared network log (see netlog.py).
     _net: Tally = field(default_factory=Tally)
     # Set when another session took the page: this one has stopped writing to
@@ -647,6 +658,7 @@ class Control:
             asyncio.create_task(self._listener(), name="scivo-control-listener"),
         ]
         self.status("connected — this session is now driven from here as well as the terminal")
+        self.post_unread()
         return self.link
 
     async def put_commands(self, commands: list[dict[str, str]]) -> None:
@@ -880,6 +892,10 @@ class Control:
                 displaced = await self._claim(link, take)
                 if stored.get("passcode"):
                     await self._retire_passcodes(link, state_path)
+                # BEFORE the clear, which takes the inbox with it: what was
+                # typed at a session that had stopped is the one thing in
+                # there nobody has seen yet.
+                await self._collect_unread(link)
                 await self._clear_previous_sessions(link)
                 if displaced is not None:
                     await self._tell_displaced(link, displaced)
@@ -913,6 +929,83 @@ class Control:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(link.to_json(), indent=2) + "\n", encoding="utf-8")
         state_path.chmod(0o600)
+
+    async def _collect_unread(self, link: Link) -> None:
+        """Find the messages typed on the page that no session ever took.
+
+        A message is a document in the page's inbox, stamped with the id of
+        the session it was typed at. A session that takes one writes it into
+        its own log; it does not mark the document. So "never taken" is: in
+        the inbox under an earlier session's id, and not in that session's
+        log. The log is read only when there is such a message to place —
+        it is the whole transcript, and most starts have nothing to look for.
+        """
+        self.unread, self.unread_known, self._unread_left_out = [], True, 0
+        try:
+            listed = await self._call("list_responses", pub_id=link.pub_id)
+            rows = sorted(
+                (d for d in (listed.items if listed.ok else []) if isinstance(d, dict)
+                 and d.get("doc") == "inbox" and "msgs" not in d
+                 and d.get("reviewer") == OWNER and d.get("sid") and d.get("sid") != self.sid
+                 and (str(d.get("text", "")).strip() or d.get("images"))),
+                key=lambda d: (int(d.get("seq") or 0), str(d.get("id") or "")))
+            if not rows:
+                return
+            logged = await self._call("list_responses", pub_id=link.pub_id, collection="content")
+            taken: dict[tuple[str, str], int] = {}
+            if logged.ok:
+                for doc in logged.items:
+                    if not isinstance(doc, dict) or not isinstance(doc.get("events"), list):
+                        continue
+                    for event in doc["events"]:
+                        if isinstance(event, dict) and event.get("kind") == "user" \
+                                and event.get("via") == "web":
+                            key = (str(doc.get("sid") or ""), str(event.get("text") or ""))
+                            taken[key] = taken.get(key, 0) + 1
+            else:
+                # Could not look. Not the same as "none were taken", and not
+                # a reason to drop them: all are kept, and it is said.
+                self.unread_known = False
+            kept = []
+            for row in rows:
+                key = (str(row.get("sid")), str(row.get("text") or ""))
+                if taken.get(key):
+                    taken[key] -= 1
+                    continue
+                text = str(row.get("text") or "")
+                item: dict[str, Any] = {
+                    "text": text if len(text) <= UNREAD_TEXT else text[:UNREAD_TEXT] + "…",
+                    "at": int(row.get("seq") or 0)}
+                if row.get("images"):
+                    item["images"] = len(row["images"])
+                kept.append(item)
+            self._unread_left_out = max(0, len(kept) - UNREAD_MAX)
+            self.unread = kept[-UNREAD_MAX:]
+        except Exception:  # noqa: BLE001 — never the reason a session fails to start
+            self.unread = []
+
+    def post_unread(self) -> None:
+        """Put them on the page, where they were typed. Shown, not run: hours
+        may have passed, and a message that left on its own would be one
+        nobody chose to send."""
+        if not self.active or not self.unread:
+            return
+        count = len(self.unread) + self._unread_left_out
+        lead = (f"{count} message(s) typed here for the session before this one were never read"
+                " — it had stopped. Nothing below was run; send again what still applies."
+                if self.unread_known else
+                f"{count} message(s) were typed here for the session before this one. Whether it "
+                "read them could not be checked. Nothing below has been run by this session.")
+        event: dict[str, Any] = {
+            "kind": "unread", "level": "warn", "known": self.unread_known,
+            "items": self.unread,
+            # For a tab still running an older page, which draws a kind it
+            # does not know as plain text.
+            "text": lead + "\n" + "\n".join(f"• {item['text'][:500]}" for item in self.unread)}
+        if self._unread_left_out:
+            event["left_out"] = self._unread_left_out
+        self.end_assistant()
+        self._append(event)
 
     async def _clear_previous_sessions(self, link: Link) -> None:
         """Drop the transcript chunks, command lists and responses of earlier

@@ -109,6 +109,10 @@
   .sc-tool b { color: var(--ink); font-weight: 600; }
   .sc-status { font-size: 13px; color: var(--muted); text-align: center; }
   .sc-status.warn { color: var(--warn); } .sc-status.error { color: var(--err); }
+  .sc-unread { align-self: stretch; border: 1px solid var(--warn); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .sc-unread-lead { font-size: 13px; color: var(--warn); }
+  .sc-unread-item { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; border-top: 1px solid var(--line, rgba(127,127,127,.25)); padding-top: 8px; }
+  .sc-unread-text { white-space: pre-wrap; overflow-wrap: anywhere; }
   .sc-result { font-size: 12px; color: var(--muted); text-align: right; }
   .sc-approval { border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; background: var(--panel); }
   .sc-approval .sc-q { font-weight: 600; margin-bottom: 4px; }
@@ -224,6 +228,42 @@
 
   function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 80; }
 
+  // What was typed here for a session that never read it — it had stopped —
+  // handed over by the session that came after. Shown with a way to take each
+  // one back into the message box; nothing is sent until the person sends it.
+  function unreadNode(el, ev) {
+    el.className = "sc-unread";
+    const items = Array.isArray(ev.items) ? ev.items : [];
+    const count = items.length + (ev.left_out || 0);
+    const lead = document.createElement("div"); lead.className = "sc-unread-lead";
+    lead.textContent = ev.known === false
+      ? count + " message(s) were typed here for the session before this one. Whether it read them could not be checked. This session has not run them."
+      : count + " message(s) typed here were never read — the session they were for had stopped. Nothing below was run.";
+    el.append(lead);
+    if (ev.left_out) {
+      const more = document.createElement("div"); more.className = "sc-via";
+      more.textContent = "the " + items.length + " most recent are shown; " + ev.left_out + " earlier ones are not";
+      el.append(more);
+    }
+    for (const item of items) {
+      const row = document.createElement("div"); row.className = "sc-unread-item";
+      const when = document.createElement("span"); when.className = "sc-via";
+      const at = Number(item.at) > 0 ? new Date(Number(item.at)) : null;
+      when.textContent = "you · web · " + (at ? at.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "")
+        + (item.images ? " · with " + item.images + " image(s), not kept" : "");
+      const body = document.createElement("div"); body.className = "sc-unread-text"; body.textContent = item.text || "";
+      const use = document.createElement("button"); use.type = "button"; use.className = "sc-btn";
+      use.textContent = "put in the message box";
+      use.onclick = () => {
+        input.value = input.value.trim() ? input.value.replace(/\s*$/, "\n\n") + (item.text || "") : (item.text || "");
+        autosize(); input.focus();
+        try { input.setSelectionRange(input.value.length, input.value.length); } catch (_) {}
+      };
+      row.append(when, body, use);
+      el.append(row);
+    }
+  }
+
   function nodeFor(ev) {
     const el = document.createElement("div");
     switch (ev.kind) {
@@ -249,6 +289,7 @@
       }
       case "approval": approvalNode(el, ev); break;
       case "question": questionNode(el, ev); break;
+      case "unread": unreadNode(el, ev); break;
       default:
         el.className = "sc-status " + (ev.level || "");
         el.textContent = ev.text || "";
@@ -395,15 +436,11 @@
   async function resetFor(head) {
     for (const un of chunkSubs.values()) { try { un(); } catch (_) {} }
     chunkSubs.clear();
-    // What was typed at the session before this one and never taken: the new
-    // session does not read the old one's inbox, and clearing the log below
-    // used to take the words with it. Back into the box, to be sent again or
-    // not — a message that left on its own would be one nobody chose to send.
-    const unsent = [...log.querySelectorAll(".sc-pending")].map((n) => n.dataset.text || "").filter(Boolean);
-    if (S.sid && unsent.length) {
-      input.value = [input.value.trim(), ...unsent].filter(Boolean).join("\n\n");
-      setTimeout(autosize, 0);
-    }
+    // What was typed at the session before this one and never taken is not
+    // lost with the log cleared below: the new session reads the old inbox
+    // before it clears it and posts what was unread as its first word (an
+    // `unread` event) — from the server, so it is there on a reloaded tab
+    // and on another device, which a copy kept in this tab would not be.
     S.unanswered = null; S.gone = false;
     S.sid = head.sid; S.events = []; S.nodes.clear(); S.json.clear(); S.oldest = undefined;
     log.innerHTML = ""; log.prepend(earlier); earlier.hidden = true;

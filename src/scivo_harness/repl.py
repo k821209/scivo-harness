@@ -1426,6 +1426,18 @@ class Repl:
             # the banner, and was the one line that said how the session
             # before this one had gone (feedback 515b505746ee).
             self._say(ui.dim(f"  {self.control._claim_note}"))
+        if self.control.unread:
+            # Here as well as on the page, which has them in full with a way
+            # to send each again: the person may be at this terminal.
+            count = len(self.control.unread) + self.control._unread_left_out
+            print(ui.yellow(
+                f"  ! {count} message(s) typed on the page for the session before this one were "
+                + ("never read — it had stopped." if self.control.unread_known
+                   else "there; whether it read them could not be checked.")
+                + " They were not run. They are on the page to send again:"))
+            for item in self.control.unread[-5:]:
+                first = item["text"].strip().splitlines()[0] if item["text"].strip() else "(an image)"
+                print(ui.dim(f"      · {first[:110]}" + ("…" if len(first) > 110 else "")))
         commands = [{"name": name, "help": text} for name, text in LOCAL_COMMANDS.items()]
         commands += [{"name": f"/{skill.name}", "help": skill.summary} for skill in self.skills]
         await self.control.put_commands(commands)

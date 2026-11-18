@@ -70,13 +70,46 @@ const talk = (p) => p.evaluate(() => window.__push("content", "log-s1-0000", { e
   check("and no amount of typing at it makes it 'connected' again", called.every((c) => c === "stale"), called);
   check("the message is still marked undelivered", (await pending(p))[0]?.includes("not delivered"), await pending(p));
 
-  // The session is started again: a new sid, a clean log.
-  await p.evaluate((h) => window.__push("content", "head", h), head({ sid: "s2", rev: 1, events: 0, beat: 77 }));
+  // The session is started again: a new sid, a clean log, and — as its first
+  // word — what the old one never read, handed over by the new session.
+  await p.evaluate((h) => {
+    window.__push("content", "log-s2-0000", { events: [
+      { i: 0, kind: "status", text: "connected — this session is now driven from here as well as the terminal", t: 5 },
+      { i: 1, kind: "unread", known: true, level: "warn", text: "1 message(s) typed here …",
+        items: [{ text: "파일 올렸어. 이어서 해줘", at: Date.parse("2026-11-18T08:19:10Z") }], t: 6 }] });
+    window.__push("content", "head", h);
+  }, head({ sid: "s2", rev: 1, events: 2, beat: 77 }));
   await pass(p, 3000);
   check("the restarted session shows as connected", (await dot(p)) === "live", await sub(p));
-  check("what was typed at the old one is back in the box, not gone",
-    (await p.inputValue("#sc-input")) === "파일 올렸어. 이어서 해줘", await p.inputValue("#sc-input"));
-  check("and is not shown as sent", (await pending(p)).length === 0, await pending(p));
+  check("the old message is not shown as sent or sending", (await pending(p)).length === 0, await pending(p));
+  const card = await p.evaluate(() => document.querySelector(".sc-unread")?.innerText || "");
+  check("what was typed at the old session is on the page, said to be unread and not run",
+    card.includes("파일 올렸어. 이어서 해줘") && card.includes("never read") && card.includes("Nothing below was run"), card);
+  check("nothing is put in the box or sent by itself", (await p.inputValue("#sc-input")) === ""
+    && await p.evaluate(() => Object.keys(window.__db.responses || {}).filter((k) => k.startsWith("inbox-")).length) === 1,
+    await p.inputValue("#sc-input"));
+  await p.click(".sc-unread .sc-btn");
+  check("one press puts it back in the message box", (await p.inputValue("#sc-input")) === "파일 올렸어. 이어서 해줘", await p.inputValue("#sc-input"));
+  await p.keyboard.press("Enter"); await pass(p, 500);
+  const sent = await p.evaluate(() => Object.values(window.__db.responses).filter((d) => d.doc === "inbox" && d.sid === "s2").map((d) => d.text));
+  check("and Enter sends it to the session that is there now", sent.length === 1 && sent[0] === "파일 올렸어. 이어서 해줘", sent);
+  for (const width of [420, 280]) {
+    await p.setViewportSize({ width, height: 800 });
+    const over = await p.evaluate(() => { const el = document.querySelector(".sc-unread"); return el.scrollWidth > el.clientWidth + 1 || el.getBoundingClientRect().right > window.innerWidth + 1; });
+    check(`the card fits at ${width}px`, !over, over);
+  }
+  await p.close();
+}
+// 1b. A page that does not know the kind (an older tab) still shows the words.
+{
+  const p = await open();
+  await p.evaluate((h) => {
+    window.__push("content", "log-s1-0000", { events: [
+      { i: 0, kind: "unread-from-the-future", level: "warn", text: "1 message(s) typed here were never read\n• 이어서 해줘", t: 6 }] });
+    window.__push("content", "head", h);
+  }, head({ events: 1 }));
+  await pass(p, 2000);
+  check("an unknown kind is drawn as its text", (await p.evaluate(() => document.getElementById("sc-log").innerText)).includes("이어서 해줘"), "");
   await p.close();
 }
 // 2. A live session that is merely slow to read: the message keeps its ordinary wording.
