@@ -446,6 +446,22 @@ harness side.
 
 ## When a session stops answering
 
+**First look for a card.** A session that has asked something on the page —
+a finished run to pick up, a tool to approve, a question from the model — is
+waiting for the answer. Until 2026-11-19 it read nothing else while it waited:
+a "run … finished — pick it up?" card went up at 23:19, and nine hours later
+its owner's `/update` and "진행확인", typed into the box under it, got silence.
+The terminal drew no prompt. The card was 78 events up a log of 310, on a page
+that loads the last forty. That was the "frozen session" of two mornings
+running (CRE_genemodel), and the session was never frozen.
+
+Now a bar over the message box says the session is waiting and goes to the
+card, wherever it is in the log; the page loads that card even when it is far
+back. And the pick-it-up card is one way to answer, not the only one: a
+message typed in the box, or a line typed at the terminal (which now has its
+prompt), takes the card down and is acted on.
+
+
 A session that stops leaves a record, and the next session in the project says
 what it was — on the terminal, on the page, and to the model, so "what
 happened?" has an answer. The transcript cannot give one: a session whose own

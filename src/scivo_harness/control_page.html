@@ -143,6 +143,9 @@
   .sc-menu b { font-family: ui-monospace, Menlo, monospace; font-weight: 600; white-space: nowrap; }
   .sc-menu span { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sc-hint { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+  .sc-waiting { display: block; width: 100%; text-align: left; margin: 0 0 8px; padding: 8px 10px; border: 1px solid var(--warn); border-radius: 10px; background: var(--panel); color: var(--warn); font: inherit; font-size: 13px; cursor: pointer; overflow-wrap: anywhere; }
+  .sc-waiting[hidden] { display: none; }
+  .sc-flash { outline: 2px solid var(--warn); outline-offset: 3px; }
 </style>
 
 <div id="sc-root">
@@ -157,6 +160,7 @@
   </div>
   <div class="sc-log" id="sc-log"><div class="sc-empty" id="sc-empty">No session is connected. Run <code>/scivo-control</code> inside <code>scivo</code> on your machine; this page picks it up by itself.</div></div>
   <div class="sc-foot">
+    <button type="button" class="sc-waiting" id="sc-waiting" hidden></button>
     <div class="sc-menu" id="sc-menu" hidden></div>
     <div class="sc-row">
       <textarea class="sc-input" id="sc-input" rows="1" placeholder="Message your session — / for commands · paste or drop an image"></textarea>
@@ -355,7 +359,41 @@
       }
       el.append(box);
     });
+    // A card the session stopped waiting on says why, instead of standing
+    // there with no answer and no buttons.
+    if (ev.state !== "pending" && ev.note) {
+      const why = document.createElement("div"); why.className = "sc-via"; why.textContent = ev.note;
+      el.append(why);
+    }
   }
+
+  // ------------------------------------------------------- waiting on you
+  // A session waiting for an answer to a card does little else, and a card
+  // can be anywhere: this one was 78 events up a log of 310, on a page that
+  // loads the last forty. Its owner typed into the box for two mornings
+  // running and the session, which was waiting for them, looked frozen
+  // (CRE_genemodel, 2026-11-18 and 11-19). So the cards the session says it
+  // is waiting on are loaded wherever they are, and a bar over the message
+  // box says so and goes to the oldest of them.
+  const waitingBar = $("sc-waiting");
+  function showWaiting(head) {
+    const cards = (head && head.state !== "ended" && Array.isArray(head.waiting)) ? head.waiting : [];
+    S.waiting = cards;
+    if (!cards.length) { waitingBar.hidden = true; return; }
+    const what = cards[0].kind === "approval" ? "a tool to be approved" : "a question to be answered";
+    waitingBar.textContent = "The session is waiting for you: " + what
+      + (cards.length > 1 ? " (and " + (cards.length - 1) + " more)" : "")
+      + ". Until then it may not act on what you type — show it ↑";
+    waitingBar.hidden = false;
+  }
+  waitingBar.onclick = () => {
+    const first = (S.waiting || [])[0];
+    const node = first ? S.nodes.get(first.i) : null;
+    if (!node) return;
+    node.scrollIntoView({ block: "center" });
+    node.classList.add("sc-flash");
+    setTimeout(() => node.classList.remove("sc-flash"), 2500);
+  };
 
   // The page keeps a per-question answer draft in memory; when every question
   // has an answer (or was skipped), the whole set is submitted so the harness
@@ -501,26 +539,41 @@
   }
   earlier.onclick = loadEarlier;
 
-  function listenChunk(sid, k) {
+  // `ahead` is false for a chunk fetched only because a card in it is waiting:
+  // that one is read by itself, not as the start of everything since.
+  function listenChunk(sid, k, ahead = true) {
     if (chunkSubs.has(k)) return;
-    const unsubscribe = C.subscribeDoc("content", chunkId(sid, k), (doc) => {
+    // A client may call back BEFORE `subscribeDoc` has returned — one that
+    // answers from what it already holds does. The callback below used the
+    // returned function directly, and on such a client a settled chunk threw
+    // "Cannot access 'unsubscribe' before initialization", which stopped the
+    // head being applied at all (found by tests/browser/waiting.spec.mjs).
+    // So the chunk is marked as listened to first, and "stop" is remembered
+    // until there is something to stop.
+    let unsubscribe = null, stop = false;
+    chunkSubs.set(k, () => { stop = true; if (unsubscribe) unsubscribe(); });
+    unsubscribe = C.subscribeDoc("content", chunkId(sid, k), (doc) => {
       if (S.sid !== sid || !doc) return;
       mergeChunk(doc);
       // Listen one chunk ahead before it exists, so the first event of the
       // next chunk arrives with no round trip through the head.
-      listenChunk(sid, k + 1);
+      if (ahead) listenChunk(sid, k + 1);
       const size = (S.head && S.head.chunk) || 20, events = doc.events || [];
       const settled = events.length >= size && events.every((e) =>
         !(e.kind === "assistant" && !e.done) && !(e.kind === "approval" && e.state === "pending")
         && !(e.kind === "question" && e.state === "pending"));
-      if (settled && chunkSubs.has(k + 2)) { unsubscribe(); chunkSubs.delete(k); }
+      if (settled && chunkSubs.has(k + 2)) {
+        stop = true;
+        if (unsubscribe) unsubscribe();
+        chunkSubs.delete(k);
+      }
     });
-    chunkSubs.set(k, unsubscribe);
+    if (stop) unsubscribe();
   }
 
   async function applyHead(head) {
     S.lastHead = head;
-    if (!head) { setDot("", "waiting for the local session…"); return; }
+    if (!head) { setDot("", "waiting for the local session…"); showWaiting(null); return; }
     if (head.sid !== S.sid) await resetFor(head);
     $("sc-title").textContent = head.project || "scivo-control";
     refreshDot();
@@ -531,6 +584,11 @@
       const start = Math.max(0, to - RECENT_CHUNKS + 1);
       if (S.oldest === undefined || S.oldest > start) S.oldest = start;
       for (let k = Math.min(S.oldest, start); k <= to + 1; k++) listenChunk(head.sid, k);
+      // And wherever a card is waiting, however far back.
+      for (const card of (Array.isArray(head.waiting) ? head.waiting : [])) {
+        if (Number.isInteger(card.i) && card.i >= 0) listenChunk(head.sid, Math.floor(card.i / chunk), false);
+      }
+      showWaiting(head);
       earlier.hidden = !(S.oldest > 0);
       return;
     }

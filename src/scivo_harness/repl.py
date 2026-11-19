@@ -990,7 +990,7 @@ class Repl:
                 f"is above in this conversation. Nobody typed this: pick the work "
                 f"back up, or say what you found and stop.")
 
-    async def _offer_wake(self, prompt: str, plain: str, typed: str) -> tuple[str, str]:
+    async def _offer_wake(self, prompt: str, plain: str, typed: str) -> tuple[str, str] | None:
         """Ask before spending a turn on it — the default.
 
         One prompt does both jobs, so there is no second input channel to get
@@ -1003,13 +1003,17 @@ class Repl:
         what = _wake_summary(notes)
         if self.control is not None and self.control.active:
             # The page renders the question card and collects the answer. Asking
-            # in the terminal while someone is on the page is the mistake
+            # in the terminal ONLY, while someone is on the page, is the mistake
             # `permissions._questions` already records: the page existed and was
             # never called, so the person at the page had to walk to the
-            # terminal. No terminal prompt is drawn here, so anything typed
-            # before goes back to pending.
-            self._typed_ahead = typed
-            reply = await self._offer_on_page(what)
+            # terminal.
+            reply, via = await self._offer_on_page(what, prompt, plain, typed)
+            if via == "box":
+                # Something was typed into the page's message box instead. The
+                # card has been taken down; the box is read the ordinary way,
+                # by the caller, so nothing about how a web message is taken
+                # (several at once, pictures) is done twice.
+                return None
         else:
             print(ui.yellow(f"\n  {what}"), flush=True)
             reply = (await self.line.ask(
@@ -1025,15 +1029,31 @@ class Repl:
     # back is compared against it, so the label and the test cannot drift.
     _PICK_UP = "Pick it up"
     _NOT_NOW = "Not now"
+    # How often the message box is looked at while a card is up. Looked at,
+    # not taken from: the message stays where the ordinary path will find it.
+    _BOX_LOOK = 0.2
 
-    async def _offer_on_page(self, what: str) -> str:
+    async def _offer_on_page(self, what: str, prompt: str = "", plain: str = "",
+                             typed: str = "") -> tuple[str, str]:
         """The same offer, as a question card on the scivo-control page.
 
-        Returns a yes word, free text the owner typed instead, or "" when the
-        card was skipped — the shapes `_offer_wake` already handles.
+        Returns `(reply, via)`. `via` is "card" when the card was answered —
+        the reply is then a yes word, free text typed into the card, or ""
+        when it was skipped; "terminal" when a line was typed at the terminal
+        instead; and "box" (no reply) when something was typed into the page's
+        message box.
+
+        The card is one way to answer, not the only one. It used to be the
+        only one: a run finished at 23:19, the card went up, and the session
+        read nothing else until it was answered. Nine hours later its owner
+        typed `/update` and "진행확인" into the box under it and got silence;
+        the terminal had drawn no prompt at all. The card was 78 events up
+        the log, on a page that loads the last forty (CRE_genemodel,
+        2026-11-18 and again 11-19, feedback 515b505746ee). A person who
+        types instead of pressing a button has answered.
         """
         question = f"{what} — pick it up?"
-        answers = await self.control.ask_question({"questions": [{
+        card = asyncio.create_task(self.control.ask_question({"questions": [{
             "question": question,
             "header": "background task",
             "options": [
@@ -1042,18 +1062,47 @@ class Repl:
                 {"label": self._NOT_NOW,
                  "description": "leave it — say something else when you want to"},
             ],
-        }]})
-        picked = (answers or {}).get(question)
-        if isinstance(picked, list):
-            picked = picked[0] if picked else ""
-        picked = str(picked or "").strip()
-        if picked == self._PICK_UP:
-            return "y"
-        if picked == self._NOT_NOW:
-            return ""
-        # Their own words, typed into the card instead of choosing: that
-        # becomes the turn, exactly as it does in the terminal.
-        return picked
+        }]}, set_aside="set aside — a message was typed instead of an answer. "
+                       "The notice was not handed to the model; ask about it when you want to."))
+
+        async def box_has_something() -> None:
+            while self.control.messages.empty():
+                await asyncio.sleep(self._BOX_LOOK)
+        box = asyncio.create_task(box_has_something())
+        terminal = None
+        if self.line.rich:
+            # Only a prompt that can be withdrawn; a plain stdin read would be
+            # left holding the next line (see `_next_input`).
+            print(ui.yellow(f"\n  {what}") + ui.dim("  — asked on the page; y here picks it up too"),
+                  flush=True)
+            terminal = asyncio.create_task(self.line.ask(prompt, plain, default=typed))
+        waiting = {task for task in (card, box, terminal) if task is not None}
+        done, pending = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+        half_typed = typed if terminal is None else ("" if terminal in done else self.line.pending_text())
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        if card in done:
+            # A line that finished in the same instant is not lost: it is what
+            # the next prompt opens with.
+            self._typed_ahead = terminal.result() if terminal is not None and terminal in done else half_typed
+            answers = card.result()
+            picked = (answers or {}).get(question)
+            if isinstance(picked, list):
+                picked = picked[0] if picked else ""
+            picked = str(picked or "").strip()
+            if picked == self._PICK_UP:
+                return "y", "card"
+            if picked == self._NOT_NOW:
+                return "", "card"
+            # Their own words, typed into the card instead of choosing: that
+            # becomes the turn, exactly as it does in the terminal.
+            return picked, "card"
+        if terminal is not None and terminal in done:
+            return terminal.result().strip(), "terminal"
+        self._typed_ahead = half_typed
+        return "", "box"
 
     def _announce_wake(self, prompt: str) -> str:
         """Show the automatic turn where a typed line would have been.
@@ -1482,7 +1531,16 @@ class Repl:
         print(ui.dim("  Typing here still works. `/scivo-control off` unpublishes the page.\n"))
 
     async def _next_input(self) -> tuple[str, str]:
-        """The next line, from the terminal or the web page, whichever comes first.
+        """The next line, from the terminal or the web page, whichever comes first."""
+        while True:
+            got = await self._input_once()
+            if got is not None:
+                return got
+            # An offer was set aside for something typed in the page's box:
+            # go round and read the box.
+
+    async def _input_once(self) -> tuple[str, str] | None:
+        """One wait for input. `None`: nothing to hand over yet, wait again.
 
         The prompt is plain ASCII on purpose. It used to end in "›", which
         Unicode calls ambiguous-width: prompt_toolkit counts it as one column

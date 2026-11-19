@@ -58,7 +58,9 @@ class FakeLine:
         return answer
 
     def pending_text(self) -> str:
-        return self.typed
+        # What sits in the prompt's buffer: what was typed there, or failing
+        # that the text the prompt was opened with — as the real one holds it.
+        return self.typed or (self.defaults[-1] if self.defaults else "")
 
 
 def _repl(line: FakeLine | None = None, notify: str = "ask", root=None,
@@ -79,7 +81,7 @@ def _repl(line: FakeLine | None = None, notify: str = "ask", root=None,
         said=[],
     )
     stub._say = stub.said.append
-    for name in ("_next_input", "_on_task_note", "_on_task_update", "_consume_wake",
+    for name in ("_next_input", "_input_once", "_on_task_note", "_on_task_update", "_consume_wake",
                  "_wake_line", "_announce_wake", "_offer_wake", "_offer_on_page",
                  "_notify", "_tasks_file", "_read_task_store", "_stored_task_ids",
                  "_write_task_store", "_remember_task", "_forget_task",
@@ -88,7 +90,7 @@ def _repl(line: FakeLine | None = None, notify: str = "ask", root=None,
     stub._own_tasks = set()
     # The card's labels are read back off the answer, so the stub takes them
     # from the class rather than repeating the strings.
-    stub._PICK_UP, stub._NOT_NOW = Repl._PICK_UP, Repl._NOT_NOW
+    stub._PICK_UP, stub._NOT_NOW, stub._BOX_LOOK = Repl._PICK_UP, Repl._NOT_NOW, 0.01
     return stub
 
 
@@ -320,7 +322,7 @@ class FakePage:
     def status(self, text, level="info"):
         self.statuses.append(text)
 
-    async def ask_question(self, payload):
+    async def ask_question(self, payload, set_aside: str = ""):
         self.asked.append(payload)
         question = payload["questions"][0]["question"]
         return None if self.answer is None else {question: self.answer}
@@ -340,7 +342,11 @@ def test_the_offer_is_a_card_on_the_page_not_a_prompt_in_the_terminal():
     line, via = _input(stub)
     assert via == "task" and "b51wc35va" in line
     assert len(stub.control.asked) == 1, "the page was never asked"
-    assert stub.line.asked == 0, "it asked in the terminal while the page was up"
+    # The terminal gets its ordinary prompt beside the card — never the
+    # question on its own, and never nothing: a session with a card up used
+    # to draw no prompt at all, and looked dead from the machine it ran on.
+    assert stub.line.asked == 1 and "pick it up" not in stub.line.prompts[0]
+    assert stub.line.prompts[0].startswith("scivo")
     card = stub.control.asked[0]["questions"][0]
     assert "pick it up?" in card["question"]
     assert [o["label"] for o in card["options"]] == ["Pick it up", "Not now"]
@@ -372,8 +378,9 @@ def test_a_multi_select_answer_is_read_as_its_first_label():
 
 
 def test_the_page_offer_keeps_what_was_typed_in_the_terminal():
-    # No terminal prompt is drawn while the card is up, so text typed during
-    # the last turn must stay pending rather than vanish with the offer.
+    # The prompt drawn beside the card opens with what was typed during the
+    # last turn, and when the card is answered first that text is still
+    # pending rather than gone with the withdrawn prompt.
     stub = _on_page(answer=Repl._NOT_NOW)
     stub._typed_ahead = "그리고 배포까지"
     _note(stub)
@@ -629,3 +636,121 @@ def test_a_real_background_task_still_wakes_us(capsys):
     stub = _repl(FakeLine(answers=["y"]))
     _note(stub, task="bjfz4ehhy")           # the default output file
     assert stub._wake.is_set()
+
+
+# ── a card nobody answers must not take the session's input with it ───────
+# CRE_genemodel, 2026-11-18/19, twice: a run finished at 23:19, the session
+# posted "… — pick it up?" on the page and waited for the card. It waited for
+# nine hours. The owner came back, typed `/update` and "진행확인" into the
+# message box, and nothing happened: the session was reading the card, not the
+# box. The terminal drew no prompt either. From both sides it had frozen; in
+# the transcript every turn had finished. The card was 78 events up the log.
+
+class WaitingPage(FakePage):
+    """A page whose card is never answered — until the test says so."""
+
+    def __init__(self):
+        super().__init__(answer=None)
+        self.withdrawn: list[str] = []
+        self._release: asyncio.Future | None = None
+
+    async def ask_question(self, payload, set_aside: str = ""):
+        self.asked.append(payload)
+        self._release = asyncio.get_running_loop().create_future()
+        try:
+            return await self._release
+        except asyncio.CancelledError:
+            self.withdrawn.append(set_aside)
+            raise
+
+
+def _waiting(line: FakeLine | None = None):
+    stub = _repl(line or FakeLine(answers=[]), notify="ask")     # the terminal says nothing
+    stub.control = WaitingPage()
+    return stub
+
+
+def _input_after(stub, act, wait: float = 0.05):
+    async def go():
+        task = asyncio.create_task(stub._next_input())
+        await asyncio.sleep(wait)
+        assert not task.done(), "it answered before anything was typed"
+        await act()
+        got = await asyncio.wait_for(task, timeout=2.0)
+        # Counted while the loop is still running: closing a loop cancels
+        # whatever is left in it, which would make any card look withdrawn.
+        stub.withdrawn_in_time = len(getattr(stub.control, "withdrawn", []))
+        stub.left_running = [t.get_name() for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        return got
+    return asyncio.run(go())
+
+
+def test_a_message_typed_on_the_page_while_the_card_waits_is_the_answer():
+    stub = _waiting()
+    _note(stub)
+
+    async def typed():
+        await stub.control.messages.put("진행확인")
+    assert _input_after(stub, typed) == ("진행확인", "web")
+    assert len(stub.control.asked) == 1
+    assert len(stub.control.withdrawn) == 1 and "typed" in stub.control.withdrawn[0], \
+        "the card is taken down, and says why, instead of waiting for ever"
+    assert stub.withdrawn_in_time == 1, "taken down when the message arrived, not when the session ended"
+    assert stub.left_running == [], "and nothing is left waiting behind the answer"
+    assert not stub._wake.is_set() and stub._wake_notes == []
+
+
+def test_a_command_typed_on_the_page_while_the_card_waits_runs_as_a_command():
+    stub = _waiting()
+    _note(stub)
+
+    async def typed():
+        await stub.control.messages.put("/update")
+    assert _input_after(stub, typed) == ("/update", "web")
+
+
+def test_a_line_typed_in_the_terminal_while_the_card_waits_is_the_answer_too():
+    # The terminal drew nothing while the card was up: the machine the session
+    # ran on looked as dead as the page did.
+    release = asyncio.Event()
+
+    class Line(FakeLine):
+        async def ask(self, styled, plain, default=""):
+            self.asked += 1
+            self.prompts.append(ANSI.sub("", styled))
+            await release.wait()
+            return "what happened overnight?"
+
+    stub = _waiting(Line(rich=True))
+    _note(stub)
+
+    async def typed():
+        release.set()
+    assert _input_after(stub, typed) == ("what happened overnight?", "terminal")
+    assert stub.line.asked == 1 and "scivo" in stub.line.prompts[0], "a prompt was there to type at"
+    assert len(stub.control.withdrawn) == 1
+
+
+def test_the_card_answered_first_still_works_and_leaves_what_was_typed_for_later():
+    stub = _waiting()
+    _note(stub)
+
+    async def answered():
+        question = stub.control.asked[0]["questions"][0]["question"]
+        stub.control._release.set_result({question: Repl._PICK_UP})
+    line, via = _input_after(stub, answered)
+    assert via == "task" and "b51wc35va" in line
+    assert stub.control.withdrawn == []
+    assert stub.control.messages.empty()
+
+
+def test_a_terminal_that_cannot_be_withdrawn_is_not_asked_and_the_page_still_answers():
+    # A plain stdin read cannot be cancelled; racing one would leave a thread
+    # holding the next line. The page's box still works.
+    stub = _waiting(FakeLine(answers=[], rich=False))
+    _note(stub)
+
+    async def typed():
+        await stub.control.messages.put("ok then")
+    assert _input_after(stub, typed) == ("ok then", "web")
+    assert stub.line.asked == 0

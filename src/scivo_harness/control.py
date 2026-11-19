@@ -583,6 +583,7 @@ class Control:
     # either is written at once: a head still promising a beat every five
     # seconds, from a session that has gone to five minutes, reads as dead.
     _head_beat_every: float = BEAT_EVERY
+    _head_waiting: list = field(default_factory=list)
     _head_hint: bool = False
     # The lease: when it was last renewed, and whether something (a viewer, a
     # newcomer asking "are you there?") wants it renewed now.
@@ -1147,13 +1148,17 @@ class Control:
             self.end_assistant()
             self._append({"kind": "status", "text": text, "level": level})
 
-    async def ask_question(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+    async def ask_question(self, payload: dict[str, Any], set_aside: str = "") -> dict[str, Any] | None:
         """Post the model's questions on the page and wait for the owner's answers.
 
         Returned as `{question_text: label_or_text}` or `{question_text: [labels]}`
         for multi-select, matching what Claude Code's AskUserQuestion tool checks
         against the option set. `None` means the page skipped it — the caller
         tells the model nobody answered.
+
+        A caller that stops waiting (cancels this) takes the card down with
+        it: left as "pending" it would go on asking for an answer nobody is
+        listening for. `set_aside` is what the card then says.
         """
         self.end_assistant()
         rid = secrets.token_hex(6)
@@ -1173,6 +1178,13 @@ class Control:
         self._questions_pending[rid] = _Question(rid, index, future)
         try:
             answers = await future
+        except asyncio.CancelledError:
+            self.events[index]["state"] = "skipped"
+            self.events[index]["answers"] = None
+            if set_aside:
+                self.events[index]["note"] = set_aside
+            self._touch(index)
+            raise
         finally:
             self._questions_pending.pop(rid, None)
         self.events[index]["state"] = "answered" if answers else "skipped"
@@ -1233,6 +1245,7 @@ class Control:
         beat_every = self._beat_every()
         self._head_beat_every = beat_every
         self._head_hint = self._poll_s >= 2
+        self._head_waiting = self._waiting()
         await self._call("put_page_data", pub_id=self.link.pub_id, collection="content",
                          doc_id="head", data={
                              "sid": self.sid, "rev": self._rev, "state": state,
@@ -1267,7 +1280,24 @@ class Control:
                              # so instead of showing "sending…" at a session
                              # that is deliberately asleep.
                              "poll_s": self._poll_s,
+                             # The cards that are waiting for an answer, by
+                             # where they are in the log. The page loads only
+                             # the newest events, and a session waiting on a
+                             # card answers nothing else: one that had scrolled
+                             # out of what the page loads was a session that
+                             # looked frozen and could not be unfrozen from
+                             # the screen in front of its owner.
+                             "waiting": self._head_waiting,
                          })
+
+    def _waiting(self) -> list[dict[str, Any]]:
+        """Every card still waiting for the owner, oldest first."""
+        # `getattr`: a channel that has never posted a card has nothing here.
+        cards = [{"i": card.index, "kind": "approval"}
+                 for card in getattr(self, "_approvals", {}).values() if not card.future.done()]
+        cards += [{"i": card.index, "kind": "question"}
+                  for card in getattr(self, "_questions_pending", {}).values() if not card.future.done()]
+        return sorted(cards, key=lambda card: card["i"])
 
     def _beat_every(self) -> float:
         """How often the head should beat right now.
@@ -1444,6 +1474,10 @@ class Control:
                     # has just arrived and is looking at the dot.
                     or beat_every != self._head_beat_every
                     or (self._poll_s >= 2) != self._head_hint
+                    # A card went up or came down: the page's "waiting for
+                    # your answer" bar reads this, and must not sit there for
+                    # five minutes after the answer.
+                    or self._waiting() != getattr(self, "_head_waiting", [])
                     or self._lease_due):
                 try:
                     await self._write_head(state="live")
